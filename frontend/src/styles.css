@@ -1,0 +1,25 @@
+:root { font-family: Inter, system-ui, sans-serif; color: #111827; }
+body { margin: 0; background: #f3f4f6; }
+.layout { max-width: 1100px; margin: 0 auto; padding: 1rem; }
+header { margin-bottom: 1rem; }
+.brand { font-size: 1.5rem; font-weight: 700; text-decoration: none; color: #111827; }
+.card { background: white; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.inline-form { display: flex; gap: .5rem; align-items: center; }
+.stack { display: flex; flex-direction: column; gap: .5rem; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+input, select, button { padding: .5rem; border-radius: 6px; border: 1px solid #d1d5db; }
+button { cursor: pointer; background: #1f2937; color: white; }
+button:disabled { background: #9ca3af; cursor: not-allowed; }
+.actions-row { display: flex; gap: .5rem; flex-wrap: wrap; margin: .75rem 0; }
+.thumb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .75rem; }
+.thumb, .result-crop { width: 100%; border-radius: 6px; border: 1px solid #d1d5db; background: #fff; }
+.region-canvas { position: relative; width: min(100%, 900px); border: 1px solid #d1d5db; background: #fff; }
+.canvas-image { width: 100%; display: block; user-select: none; }
+.region-rect { position: absolute; border: 2px solid #ef4444; background: rgba(239,68,68,.14); }
+.region-rect.draft { border-style: dashed; }
+.region-delete { position: absolute; top: 0; right: 0; padding: 0 .3rem; font-size: .8rem; border: 0; background: #ef4444; }
+.toast-stack { position: fixed; right: 1rem; top: 1rem; display: flex; flex-direction: column; gap: .5rem; z-index: 20; }
+.toast { padding: .7rem .9rem; border-radius: 6px; color: white; }
+.toast-success { background: #16a34a; }
+.toast-error { background: #dc2626; }
+pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: .5rem; white-space: pre-wrap; }
