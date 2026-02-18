@@ -33,6 +33,12 @@ def create_exam(payload: ExamCreate, session: Session = Depends(get_session)) ->
     return exam
 
 
+@router.get("", response_model=list[ExamRead])
+def list_exams(session: Session = Depends(get_session)) -> list[Exam]:
+    exams = session.exec(select(Exam).order_by(Exam.created_at.desc(), Exam.id.desc())).all()
+    return list(exams)
+
+
 @router.get("/{exam_id}", response_model=ExamDetail)
 def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetail:
     exam = session.get(Exam, exam_id)

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlmodel import Session, delete, select
 
 from app.db import get_session
@@ -233,6 +234,45 @@ def grade_submission(
     session.commit()
     return {"message": "Grading complete", "grader": grader}
 
+
+
+
+@router.get("/{submission_id}/page/{page_number}")
+def get_page_image(submission_id: int, page_number: int, session: Session = Depends(get_session)) -> FileResponse:
+    submission = session.get(Submission, submission_id)
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    page = session.exec(
+        select(SubmissionPage).where(SubmissionPage.submission_id == submission_id, SubmissionPage.page_number == page_number)
+    ).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    image_path = Path(page.image_path)
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Page image not found")
+
+    return FileResponse(image_path)
+
+
+@router.get("/{submission_id}/crop/{question_id}")
+def get_crop_image(submission_id: int, question_id: int, session: Session = Depends(get_session)) -> FileResponse:
+    submission = session.get(Submission, submission_id)
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    crop = session.exec(
+        select(AnswerCrop).where(AnswerCrop.submission_id == submission_id, AnswerCrop.question_id == question_id)
+    ).first()
+    if not crop:
+        raise HTTPException(status_code=404, detail="Crop not found")
+
+    image_path = Path(crop.image_path)
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Crop image not found")
+
+    return FileResponse(image_path)
 
 @router.get("/{submission_id}/results", response_model=SubmissionResults)
 def get_results(submission_id: int, session: Session = Depends(get_session)) -> SubmissionResults:
