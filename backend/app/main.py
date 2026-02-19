@@ -4,7 +4,9 @@ import os
 from uuid import uuid4
 
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from sqlalchemy import text
 from sqlmodel import Session
@@ -33,6 +35,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_PUBLIC_PATHS = {
+    "/health",
+    "/health/deep",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/favicon.ico",
+    "/favicon.png",
+}
+
+
+@app.middleware("http")
+async def enforce_api_key(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    if request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+
+    expected_api_key = os.getenv("BACKEND_API_KEY", "").strip()
+    if expected_api_key:
+        received_api_key = request.headers.get("X-API-Key", "")
+        if received_api_key != expected_api_key:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+    return await call_next(request)
 
 app.include_router(exams_router)
 app.include_router(questions_router)

@@ -20,6 +20,7 @@ const normalizeBaseUrl = (url: string) => {
 };
 
 const API_BASE_URL = normalizeBaseUrl(configuredApiBaseUrl || 'http://localhost:8000');
+const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
 
 class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -30,10 +31,17 @@ class ApiError extends Error {
 
 let openApiPathCache: Set<string> | null = null;
 
+function withApiKeyHeader(options: RequestInit = {}): RequestInit {
+  if (!BACKEND_API_KEY) return options;
+  const headers = new Headers(options.headers || {});
+  headers.set('X-API-Key', BACKEND_API_KEY);
+  return { ...options, headers };
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const response = await fetch(`${API_BASE_URL}${path}`, withApiKeyHeader(options));
   if (!response.ok) {
-    let message = `Request failed (${response.status})`;
+    let message = response.status === 401 ? 'Unauthorized (check API key config)' : `Request failed (${response.status})`;
     try {
       const body = await response.json();
       if (body?.detail) {
@@ -58,7 +66,7 @@ async function getOpenApiPaths(): Promise<Set<string>> {
   }
 
   try {
-    const response = await fetch(`${API_BASE_URL}/openapi.json`);
+    const response = await fetch(`${API_BASE_URL}/openapi.json`, withApiKeyHeader());
     if (!response.ok) {
       openApiPathCache = new Set<string>();
       return openApiPathCache;
