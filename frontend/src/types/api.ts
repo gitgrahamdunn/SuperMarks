@@ -3,6 +3,7 @@ export interface ExamRead {
   name: string;
   created_at: string;
   teacher_style_profile_json: string | null;
+  status?: string;
 }
 
 export interface Region {
