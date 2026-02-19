@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { api, ApiError, getOpenApiPaths } from '../api/client';
 import { useToast } from '../components/ToastProvider';
 import type { QuestionRead } from '../types/api';
+
+interface Criterion {
+  desc: string;
+  marks: number;
+}
 
 interface EditableQuestion {
   id: number;
   label: string;
   max_marks: number;
-  criteria: string[];
+  criteria: Criterion[];
   answer_key: string;
   model_solution: string;
   rubric_json: Record<string, unknown>;
@@ -24,79 +29,109 @@ export function ExamReviewPage() {
   const [saveAvailable, setSaveAvailable] = useState(true);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
-  const location = useLocation();
 
   useEffect(() => {
     const loadQuestions = async () => {
-      if (!examId) return;
+      if (!examId || Number.isNaN(examId)) {
+        showError('Invalid exam id for review page.');
+        setLoading(false);
+        return;
+      }
+
       try {
         setLoading(true);
-        const fetchedQuestions = await api.listQuestions(examId);
+        const [fetchedQuestions, paths] = await Promise.all([
+          api.getExamQuestionsForReview(examId),
+          getOpenApiPaths(),
+        ]);
+
+        const patchAvailable = paths.has('/questions/{question_id}')
+          || paths.has('/exams/{exam_id}/questions/{question_id}')
+          || paths.has('/exams/{exam_id}/wizard/questions/{question_id}');
+        setSaveAvailable(patchAvailable);
+
         const mapped = fetchedQuestions.map(mapQuestion);
         setQuestions(mapped);
-        localStorage.setItem(`exam-review-${examId}-questions`, JSON.stringify(mapped));
+        showSuccess(`Loaded ${mapped.length} questions for review.`);
       } catch (error) {
         console.error('Failed to fetch questions for review', error);
-        const stateData = (location.state as { parseResult?: Record<string, unknown> } | null)?.parseResult;
-        const localData = localStorage.getItem(`exam-review-${examId}-questions`) || localStorage.getItem(`exam-review-${examId}`);
-
-        if (localData || stateData) {
-          const parseSource = stateData || JSON.parse(localData || '{}');
-          const fallbackQuestions = parseQuestionsFromSource(parseSource).map((q, index) => ({
-            ...q,
-            id: -(index + 1),
-            rubric_json: {
-              criteria: q.criteria,
-              answer_key: q.answer_key,
-              model_solution: q.model_solution,
-            },
-          }));
-          setQuestions(fallbackQuestions);
-          showError('Loaded review data from local fallback.');
-        } else {
-          showError(error instanceof Error ? error.message : 'Failed to load review questions');
-        }
+        showError(error instanceof Error ? error.message : 'Failed to load review questions');
       } finally {
         setLoading(false);
       }
     };
 
     void loadQuestions();
-  }, [examId, location.state, showError]);
+  }, [examId, showError, showSuccess]);
 
   const currentQuestion = questions[currentIndex];
 
-  const onFieldChange = (field: keyof EditableQuestion, value: string | number | string[]) => {
-    setQuestions((prev) => prev.map((question, index) => (index === currentIndex
-      ? {
-          ...question,
-          [field]: value,
-          rubric_json: {
-            ...question.rubric_json,
-            criteria: field === 'criteria' ? value : question.criteria,
-            answer_key: field === 'answer_key' ? value : question.answer_key,
-            model_solution: field === 'model_solution' ? value : question.model_solution,
-          },
-        }
-      : question)));
+  const updateCurrentQuestion = (updater: (question: EditableQuestion) => EditableQuestion) => {
+    setQuestions((prev) => prev.map((question, index) => (index === currentIndex ? updater(question) : question)));
+  };
+
+  const onFieldChange = (field: keyof EditableQuestion, value: string | number) => {
+    updateCurrentQuestion((question) => {
+      const next = {
+        ...question,
+        [field]: value,
+      };
+      return {
+        ...next,
+        rubric_json: buildRubric(next),
+      };
+    });
+  };
+
+  const onCriterionChange = (criterionIndex: number, field: keyof Criterion, value: string | number) => {
+    updateCurrentQuestion((question) => {
+      const criteria = question.criteria.map((criterion, index) => (index === criterionIndex
+        ? { ...criterion, [field]: field === 'marks' ? Number(value) : value }
+        : criterion));
+      const next = { ...question, criteria };
+      return {
+        ...next,
+        rubric_json: buildRubric(next),
+      };
+    });
+  };
+
+  const onAddCriterion = () => {
+    updateCurrentQuestion((question) => {
+      const next = { ...question, criteria: [...question.criteria, { desc: '', marks: 0 }] };
+      return {
+        ...next,
+        rubric_json: buildRubric(next),
+      };
+    });
+  };
+
+  const onRemoveCriterion = (criterionIndex: number) => {
+    updateCurrentQuestion((question) => {
+      const next = { ...question, criteria: question.criteria.filter((_, index) => index !== criterionIndex) };
+      return {
+        ...next,
+        rubric_json: buildRubric(next),
+      };
+    });
   };
 
   const onSave = async () => {
-    if (!currentQuestion) return;
+    if (!currentQuestion || !saveAvailable) {
+      if (!saveAvailable) {
+        showError('Save is unavailable because no PATCH endpoint exists.');
+      }
+      return;
+    }
+
     try {
       setSaving(true);
       await api.updateQuestion(examId, currentQuestion.id, {
         label: currentQuestion.label,
         max_marks: currentQuestion.max_marks,
-        rubric_json: {
-          ...currentQuestion.rubric_json,
-          criteria: currentQuestion.criteria,
-          answer_key: currentQuestion.answer_key,
-          model_solution: currentQuestion.model_solution,
-        },
+        rubric_json: buildRubric(currentQuestion),
       });
-      showSuccess('Question saved');
-      setSaveAvailable(true);
+      showSuccess('Question saved successfully.');
     } catch (error) {
       console.error('Failed to save question', error);
       if (error instanceof ApiError && error.status === 404) {
@@ -110,7 +145,12 @@ export function ExamReviewPage() {
     }
   };
 
-  const criteriaText = useMemo(() => currentQuestion?.criteria.join('\n') || '', [currentQuestion]);
+  const canGoBack = currentIndex > 0;
+  const canGoNext = currentIndex < questions.length - 1;
+  const criteriaTotalMarks = useMemo(
+    () => currentQuestion?.criteria.reduce((sum, criterion) => sum + (Number.isFinite(criterion.marks) ? criterion.marks : 0), 0) || 0,
+    [currentQuestion],
+  );
 
   if (loading) {
     return <p>Loading review...</p>;
@@ -126,9 +166,9 @@ export function ExamReviewPage() {
   }
 
   return (
-    <div className="card stack">
+    <div className="card stack review-card">
       <p><Link to={`/exams/${examId}`}>← Back to Exam</Link></p>
-      <h1>Review Parsed Questions</h1>
+      <h1>Create Exam Wizard: Review Questions</h1>
       <p>Question {currentIndex + 1} of {questions.length}</p>
 
       <label className="stack">
@@ -146,14 +186,32 @@ export function ExamReviewPage() {
         />
       </label>
 
-      <label className="stack">
-        Criteria (one per line)
-        <textarea
-          rows={5}
-          value={criteriaText}
-          onChange={(e) => onFieldChange('criteria', e.target.value.split('\n').map((line) => line.trim()).filter(Boolean))}
-        />
-      </label>
+      <div className="stack criteria-block">
+        <div className="criteria-header">
+          <h3>Criteria</h3>
+          <button type="button" onClick={onAddCriterion}>+ Add criterion</button>
+        </div>
+        {currentQuestion.criteria.length === 0 && <p className="subtle-text">No criteria yet.</p>}
+
+        {currentQuestion.criteria.map((criterion, criterionIndex) => (
+          <div key={`${currentQuestion.id}-${criterionIndex}`} className="criteria-row">
+            <input
+              value={criterion.desc}
+              onChange={(e) => onCriterionChange(criterionIndex, 'desc', e.target.value)}
+              placeholder="Description"
+            />
+            <input
+              type="number"
+              min={0}
+              value={criterion.marks}
+              onChange={(e) => onCriterionChange(criterionIndex, 'marks', Number(e.target.value))}
+              placeholder="Marks"
+            />
+            <button type="button" onClick={() => onRemoveCriterion(criterionIndex)}>Remove</button>
+          </div>
+        ))}
+        <p className="subtle-text">Total criterion marks: {criteriaTotalMarks}</p>
+      </div>
 
       <label className="stack">
         Answer key
@@ -165,21 +223,30 @@ export function ExamReviewPage() {
         <textarea rows={5} value={currentQuestion.model_solution} onChange={(e) => onFieldChange('model_solution', e.target.value)} />
       </label>
 
+      {!saveAvailable && <p className="subtle-text">Save is unavailable because the backend does not expose a PATCH endpoint.</p>}
+
       <div className="actions-row">
-        <button type="button" onClick={() => setCurrentIndex((idx) => Math.max(0, idx - 1))} disabled={currentIndex === 0}>Back</button>
-        <button type="button" onClick={() => setCurrentIndex((idx) => Math.min(questions.length - 1, idx + 1))} disabled={currentIndex === questions.length - 1}>Next</button>
+        <button type="button" onClick={() => setCurrentIndex((idx) => Math.max(0, idx - 1))} disabled={!canGoBack}>Back</button>
+        <button type="button" onClick={() => setCurrentIndex((idx) => Math.min(questions.length - 1, idx + 1))} disabled={!canGoNext}>Next</button>
         <button type="button" onClick={onSave} disabled={saving || !saveAvailable}>{saving ? 'Saving...' : 'Save'}</button>
-        {!saveAvailable && <span>Save not available</span>}
         <button type="button" onClick={() => navigate(`/exams/${examId}`)}>Finish Review</button>
       </div>
     </div>
   );
 }
 
+function buildRubric(question: Pick<EditableQuestion, 'criteria' | 'answer_key' | 'model_solution' | 'rubric_json'>) {
+  return {
+    ...question.rubric_json,
+    criteria: question.criteria,
+    answer_key: question.answer_key,
+    model_solution: question.model_solution,
+  };
+}
+
 function mapQuestion(question: QuestionRead): EditableQuestion {
-  const criteria = Array.isArray(question.rubric_json?.criteria)
-    ? question.rubric_json.criteria.map((entry) => String(entry))
-    : [];
+  const criteriaSource = question.rubric_json?.criteria;
+  const criteria = normalizeCriteria(criteriaSource);
 
   return {
     id: question.id,
@@ -192,17 +259,24 @@ function mapQuestion(question: QuestionRead): EditableQuestion {
   };
 }
 
-function parseQuestionsFromSource(source: Record<string, unknown>): Omit<EditableQuestion, 'id' | 'rubric_json'>[] {
-  const maybeQuestions = source.questions;
-  if (!Array.isArray(maybeQuestions)) return [];
-  return maybeQuestions.map((item, index) => {
-    const typed = typeof item === 'object' && item ? item as Record<string, unknown> : {};
-    return {
-      label: String(typed.label || `Q${index + 1}`),
-      max_marks: Number(typed.max_marks || 0),
-      criteria: Array.isArray(typed.criteria) ? typed.criteria.map((entry) => String(entry)) : [],
-      answer_key: String(typed.answer_key || ''),
-      model_solution: String(typed.model_solution || ''),
-    };
+function normalizeCriteria(criteriaSource: unknown): Criterion[] {
+  if (!Array.isArray(criteriaSource)) {
+    return [];
+  }
+
+  return criteriaSource.map((item) => {
+    if (typeof item === 'string') {
+      return { desc: item, marks: 0 };
+    }
+
+    if (typeof item === 'object' && item) {
+      const value = item as Record<string, unknown>;
+      return {
+        desc: String(value.desc || value.description || ''),
+        marks: Number(value.marks || 0),
+      };
+    }
+
+    return { desc: String(item), marks: 0 };
   });
 }
