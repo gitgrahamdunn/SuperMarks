@@ -48,13 +48,10 @@ class Settings(BaseSettings):
     vercel_environment: bool = False
 
     # CORS configuration
-    cors_origins: str = (
-        "http://localhost:3000,"
-        "http://127.0.0.1:3000,"
-        "http://localhost:5173,"
-        "http://127.0.0.1:5173"
+    cors_allow_origins: str = Field(
+        default="*",
+        validation_alias=AliasChoices("SUPERMARKS_CORS_ALLOW_ORIGINS", "CORS_ALLOW_ORIGINS"),
     )
-    cors_allow_origin_regex: str = r"https://.*\.vercel\.app"
 
     @model_validator(mode="after")
     def _set_sqlite_path(self) -> "Settings":
@@ -72,7 +69,9 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        if self.cors_allow_origins.strip() == "*":
+            return ["*"]
+        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
 
 
 settings = Settings()
