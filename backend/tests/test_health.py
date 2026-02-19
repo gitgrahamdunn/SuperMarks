@@ -7,8 +7,12 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 
-def test_health_returns_openai_configuration_status(monkeypatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+@pytest.mark.parametrize(
+    ("api_key", "expected_openai_configured"),
+    [("test-key", True), ("   ", False)],
+)
+def test_health_returns_openai_configuration_status(monkeypatch, api_key: str, expected_openai_configured: bool) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", api_key)
 
     with TestClient(app) as client:
         response = client.get("/health")
@@ -17,4 +21,4 @@ def test_health_returns_openai_configuration_status(monkeypatch) -> None:
 
     payload = response.json()
     assert payload["ok"] is True
-    assert "openai_configured" in payload
+    assert payload["openai_configured"] is expected_openai_configured
