@@ -14,7 +14,12 @@ if (import.meta.env.PROD && !configuredApiBaseUrl) {
   throw new Error('VITE_API_BASE_URL is required in production.');
 }
 
-const API_BASE_URL = configuredApiBaseUrl || 'http://localhost:8000';
+const normalizeBaseUrl = (url: string) => {
+  const trimmed = url.replace(/\/$/, '');
+  return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
+};
+
+const API_BASE_URL = normalizeBaseUrl(configuredApiBaseUrl || 'http://localhost:8000');
 
 class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -22,6 +27,8 @@ class ApiError extends Error {
     this.name = 'ApiError';
   }
 }
+
+let openApiPathCache: Set<string> | null = null;
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, options);
@@ -43,6 +50,26 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     return (await response.json()) as T;
   }
   return {} as T;
+}
+
+async function getOpenApiPaths(): Promise<Set<string>> {
+  if (openApiPathCache) {
+    return openApiPathCache;
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/openapi.json`);
+    if (!response.ok) {
+      openApiPathCache = new Set<string>();
+      return openApiPathCache;
+    }
+    const data = await response.json() as { paths?: Record<string, unknown> };
+    openApiPathCache = new Set(Object.keys(data.paths || {}));
+  } catch {
+    openApiPathCache = new Set<string>();
+  }
+
+  return openApiPathCache;
 }
 
 export const api = {
@@ -68,6 +95,24 @@ export const api = {
       body: formData,
     });
   },
+  uploadExamKey: async (examId: number, files: File[]) => {
+    const paths = await getOpenApiPaths();
+    const candidates = ['/exams/{exam_id}/key', '/exams/{exam_id}/wizard/key', '/exams/{exam_id}/answer-key'];
+    const selectedPath = candidates.find((path) => paths.has(path));
+
+    if (!selectedPath) {
+      throw new ApiError(404, 'No exam-key upload endpoint available.');
+    }
+
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+
+    return request<Record<string, unknown>>(selectedPath.replace('{exam_id}', String(examId)), {
+      method: 'POST',
+      body: formData,
+    });
+  },
+  parseExamKey: (examId: number) => request<Record<string, unknown>>(`/exams/${examId}/key/parse`, { method: 'POST' }),
   getSubmission: (submissionId: number) => request<SubmissionRead>(`/submissions/${submissionId}`),
   buildPages: (submissionId: number) => request<SubmissionPage[]>(`/submissions/${submissionId}/build-pages`, { method: 'POST' }),
   buildCrops: (submissionId: number) => request<{ message: string }>(`/submissions/${submissionId}/build-crops`, { method: 'POST' }),
@@ -81,6 +126,26 @@ export const api = {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(regions),
   }),
+  updateQuestion: async (examId: number, questionId: number, payload: { label: string; max_marks: number; rubric_json: Record<string, unknown> }) => {
+    const paths = await getOpenApiPaths();
+    if (paths.has('/questions/{question_id}')) {
+      return request<QuestionRead>(`/questions/${questionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    if (paths.has('/exams/{exam_id}/questions/{question_id}')) {
+      return request<QuestionRead>(`/exams/${examId}/questions/${questionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    throw new ApiError(404, 'Save endpoint is not available.');
+  },
 };
 
-export { ApiError };
+export { API_BASE_URL, ApiError, getOpenApiPaths };

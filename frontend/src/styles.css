@@ -7,7 +7,7 @@ header { margin-bottom: 1rem; }
 .inline-form { display: flex; gap: .5rem; align-items: center; }
 .stack { display: flex; flex-direction: column; gap: .5rem; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
-input, select, button { padding: .5rem; border-radius: 6px; border: 1px solid #d1d5db; }
+input, select, button, textarea { padding: .5rem; border-radius: 6px; border: 1px solid #d1d5db; font: inherit; }
 button { cursor: pointer; background: #1f2937; color: white; }
 button:disabled { background: #9ca3af; cursor: not-allowed; }
 .actions-row { display: flex; gap: .5rem; flex-wrap: wrap; margin: .75rem 0; }
@@ -23,3 +23,6 @@ button:disabled { background: #9ca3af; cursor: not-allowed; }
 .toast-success { background: #16a34a; }
 .toast-error { background: #dc2626; }
 pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: .5rem; white-space: pre-wrap; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(17, 24, 39, 0.45); display: grid; place-items: center; z-index: 15; }
+.modal { width: min(560px, calc(100vw - 2rem)); }
