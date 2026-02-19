@@ -1,103 +1,82 @@
-# SuperMarks MVP Backend
+# SuperMarks
 
-FastAPI backend for an AI-assisted math test marking pipeline (Phase A: single teacher, single machine).
+SuperMarks is split into two deployable applications:
 
-## Features
-- FastAPI + SQLModel + SQLite
-- File-backed artifact storage under `./data/`
-- End-to-end pipeline:
-  1. Exam creation
-  2. Submission upload (PDF or images)
-  3. Build normalized pages
-  4. Configure questions and answer regions
-  5. Build crops per question
-  6. OCR transcription (stub + optional Pix2Text)
-  7. Rule-based grading (plus LLM stub)
-- Idempotent rebuild behavior for pages/crops/transcriptions/grades
+- **Backend API** (FastAPI + SQLModel) in the repository root.
+- **Frontend UI** (Vite + React + TypeScript) in `frontend/`.
 
-## Project Structure
+This structure supports separate Vercel deployments for faster iteration.
+
+## Repository Structure
+
 ```text
-app/
-  main.py
-  db.py
-  models.py
-  schemas.py
-  storage.py
-  settings.py
-  routers/
-    exams.py
-    submissions.py
-    questions.py
-  pipeline/
-    pages.py
-    crops.py
-    transcribe.py
-    grade.py
-  ocr/
-    base.py
-    stub.py
-    pix2text_provider.py
-  grading/
-    base.py
-    rule_based.py
-    llm.py
-tests/
-PLANS.md
-pyproject.toml
+.
+├── api/
+│   └── index.py              # Vercel Python entrypoint for backend
+├── app/                      # Backend application package
+├── frontend/                 # Frontend application (deploy separately)
+├── tests/
+├── pyproject.toml
+├── requirements.txt          # Vercel backend install manifest
+└── vercel.json               # Vercel backend routing/runtime config
 ```
 
-## Run Locally
-### 1) Install
+## Local Development
+
+### Backend
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-```
-
-### 2) Start API
-```bash
 uvicorn app.main:app --reload
 ```
 
-### 3) Run tests
+### Frontend
+
+```bash
+cd frontend
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Set `VITE_API_BASE_URL` in `frontend/.env` as needed (for local backend, keep `http://localhost:8000`).
+
+## Vercel Deployment
+
+### 1) Backend deploy (from repository root)
+
+Vercel uses:
+- `vercel.json` at repo root
+- `api/index.py` as the serverless entrypoint
+- `requirements.txt` for Python dependencies
+
+Recommended backend environment variables in Vercel:
+
+- `SUPERMARKS_VERCEL_ENVIRONMENT=true`
+- `SUPERMARKS_CORS_ORIGINS=https://<your-frontend-domain>`
+- (optional) `SUPERMARKS_CORS_ALLOW_ORIGIN_REGEX=https://.*\.vercel\.app`
+
+> Note: In Vercel serverless runtime, persistent filesystem writes are not available. With `SUPERMARKS_VERCEL_ENVIRONMENT=true`, runtime files are redirected to `/tmp`.
+
+### 2) Frontend deploy (from `frontend/`)
+
+Vercel uses:
+- `frontend/vercel.json` for SPA rewrites (fixes 404 refresh on client-side routes)
+
+Recommended frontend environment variable in Vercel:
+
+- `VITE_API_BASE_URL=https://<your-backend-domain>`
+
+## Common Deployment Error Fixes Included
+
+- ✅ **Read-only filesystem** on Vercel backend handled by `/tmp` runtime paths.
+- ✅ **React Router 404 on refresh** fixed with frontend rewrite config.
+- ✅ **CORS wildcard + credentials mismatch** resolved via explicit origin config + regex.
+
+## Tests
+
 ```bash
 pytest
 ```
-
-## Configuration
-Environment variables (`SUPERMARKS_` prefix):
-- `SUPERMARKS_SQLITE_PATH` (default: `./data/supermarks.db`)
-- `SUPERMARKS_DATA_DIR` (default: `./data`)
-- `SUPERMARKS_MAX_UPLOAD_MB` (default: `25`)
-
-## API Pipeline Sequence
-1. `POST /exams`
-2. `POST /exams/{exam_id}/submissions` (multipart)
-3. `POST /submissions/{submission_id}/build-pages`
-4. `POST /exams/{exam_id}/questions`
-5. `POST /questions/{question_id}/regions`
-6. `POST /submissions/{submission_id}/build-crops`
-7. `POST /submissions/{submission_id}/transcribe?provider=stub`
-8. `POST /submissions/{submission_id}/grade?grader=rule_based`
-9. `GET /submissions/{submission_id}/results`
-
-## Optional integrations
-### PDF support
-`POST /build-pages` uses an adapter around `pdf2image`.
-
-To enable PDF conversion:
-- Install `pdf2image`
-- Install Poppler system binaries
-
-If unavailable, API returns a clear 400 error for PDF submissions.
-
-### Pix2Text OCR
-`provider=pix2text` is optional. Install with:
-```bash
-pip install pix2text
-```
-If missing, API returns a clear 400 error.
-
-## Notes
-- `llm` grader is intentionally a stub (`NotImplementedError`) and does not call external APIs.
-- CORS is permissive for localhost dev.
