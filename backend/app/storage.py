@@ -11,9 +11,10 @@ from app.settings import settings
 
 
 def ensure_dir(path: Path) -> Path:
-    """Create directory if needed and return it."""
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """Create a directory tree if needed and return the path."""
+    directory = Path(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def reset_dir(path: Path) -> Path:
