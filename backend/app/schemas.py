@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.models import SubmissionStatus
+from app.models import ExamStatus, SubmissionStatus
 
 
 class ExamCreate(BaseModel):
@@ -19,6 +19,7 @@ class ExamRead(BaseModel):
     name: str
     created_at: datetime
     teacher_style_profile_json: str | None
+    status: ExamStatus
 
 
 class SubmissionFileRead(BaseModel):
