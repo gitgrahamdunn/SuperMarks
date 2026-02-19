@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlmodel import Session, select
 
+from app.ai.openai_vision import AnswerKeyParser, ParseResult, get_answer_key_parser
 from app.db import get_session
-from app.models import Exam, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
+from app.models import Exam, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
 from app.schemas import ExamCreate, ExamDetail, ExamRead, QuestionCreate, QuestionRead, RegionRead, SubmissionFileRead, SubmissionRead
 from app.settings import settings
 from app.storage import relative_to_data, save_upload_file, upload_dir
@@ -22,6 +24,56 @@ _ALLOWED_TYPES = {
     "image/jpeg": "image",
     "image/jpg": "image",
 }
+
+
+def _list_key_page_images(exam_id: int) -> list[Path]:
+    candidates = [
+        settings.data_path / "key_pages" / str(exam_id),
+        settings.data_path / "pages" / str(exam_id) / "key",
+        settings.data_path / "uploads" / str(exam_id) / "key",
+    ]
+    images: list[Path] = []
+    for base in candidates:
+        if not base.exists() or not base.is_dir():
+            continue
+        for path in sorted(base.iterdir()):
+            if path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+                images.append(path)
+    return images
+
+
+def _validate_parse_payload(payload: dict[str, Any]) -> tuple[float, list[dict[str, Any]]]:
+    confidence = payload.get("confidence_score")
+    questions = payload.get("questions")
+    if not isinstance(confidence, (int, float)):
+        raise ValueError("confidence_score missing or invalid")
+    if confidence < 0 or confidence > 1:
+        raise ValueError("confidence_score out of range")
+    if not isinstance(questions, list) or not questions:
+        raise ValueError("questions missing or empty")
+
+    for question in questions:
+        if not isinstance(question, dict):
+            raise ValueError("question item must be object")
+        if not question.get("label"):
+            raise ValueError("question label missing")
+        if not isinstance(question.get("max_marks"), (int, float)):
+            raise ValueError("question max_marks missing")
+    return float(confidence), questions
+
+
+def _parse_with_fallback(parser: AnswerKeyParser, image_paths: list[Path]) -> ParseResult:
+    try:
+        first = parser.parse(image_paths, model="gpt-5-nano")
+    except Exception:
+        return parser.parse(image_paths, model="gpt-5-mini")
+    try:
+        confidence, _ = _validate_parse_payload(first.payload)
+        if confidence >= 0.75:
+            return first
+    except (ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return parser.parse(image_paths, model="gpt-5-mini")
 
 
 @router.post("", response_model=ExamRead, status_code=status.HTTP_201_CREATED)
@@ -78,7 +130,13 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
         )
 
     return ExamDetail(
-        exam=ExamRead(id=exam.id, name=exam.name, created_at=exam.created_at, teacher_style_profile_json=exam.teacher_style_profile_json),
+        exam=ExamRead(
+            id=exam.id,
+            name=exam.name,
+            created_at=exam.created_at,
+            teacher_style_profile_json=exam.teacher_style_profile_json,
+            status=exam.status,
+        ),
         submissions=submission_reads,
         questions=question_reads,
     )
@@ -201,3 +259,63 @@ def list_questions(exam_id: int, session: Session = Depends(get_session)) -> lis
             )
         )
     return result
+
+
+@router.post("/{exam_id}/key/parse")
+def parse_answer_key(
+    exam_id: int,
+    session: Session = Depends(get_session),
+    parser: AnswerKeyParser = Depends(get_answer_key_parser),
+) -> dict[str, object]:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    image_paths = _list_key_page_images(exam_id)
+    if not image_paths:
+        raise HTTPException(status_code=400, detail="No key page images found")
+
+    result = _parse_with_fallback(parser, image_paths)
+    try:
+        confidence, questions_payload = _validate_parse_payload(result.payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid parser response: {exc}") from exc
+
+    existing = {q.label: q for q in session.exec(select(Question).where(Question.exam_id == exam_id)).all()}
+    for parsed in questions_payload:
+        label = str(parsed["label"])
+        max_marks = int(parsed["max_marks"])
+        rubric = {
+            "total_marks": max_marks,
+            "criteria": parsed.get("criteria", []),
+            "answer_key": parsed.get("answer_key", ""),
+            "model_solution": parsed.get("model_solution", ""),
+            "question_text": parsed.get("question_text", ""),
+            "notes": parsed.get("notes", ""),
+        }
+
+        question = existing.get(label)
+        if question:
+            question.max_marks = max_marks
+            question.rubric_json = json.dumps(rubric)
+            session.add(question)
+        else:
+            session.add(
+                Question(
+                    exam_id=exam_id,
+                    label=label,
+                    max_marks=max_marks,
+                    rubric_json=json.dumps(rubric),
+                )
+            )
+
+    exam.status = ExamStatus.REVIEWING
+    session.add(exam)
+    session.commit()
+
+    return {
+        "ok": True,
+        "model_used": result.model,
+        "confidence_score": confidence,
+        "questions_count": len(questions_payload),
+    }

@@ -22,11 +22,17 @@ class SubmissionStatus(str, Enum):
     GRADED = "GRADED"
 
 
+class ExamStatus(str, Enum):
+    DRAFT = "DRAFT"
+    REVIEWING = "REVIEWING"
+
+
 class Exam(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     created_at: datetime = Field(default_factory=utcnow)
     teacher_style_profile_json: Optional[str] = None
+    status: ExamStatus = Field(default=ExamStatus.DRAFT)
 
 
 class Submission(SQLModel, table=True):
