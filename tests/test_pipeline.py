@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("httpx")
+
 from io import BytesIO
 from pathlib import Path
 
