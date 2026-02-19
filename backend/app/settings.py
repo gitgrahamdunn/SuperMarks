@@ -4,6 +4,10 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+BASE_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_DATA_DIR = BASE_DIR / "data"
+DEFAULT_SQLITE_PATH = DEFAULT_DATA_DIR / "supermarks.db"
+
 
 class Settings(BaseSettings):
     """Runtime configuration for the SuperMarks backend."""
@@ -11,8 +15,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SUPERMARKS_", extra="ignore")
 
     app_name: str = "SuperMarks API"
-    sqlite_path: str = "./data/supermarks.db"
-    data_dir: str = "./data"
+    sqlite_path: str = str(DEFAULT_SQLITE_PATH)
+    data_dir: str = str(DEFAULT_DATA_DIR)
     max_upload_mb: int = 25
 
     # Deployment toggles

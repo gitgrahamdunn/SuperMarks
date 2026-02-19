@@ -8,7 +8,13 @@ import type {
   SubmissionResults,
 } from '../types/api';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
+
+if (import.meta.env.PROD && !configuredApiBaseUrl) {
+  throw new Error('VITE_API_BASE_URL is required in production.');
+}
+
+const API_BASE_URL = configuredApiBaseUrl || 'http://localhost:8000';
 
 class ApiError extends Error {
   constructor(public status: number, message: string) {
