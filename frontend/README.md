@@ -1,35 +1,28 @@
 # SuperMarks Frontend
 
-Vite + React + TypeScript frontend for SuperMarks.
+React + Vite frontend for SuperMarks, deployed as a dedicated Vercel project.
 
-## Setup
-
-1. Install dependencies:
+## Local development
 
 ```bash
+cd frontend
 npm install
-```
-
-2. Configure backend URL:
-
-```bash
-cp .env.example .env
-```
-
-Set `VITE_API_BASE_URL` in `.env` (default in example: `http://localhost:8000`).
-
-3. Start dev server:
-
-```bash
 npm run dev
 ```
 
-Frontend default URL: `http://localhost:5173`.
+The frontend uses `VITE_API_BASE_URL` when set. For local development it defaults to `http://localhost:8000`.
 
-## Deploy to Vercel (separate project)
+## Production configuration
 
-- Set project root directory to `frontend/`.
-- Keep `frontend/vercel.json` checked in for SPA rewrites.
-- Set `VITE_API_BASE_URL` to your deployed backend URL.
+Set the following in Vercel (or provide it in `.env.production`):
 
-This prevents route-refresh 404s and ensures API calls target the backend deployment.
+```env
+VITE_API_BASE_URL=https://REPLACE_WITH_BACKEND_PROJECT_URL
+```
+
+## Vercel deployment
+
+- Root Directory: `frontend`
+- Build Command: `npm run build`
+- Output Directory: `dist`
+- SPA fallback routing is configured by `frontend/vercel.json`

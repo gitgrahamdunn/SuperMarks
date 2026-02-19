@@ -1,33 +1,40 @@
-# SuperMarks
+# SuperMarks Monorepo
 
-SuperMarks is a single deployable application on Vercel:
+SuperMarks is organized as a two-project monorepo for Vercel:
 
-- **Frontend UI** (Vite + React + TypeScript) is built as static assets from `frontend/`.
-- **Backend API** (FastAPI + SQLModel) is served by a Python serverless function from `api/index.py` under `/api`.
+- `backend/`: FastAPI + SQLModel API deployed as a Python serverless project.
+- `frontend/`: Vite + React SPA deployed as a static frontend project.
 
-## Repository Structure
+## Repository layout
 
 ```text
 .
-├── api/
-│   └── index.py              # Vercel Python entrypoint for backend
-├── app/                      # Backend application package
-├── frontend/                 # Frontend application (static build output)
-├── tests/
-├── pyproject.toml
-├── requirements.txt          # Vercel backend install manifest
-└── vercel.json               # Vercel single deploy config (frontend + backend)
+├── backend/
+│   ├── app/
+│   ├── api/index.py
+│   ├── pyproject.toml
+│   ├── vercel.json
+│   └── README.md
+├── frontend/
+│   ├── src/
+│   ├── .env.production
+│   ├── vercel.json
+│   └── README.md
+├── .gitignore
+└── README.md
 ```
 
-## Local Development
+## Local development
 
 ### Backend
 
 ```bash
+cd backend
 python -m venv .venv
 source .venv/bin/activate
+pip install -U pip
 pip install -e .[dev]
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
 ### Frontend
@@ -35,38 +42,26 @@ uvicorn app.main:app --reload
 ```bash
 cd frontend
 npm install
-cp .env.example .env
 npm run dev
 ```
 
-Set `VITE_API_BASE_URL` in `frontend/.env` as needed (for local backend, keep `http://localhost:8000`).
+The frontend API client defaults to `http://localhost:8000` in development.
 
-## Single Vercel Deploy
+## Vercel deployment (two projects)
 
-Configure one Vercel project with the **Project Root** set to this repository root and **no Root Directory override**.
+### 1) Backend project
 
-- Build command is handled by `vercel.json`: `cd frontend && npm ci && npm run build`
-- Output directory is handled by `vercel.json`: `frontend/dist`
-- Frontend is served at `/`
-- Backend API is available at `/api/*`
-- Backend docs are available at `/api/docs`
+- Create a Vercel project with **Root Directory** = `backend`
+- Uses `backend/api/index.py` as Python function entrypoint
+- `backend/vercel.json` rewrites all backend paths to the function
 
-Recommended backend environment variables in Vercel:
+### 2) Frontend project
 
-- `SUPERMARKS_VERCEL_ENVIRONMENT=true`
-- `SUPERMARKS_CORS_ORIGINS=https://<your-domain>`
-- (optional) `SUPERMARKS_CORS_ALLOW_ORIGIN_REGEX=https://.*\.vercel\.app`
+- Create a separate Vercel project with **Root Directory** = `frontend`
+- Build command: `npm run build`
+- Output directory: `dist`
+- SPA routing fallback is handled in `frontend/vercel.json`
 
-> Note: In Vercel serverless runtime, persistent filesystem writes are not available. With `SUPERMARKS_VERCEL_ENVIRONMENT=true`, runtime files are redirected to `/tmp`.
+Set frontend environment variable in Vercel:
 
-## Common Deployment Error Fixes Included
-
-- ✅ **Read-only filesystem** on Vercel backend handled by `/tmp` runtime paths.
-- ✅ **React Router 404 on refresh** fixed with frontend rewrite config.
-- ✅ **CORS wildcard + credentials mismatch** resolved via explicit origin config + regex.
-
-## Tests
-
-```bash
-pytest
-```
+- `VITE_API_BASE_URL=https://<your-backend-project-url>`

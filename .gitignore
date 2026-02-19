@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Backend runtime data
+backend/data/
+!backend/data/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# OS/editor
+.DS_Store
+.vscode/
