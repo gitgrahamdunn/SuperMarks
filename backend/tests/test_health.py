@@ -5,6 +5,7 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.settings import settings
 
 
 @pytest.mark.parametrize(
@@ -22,3 +23,18 @@ def test_health_returns_openai_configuration_status(monkeypatch, api_key: str, e
     payload = response.json()
     assert payload["ok"] is True
     assert payload["openai_configured"] is expected_openai_configured
+
+
+def test_health_deep_returns_storage_and_db_diagnostics(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    with TestClient(app) as client:
+        response = client.get("/health/deep")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["openai_configured"] is True
+    assert payload["storage_writable"] is True
+    assert payload["db_ok"] is True
+    assert payload["data_dir"] == str(settings.data_path)
