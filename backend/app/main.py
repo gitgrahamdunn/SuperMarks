@@ -17,18 +17,18 @@ from app.routers.submissions import router as submissions_router
 from app.settings import settings
 from app.storage import ensure_dir
 
-app = FastAPI(title=settings.app_name, version="0.1.0")
 
-configured_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
-allow_origins = (
-    [origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()]
-    if configured_cors_origins
-    else ["*"]
-)
+def _resolve_cors_origins() -> list[str]:
+    configured_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+    if not configured_cors_origins:
+        return ["*"]
+    return [origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()]
+
+app = FastAPI(title=settings.app_name, version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins,
+    allow_origins=_resolve_cors_origins(),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -83,7 +83,7 @@ def deep_health() -> dict[str, bool | str]:
     }
 
 
-@app.options("/{full_path:path}", include_in_schema=False)
-async def preflight(full_path: str) -> Response:
-    del full_path
+@app.options("/{path:path}", include_in_schema=False)
+async def preflight(path: str) -> Response:
+    del path
     return Response(status_code=204)
