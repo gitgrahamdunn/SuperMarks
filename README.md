@@ -41,14 +41,15 @@ npm run dev
 
 Set `VITE_API_BASE_URL` in `frontend/.env` as needed (for local backend, keep `http://localhost:8000`).
 
-## Single Vercel Deployment
+## Single Vercel Deploy
 
 Configure one Vercel project with the **Project Root** set to this repository root and **no Root Directory override**.
 
 - Build command is handled by `vercel.json`: `cd frontend && npm ci && npm run build`
 - Output directory is handled by `vercel.json`: `frontend/dist`
-- Backend is available at `/api`
-- API docs are available at `/api/docs`
+- Frontend is served at `/`
+- Backend API is available at `/api/*`
+- Backend docs are available at `/api/docs`
 
 Recommended backend environment variables in Vercel:
 
