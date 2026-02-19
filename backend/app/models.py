@@ -71,6 +71,14 @@ class Question(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class ExamKeyFile(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    exam_id: int = Field(foreign_key="exam.id", index=True)
+    original_filename: str
+    stored_path: str
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class QuestionRegion(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     question_id: int = Field(foreign_key="question.id", index=True)
