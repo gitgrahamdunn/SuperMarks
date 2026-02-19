@@ -104,3 +104,7 @@ class ExamDetail(BaseModel):
     exam: ExamRead
     submissions: list[SubmissionRead]
     questions: list[QuestionRead]
+
+
+class ExamKeyUploadResponse(BaseModel):
+    uploaded: int

@@ -11,10 +11,10 @@ from sqlmodel import Session, select
 
 from app.ai.openai_vision import AnswerKeyParser, ParseResult, get_answer_key_parser
 from app.db import get_session
-from app.models import Exam, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
-from app.schemas import ExamCreate, ExamDetail, ExamRead, QuestionCreate, QuestionRead, RegionRead, SubmissionFileRead, SubmissionRead
+from app.models import Exam, ExamKeyFile, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
+from app.schemas import ExamCreate, ExamDetail, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, RegionRead, SubmissionFileRead, SubmissionRead
 from app.settings import settings
-from app.storage import relative_to_data, save_upload_file, upload_dir
+from app.storage import ensure_dir, relative_to_data, save_upload_file, upload_dir
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -74,6 +74,10 @@ def _parse_with_fallback(parser: AnswerKeyParser, image_paths: list[Path]) -> Pa
     except (ValueError, TypeError, json.JSONDecodeError):
         pass
     return parser.parse(image_paths, model="gpt-5-mini")
+
+
+def _exam_key_dir(exam_id: int) -> Path:
+    return ensure_dir(settings.data_path / "exams" / str(exam_id) / "key")
 
 
 @router.post("", response_model=ExamRead, status_code=status.HTTP_201_CREATED)
@@ -204,6 +208,44 @@ def create_submission(
         files=created_files,
         pages=[],
     )
+
+
+
+@router.post("/{exam_id}/key/upload", response_model=ExamKeyUploadResponse)
+def upload_exam_key_files(
+    exam_id: int,
+    files: list[UploadFile] = File(...),
+    session: Session = Depends(get_session),
+) -> ExamKeyUploadResponse:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    kinds = [_ALLOWED_TYPES.get(f.content_type or "") for f in files]
+    if any(kind is None for kind in kinds):
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use pdf/png/jpg/jpeg")
+
+    key_dir = _exam_key_dir(exam_id)
+    uploaded = 0
+
+    for idx, upload in enumerate(files, start=1):
+        filename = Path(upload.filename or f"key-{idx}").name
+        destination = key_dir / filename
+        save_upload_file(upload, destination)
+
+        row = ExamKeyFile(
+            exam_id=exam_id,
+            original_filename=filename,
+            stored_path=str(destination),
+        )
+        session.add(row)
+        uploaded += 1
+
+    session.commit()
+    return ExamKeyUploadResponse(uploaded=uploaded)
 
 
 @router.post("/{exam_id}/questions", response_model=QuestionRead, status_code=status.HTTP_201_CREATED)
