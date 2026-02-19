@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { api, ApiError } from '../api/client';
+import { api } from '../api/client';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
 
@@ -12,7 +12,7 @@ export function ExamsPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalName, setModalName] = useState('');
   const [modalFiles, setModalFiles] = useState<File[]>([]);
-  const [creatingWithKey, setCreatingWithKey] = useState(false);
+  const [createStep, setCreateStep] = useState<'idle' | 'creating' | 'uploading' | 'parsing'>('idle');
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
 
@@ -49,73 +49,98 @@ export function ExamsPage() {
     }
   };
 
+  const closeModal = () => {
+    if (createStep !== 'idle') {
+      return;
+    }
+    setIsModalOpen(false);
+    setModalName('');
+    setModalFiles([]);
+  };
+
   const onCreateAndUpload = async (event: FormEvent) => {
     event.preventDefault();
     if (!modalName.trim() || modalFiles.length === 0) {
-      showError('Exam name and key file are required');
+      showError('Exam name and at least one key file are required.');
       return;
     }
 
     try {
-      setCreatingWithKey(true);
+      setCreateStep('creating');
       const exam = await api.createExam(modalName.trim());
+      showSuccess('Exam created. Uploading key files...');
 
-      try {
-        await api.uploadExamKey(exam.id, modalFiles);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 404) {
-          showError('Key upload endpoint not available. Attempting parse anyway.');
-        } else {
-          throw error;
-        }
-      }
+      setCreateStep('uploading');
+      await api.uploadExamKey(exam.id, modalFiles);
+      showSuccess('Key uploaded. Parsing key...');
 
-      const parseResult = await api.parseExamKey(exam.id);
-      localStorage.setItem(`exam-review-${exam.id}`, JSON.stringify(parseResult));
-      showSuccess('Exam key parsed. Review questions next.');
+      setCreateStep('parsing');
+      await api.parseExamKey(exam.id);
+      showSuccess('Key parsed successfully. Opening review wizard...');
+
       setModalName('');
       setModalFiles([]);
       setIsModalOpen(false);
       await loadExams();
-      navigate(`/exams/${exam.id}/review`, { state: { parseResult } });
+      navigate(`/exams/${exam.id}/review`);
     } catch (error) {
       console.error('Failed create+upload+parse flow', error);
       showError(error instanceof Error ? error.message : 'Failed to create exam with key upload');
     } finally {
-      setCreatingWithKey(false);
+      setCreateStep('idle');
     }
   };
+
+  const creatingWithKey = createStep !== 'idle';
+  const createStepLabel = createStep === 'creating'
+    ? 'Creating exam...'
+    : createStep === 'uploading'
+      ? 'Uploading key...'
+      : createStep === 'parsing'
+        ? 'Parsing key...'
+        : '';
 
   return (
     <div>
       <h1>Exams</h1>
-      <form onSubmit={onCreate} className="card inline-form">
+      <form onSubmit={onCreate} className="card inline-form wrap-mobile">
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Exam name" required />
         <button type="submit" disabled={creating}>{creating ? 'Creating...' : 'Create Exam'}</button>
-        <button type="button" onClick={() => setIsModalOpen(true)}>Create Exam + Upload Key</button>
+        <button type="button" onClick={() => setIsModalOpen(true)} disabled={creating}>Create Exam Wizard</button>
       </form>
 
       {isModalOpen && (
         <div className="modal-backdrop">
-          <div className="card modal">
-            <h2>Create Exam + Upload Key</h2>
+          <div className="card modal stack">
+            <h2>Create Exam Wizard</h2>
             <form onSubmit={onCreateAndUpload} className="stack" encType="multipart/form-data">
-              <input
-                value={modalName}
-                onChange={(e) => setModalName(e.target.value)}
-                placeholder="Exam name"
-                required
-              />
-              <input
-                type="file"
-                accept="application/pdf,image/png,image/jpeg,image/jpg"
-                onChange={(e) => setModalFiles(Array.from(e.target.files || []))}
-                multiple
-                required
-              />
+              <label className="stack">
+                Exam name
+                <input
+                  value={modalName}
+                  onChange={(e) => setModalName(e.target.value)}
+                  placeholder="e.g. Midterm 1"
+                  required
+                  disabled={creatingWithKey}
+                />
+              </label>
+              <label className="stack">
+                Key files (PDF or image)
+                <input
+                  type="file"
+                  accept="application/pdf,image/png,image/jpeg,image/jpg"
+                  onChange={(e) => setModalFiles(Array.from(e.target.files || []))}
+                  multiple
+                  required
+                  disabled={creatingWithKey}
+                />
+              </label>
+
+              {createStepLabel && <p className="subtle-text">{createStepLabel}</p>}
+
               <div className="actions-row">
-                <button type="submit" disabled={creatingWithKey}>{creatingWithKey ? 'Processing...' : 'Create + Parse'}</button>
-                <button type="button" onClick={() => setIsModalOpen(false)} disabled={creatingWithKey}>Cancel</button>
+                <button type="submit" disabled={creatingWithKey}>{creatingWithKey ? createStepLabel || 'Working...' : 'Create & Parse'}</button>
+                <button type="button" onClick={closeModal} disabled={creatingWithKey}>Cancel</button>
               </div>
             </form>
           </div>

@@ -97,7 +97,12 @@ export const api = {
   },
   uploadExamKey: async (examId: number, files: File[]) => {
     const paths = await getOpenApiPaths();
-    const candidates = ['/exams/{exam_id}/key', '/exams/{exam_id}/wizard/key', '/exams/{exam_id}/answer-key'];
+    const candidates = [
+      '/exams/{exam_id}/key/upload',
+      '/exams/{exam_id}/key',
+      '/exams/{exam_id}/wizard/key',
+      '/exams/{exam_id}/answer-key',
+    ];
     const selectedPath = candidates.find((path) => paths.has(path));
 
     if (!selectedPath) {
@@ -111,6 +116,16 @@ export const api = {
       method: 'POST',
       body: formData,
     });
+  },
+  getExamQuestionsForReview: async (examId: number) => {
+    const paths = await getOpenApiPaths();
+
+    if (paths.has('/exams/{exam_id}/questions')) {
+      return request<QuestionRead[]>(`/exams/${examId}/questions`);
+    }
+
+    const examDetail = await request<ExamDetail>(`/exams/${examId}`);
+    return examDetail.questions || [];
   },
   parseExamKey: (examId: number) => request<Record<string, unknown>>(`/exams/${examId}/key/parse`, { method: 'POST' }),
   getSubmission: (submissionId: number) => request<SubmissionRead>(`/submissions/${submissionId}`),
@@ -138,6 +153,14 @@ export const api = {
 
     if (paths.has('/exams/{exam_id}/questions/{question_id}')) {
       return request<QuestionRead>(`/exams/${examId}/questions/${questionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    if (paths.has('/exams/{exam_id}/wizard/questions/{question_id}')) {
+      return request<QuestionRead>(`/exams/${examId}/wizard/questions/${questionId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

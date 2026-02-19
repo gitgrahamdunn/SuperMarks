@@ -26,3 +26,17 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(17, 24, 39, 0.45); display: grid; place-items: center; z-index: 15; }
 .modal { width: min(560px, calc(100vw - 2rem)); }
+.subtle-text { color: #4b5563; margin: 0; font-size: .95rem; }
+.review-card { max-width: 760px; margin-inline: auto; }
+.criteria-block { border: 1px solid #e5e7eb; border-radius: 6px; padding: .75rem; }
+.criteria-header { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+.criteria-header h3 { margin: 0; font-size: 1rem; }
+.criteria-row { display: grid; grid-template-columns: 1fr 120px auto; gap: .5rem; align-items: center; }
+
+@media (max-width: 640px) {
+  .layout { padding: .75rem; }
+  .wrap-mobile { flex-wrap: wrap; }
+  .inline-form input, .inline-form button { width: 100%; }
+  .actions-row button { flex: 1 1 100%; }
+  .criteria-row { grid-template-columns: 1fr; }
+}
