@@ -1,5 +1,7 @@
 """FastAPI application entrypoint."""
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -33,5 +35,6 @@ def on_startup() -> None:
 
 
 @app.get("/health", tags=["meta"])
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, bool]:
+    openai_api_key = os.getenv("OPENAI_API_KEY", "")
+    return {"ok": True, "openai_configured": bool(openai_api_key.strip())}
