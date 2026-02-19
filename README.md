@@ -1,11 +1,9 @@
 # SuperMarks
 
-SuperMarks is split into two deployable applications:
+SuperMarks is a single deployable application on Vercel:
 
-- **Backend API** (FastAPI + SQLModel) in the repository root.
-- **Frontend UI** (Vite + React + TypeScript) in `frontend/`.
-
-This structure supports separate Vercel deployments for faster iteration.
+- **Frontend UI** (Vite + React + TypeScript) is built as static assets from `frontend/`.
+- **Backend API** (FastAPI + SQLModel) is served by a Python serverless function from `api/index.py` under `/api`.
 
 ## Repository Structure
 
@@ -14,11 +12,11 @@ This structure supports separate Vercel deployments for faster iteration.
 ├── api/
 │   └── index.py              # Vercel Python entrypoint for backend
 ├── app/                      # Backend application package
-├── frontend/                 # Frontend application (deploy separately)
+├── frontend/                 # Frontend application (static build output)
 ├── tests/
 ├── pyproject.toml
 ├── requirements.txt          # Vercel backend install manifest
-└── vercel.json               # Vercel backend routing/runtime config
+└── vercel.json               # Vercel single deploy config (frontend + backend)
 ```
 
 ## Local Development
@@ -43,31 +41,28 @@ npm run dev
 
 Set `VITE_API_BASE_URL` in `frontend/.env` as needed (for local backend, keep `http://localhost:8000`).
 
-## Vercel Deployment
+## Single Vercel Deploy
 
-### 1) Backend deploy (from repository root)
+Configure one Vercel project with repository root set to this repo root.
 
-Vercel uses:
-- `vercel.json` at repo root
-- `api/index.py` as the serverless entrypoint
-- `requirements.txt` for Python dependencies
+- **Build Command:** `cd frontend && npm ci && npm run build`
+- **Output Directory:** `frontend/dist`
+
+Runtime behavior:
+- Requests to `/api/*` are handled by `api/index.py` (FastAPI serverless function).
+- All other routes serve the frontend SPA with `frontend/dist/index.html` fallback.
+
+API paths in production:
+- API base path: `/api`
+- OpenAPI docs: `/api/docs`
 
 Recommended backend environment variables in Vercel:
 
 - `SUPERMARKS_VERCEL_ENVIRONMENT=true`
-- `SUPERMARKS_CORS_ORIGINS=https://<your-frontend-domain>`
+- `SUPERMARKS_CORS_ORIGINS=https://<your-domain>`
 - (optional) `SUPERMARKS_CORS_ALLOW_ORIGIN_REGEX=https://.*\.vercel\.app`
 
 > Note: In Vercel serverless runtime, persistent filesystem writes are not available. With `SUPERMARKS_VERCEL_ENVIRONMENT=true`, runtime files are redirected to `/tmp`.
-
-### 2) Frontend deploy (from `frontend/`)
-
-Vercel uses:
-- `frontend/vercel.json` for SPA rewrites (fixes 404 refresh on client-side routes)
-
-Recommended frontend environment variable in Vercel:
-
-- `VITE_API_BASE_URL=https://<your-backend-domain>`
 
 ## Common Deployment Error Fixes Included
 
