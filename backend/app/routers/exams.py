@@ -25,6 +25,8 @@ _ALLOWED_TYPES = {
     "image/jpg": "image",
 }
 
+_ALLOWED_KEY_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+
 
 def _list_key_page_images(exam_id: int) -> list[Path]:
     candidates = [
@@ -224,15 +226,15 @@ def upload_exam_key_files(
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
-    kinds = [_ALLOWED_TYPES.get(f.content_type or "") for f in files]
-    if any(kind is None for kind in kinds):
-        raise HTTPException(status_code=400, detail="Unsupported file type. Use pdf/png/jpg/jpeg")
-
     key_dir = _exam_key_dir(exam_id)
     uploaded = 0
 
     for idx, upload in enumerate(files, start=1):
         filename = Path(upload.filename or f"key-{idx}").name
+        extension = Path(filename).suffix.lower()
+        if extension not in _ALLOWED_KEY_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Unsupported file type. Use pdf/png/jpg/jpeg")
+
         destination = key_dir / filename
         save_upload_file(upload, destination)
 
