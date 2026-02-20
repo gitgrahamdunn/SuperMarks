@@ -84,3 +84,23 @@ def test_public_routes_bypass_auth_when_configured(tmp_path, monkeypatch) -> Non
     assert redoc_response.status_code == 200
     assert favicon_ico_response.status_code == 204
     assert favicon_png_response.status_code == 204
+
+
+def test_openapi_lists_api_prefixed_exam_paths(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("BACKEND_API_KEY", "test-api-key")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(api_app) as client:
+        response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    paths = response.json().get("paths", {})
+
+    assert "/api/exams" in paths
+    assert "/api/exams/{exam_id}/key/upload" in paths
+    assert "/api/exams/{exam_id}/key/parse" in paths
+    assert "/exams" not in paths
