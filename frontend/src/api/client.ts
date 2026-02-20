@@ -40,6 +40,7 @@ type ApiContractCheckResult =
   | { ok: false; missingPaths: string[]; message: string };
 
 let openApiPathCache: Set<string> | null = null;
+let openApiFetchErrorMessage: string | null = null;
 
 function withApiKeyHeader(options: RequestInit = {}): RequestInit {
   if (!BACKEND_API_KEY) return options;
@@ -50,12 +51,6 @@ function withApiKeyHeader(options: RequestInit = {}): RequestInit {
 
 function getOpenApiSchemaUrl(): string {
   const normalized = API_BASE_URL.replace(/\/+$/, '');
-  if (normalized === '/api') {
-    return '/openapi.json';
-  }
-  if (normalized.endsWith('/api')) {
-    return `${normalized.slice(0, -4)}/openapi.json`;
-  }
   return `${normalized}/openapi.json`;
 }
 
@@ -109,15 +104,20 @@ async function getOpenApiPaths(): Promise<Set<string>> {
     return openApiPathCache;
   }
 
+  const openApiUrl = getOpenApiSchemaUrl();
+  console.log(`[SuperMarks] Fetching backend OpenAPI schema from ${openApiUrl}`);
+
   try {
-    const response = await fetch(getOpenApiSchemaUrl(), withApiKeyHeader());
+    const response = await fetch(openApiUrl, withApiKeyHeader());
     if (!response.ok) {
-      openApiPathCache = new Set<string>();
-      return openApiPathCache;
+      throw new Error(`Could not fetch backend OpenAPI at ${openApiUrl} (HTTP ${response.status})`);
     }
     const data = await response.json() as { paths?: Record<string, unknown> };
     openApiPathCache = new Set(Object.keys(data.paths || {}));
+    openApiFetchErrorMessage = null;
   } catch {
+    openApiFetchErrorMessage = `Could not fetch backend OpenAPI at ${openApiUrl}`;
+    console.error(`[SuperMarks] ${openApiFetchErrorMessage}`);
     openApiPathCache = new Set<string>();
   }
 
@@ -126,6 +126,15 @@ async function getOpenApiPaths(): Promise<Set<string>> {
 
 async function checkBackendApiContract(): Promise<ApiContractCheckResult> {
   const paths = await getOpenApiPaths();
+
+  if (openApiFetchErrorMessage) {
+    return {
+      ok: false,
+      missingPaths: [],
+      message: openApiFetchErrorMessage,
+    };
+  }
+
   const missingPaths = REQUIRED_BACKEND_PATHS.filter((path) => !paths.has(path));
 
   if (missingPaths.length === 0) {
