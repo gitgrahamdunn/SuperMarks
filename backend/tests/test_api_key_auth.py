@@ -22,10 +22,10 @@ def test_exams_requires_api_key_when_configured(tmp_path, monkeypatch) -> None:
     SQLModel.metadata.create_all(db.engine)
 
     with TestClient(app) as client:
-        unauthorized = client.get("/exams")
+        unauthorized = client.get("/api/exams")
         assert unauthorized.status_code == 401
 
-        authorized = client.get("/exams", headers={"X-API-Key": "test-api-key"})
+        authorized = client.get("/api/exams", headers={"X-API-Key": "test-api-key"})
         assert authorized.status_code == 200
 
 
@@ -66,14 +66,14 @@ def test_public_routes_bypass_auth_when_configured(tmp_path, monkeypatch) -> Non
     SQLModel.metadata.create_all(db.engine)
 
     with TestClient(api_app) as client:
-        root_response = client.get("/api/")
-        health_response = client.get("/api/health")
-        deep_health_response = client.get("/api/health/deep")
-        docs_response = client.get("/api/docs")
-        openapi_response = client.get("/api/openapi.json")
-        redoc_response = client.get("/api/redoc")
-        favicon_ico_response = client.get("/api/favicon.ico")
-        favicon_png_response = client.get("/api/favicon.png")
+        root_response = client.get("/")
+        health_response = client.get("/health")
+        deep_health_response = client.get("/health/deep")
+        docs_response = client.get("/docs")
+        openapi_response = client.get("/openapi.json")
+        redoc_response = client.get("/redoc")
+        favicon_ico_response = client.get("/favicon.ico")
+        favicon_png_response = client.get("/favicon.png")
 
     assert root_response.status_code == 200
     assert root_response.json() == {"ok": True, "service": "supermarks-backend"}

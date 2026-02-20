@@ -10,7 +10,7 @@ from api.index import app as api_app
 from app.main import app
 
 
-@pytest.mark.parametrize("path", ["/health", "/exams"])
+@pytest.mark.parametrize("path", ["/health", "/api/exams"])
 def test_cors_headers_present(path: str) -> None:
     with TestClient(app) as client:
         response = client.get(path, headers={"Origin": "https://example.com"})
@@ -19,7 +19,7 @@ def test_cors_headers_present(path: str) -> None:
     assert response.headers["access-control-allow-origin"] == "*"
 
 
-@pytest.mark.parametrize("client_app,path", [(app, "/exams"), (api_app, "/api/exams")])
+@pytest.mark.parametrize("client_app,path", [(app, "/api/exams"), (api_app, "/api/exams")])
 def test_preflight_options_exams_allows_cors(client_app, path: str) -> None:
     with TestClient(client_app) as client:
         response = client.options(
@@ -38,7 +38,7 @@ def test_preflight_options_exams_allows_cors(client_app, path: str) -> None:
     assert "access-control-allow-headers" in response.headers
 
 
-@pytest.mark.parametrize("client_app,path", [(app, "/exams"), (api_app, "/api/exams")])
+@pytest.mark.parametrize("client_app,path", [(app, "/api/exams"), (api_app, "/api/exams")])
 def test_post_exams_still_available_after_preflight(client_app, path: str) -> None:
     with TestClient(client_app) as client:
         preflight = client.options(

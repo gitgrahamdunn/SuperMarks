@@ -23,14 +23,14 @@ def test_list_exams_returns_created_exams(tmp_path) -> None:
     SQLModel.metadata.create_all(db.engine)
 
     with TestClient(app) as client:
-        assert client.get("/exams").status_code == 200
+        assert client.get("/api/exams").status_code == 200
 
-        first = client.post("/exams", json={"name": "Midterm"})
-        second = client.post("/exams", json={"name": "Final"})
+        first = client.post("/api/exams", json={"name": "Midterm"})
+        second = client.post("/api/exams", json={"name": "Final"})
         assert first.status_code == 201
         assert second.status_code == 201
 
-        response = client.get("/exams")
+        response = client.get("/api/exams")
         assert response.status_code == 200
 
         payload = response.json()
@@ -52,7 +52,7 @@ def test_parse_answer_key_creates_questions_and_sets_reviewing(tmp_path, monkeyp
     SQLModel.metadata.create_all(db.engine)
 
     with TestClient(app) as client:
-        exam = client.post("/exams", json={"name": "Physics Final"})
+        exam = client.post("/api/exams", json={"name": "Physics Final"})
         assert exam.status_code == 201
         exam_id = exam.json()["id"]
 
@@ -62,11 +62,11 @@ def test_parse_answer_key_creates_questions_and_sets_reviewing(tmp_path, monkeyp
         (key_dir / "page-2.png").write_bytes(b"fake-image-2")
         (key_dir / "page-3.png").write_bytes(b"fake-image-3")
 
-        response = client.post(f"/exams/{exam_id}/key/parse")
+        response = client.post(f"/api/exams/{exam_id}/key/parse")
         assert response.status_code == 200
         assert response.json()["questions_count"] == 2
 
-        detail = client.get(f"/exams/{exam_id}")
+        detail = client.get(f"/api/exams/{exam_id}")
         assert detail.status_code == 200
         payload = detail.json()
 
@@ -84,12 +84,12 @@ def test_upload_exam_key_files_stores_file_and_db_row(tmp_path) -> None:
     SQLModel.metadata.create_all(db.engine)
 
     with TestClient(app) as client:
-        exam = client.post("/exams", json={"name": "Biology Midterm"})
+        exam = client.post("/api/exams", json={"name": "Biology Midterm"})
         assert exam.status_code == 201
         exam_id = exam.json()["id"]
 
         files = [("files", ("key.png", b"\x89PNG\r\n\x1a\n", "image/png"))]
-        response = client.post(f"/exams/{exam_id}/key/upload", files=files)
+        response = client.post(f"/api/exams/{exam_id}/key/upload", files=files)
 
         assert response.status_code == 200
         assert response.json() == {"uploaded": 1}

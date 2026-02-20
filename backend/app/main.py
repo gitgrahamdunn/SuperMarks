@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from sqlalchemy import text
 from sqlmodel import Session
 
-from app.auth_api_key import require_api_key
+from app.auth import require_api_key
 from app import db
 from app.db import create_db_and_tables
 from app.routers.exams import router as exams_router
@@ -37,9 +37,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(exams_router, dependencies=[Depends(require_api_key)])
-app.include_router(questions_router, dependencies=[Depends(require_api_key)])
-app.include_router(submissions_router, dependencies=[Depends(require_api_key)])
+app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_api_key)])
+app.include_router(questions_router, prefix="/api", dependencies=[Depends(require_api_key)])
+app.include_router(submissions_router, prefix="/api", dependencies=[Depends(require_api_key)])
 
 
 @app.on_event("startup")
@@ -99,11 +99,5 @@ def deep_health() -> dict[str, bool | str]:
 
 @app.options("/api/{path:path}", include_in_schema=False)
 async def api_preflight(path: str) -> Response:
-    del path
-    return Response(status_code=204)
-
-
-@app.options("/{path:path}", include_in_schema=False)
-async def preflight(path: str) -> Response:
     del path
     return Response(status_code=204)

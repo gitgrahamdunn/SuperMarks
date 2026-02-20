@@ -33,7 +33,7 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
     SQLModel.metadata.create_all(db.engine)
 
     with TestClient(app) as client:
-        exam_resp = client.post("/exams", json={"name": "Algebra Test"})
+        exam_resp = client.post("/api/exams", json={"name": "Algebra Test"})
         assert exam_resp.status_code == 201
         exam_id = exam_resp.json()["id"]
 
@@ -42,20 +42,20 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
             ("files", ("page2.png", make_image_bytes("Q2 y=7"), "image/png")),
         ]
         upload_resp = client.post(
-            f"/exams/{exam_id}/submissions",
+            f"/api/exams/{exam_id}/submissions",
             data={"student_name": "Alice"},
             files=files,
         )
         assert upload_resp.status_code == 201
         submission_id = upload_resp.json()["id"]
 
-        pages_resp = client.post(f"/submissions/{submission_id}/build-pages")
+        pages_resp = client.post(f"/api/submissions/{submission_id}/build-pages")
         assert pages_resp.status_code == 200
         pages = pages_resp.json()
         assert len(pages) == 2
 
         q1_resp = client.post(
-            f"/exams/{exam_id}/questions",
+            f"/api/exams/{exam_id}/questions",
             json={
                 "label": "Q1",
                 "max_marks": 5,
@@ -74,7 +74,7 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
         q1_id = q1_resp.json()["id"]
 
         q2_resp = client.post(
-            f"/exams/{exam_id}/questions",
+            f"/api/exams/{exam_id}/questions",
             json={
                 "label": "Q2",
                 "max_marks": 3,
@@ -90,22 +90,22 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
 
         for qid, page in [(q1_id, 1), (q2_id, 2)]:
             regions_resp = client.post(
-                f"/questions/{qid}/regions",
+                f"/api/questions/{qid}/regions",
                 json=[{"page_number": page, "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}],
             )
             assert regions_resp.status_code == 200
 
-        crops_resp = client.post(f"/submissions/{submission_id}/build-crops")
+        crops_resp = client.post(f"/api/submissions/{submission_id}/build-crops")
         assert crops_resp.status_code == 200
         assert crops_resp.json()["count"] == 2
 
-        transcribe_resp = client.post(f"/submissions/{submission_id}/transcribe", params={"provider": "stub"})
+        transcribe_resp = client.post(f"/api/submissions/{submission_id}/transcribe", params={"provider": "stub"})
         assert transcribe_resp.status_code == 200
 
-        grade_resp = client.post(f"/submissions/{submission_id}/grade", params={"grader": "rule_based"})
+        grade_resp = client.post(f"/api/submissions/{submission_id}/grade", params={"grader": "rule_based"})
         assert grade_resp.status_code == 200
 
-        results_resp = client.get(f"/submissions/{submission_id}/results")
+        results_resp = client.get(f"/api/submissions/{submission_id}/results")
         assert results_resp.status_code == 200
         payload = results_resp.json()
         assert len(payload["transcriptions"]) == 2
