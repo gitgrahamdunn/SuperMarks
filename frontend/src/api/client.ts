@@ -29,6 +29,16 @@ class ApiError extends Error {
   }
 }
 
+const REQUIRED_BACKEND_PATHS = [
+  '/api/exams',
+  '/api/exams/{exam_id}/key/upload',
+  '/api/exams/{exam_id}/key/parse',
+] as const;
+
+type ApiContractCheckResult =
+  | { ok: true }
+  | { ok: false; missingPaths: string[]; message: string };
+
 let openApiPathCache: Set<string> | null = null;
 
 function withApiKeyHeader(options: RequestInit = {}): RequestInit {
@@ -36,6 +46,17 @@ function withApiKeyHeader(options: RequestInit = {}): RequestInit {
   const headers = new Headers(options.headers || {});
   headers.set('X-API-Key', BACKEND_API_KEY);
   return { ...options, headers };
+}
+
+function getOpenApiSchemaUrl(): string {
+  const normalized = API_BASE_URL.replace(/\/+$/, '');
+  if (normalized === '/api') {
+    return '/openapi.json';
+  }
+  if (normalized.endsWith('/api')) {
+    return `${normalized.slice(0, -4)}/openapi.json`;
+  }
+  return `${normalized}/openapi.json`;
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -89,7 +110,7 @@ async function getOpenApiPaths(): Promise<Set<string>> {
   }
 
   try {
-    const response = await fetch(`${API_BASE_URL}/openapi.json`, withApiKeyHeader());
+    const response = await fetch(getOpenApiSchemaUrl(), withApiKeyHeader());
     if (!response.ok) {
       openApiPathCache = new Set<string>();
       return openApiPathCache;
@@ -101,6 +122,27 @@ async function getOpenApiPaths(): Promise<Set<string>> {
   }
 
   return openApiPathCache;
+}
+
+async function checkBackendApiContract(): Promise<ApiContractCheckResult> {
+  const paths = await getOpenApiPaths();
+  const missingPaths = REQUIRED_BACKEND_PATHS.filter((path) => !paths.has(path));
+
+  if (missingPaths.length === 0) {
+    return { ok: true };
+  }
+
+  console.error('[SuperMarks] Backend API contract mismatches detected', {
+    missingPaths,
+    availablePaths: [...paths].sort(),
+  });
+
+  const firstMissing = missingPaths[0];
+  return {
+    ok: false,
+    missingPaths,
+    message: `Backend API contract mismatch: missing endpoint ${firstMissing}. Please sync backend and frontend.`,
+  };
 }
 
 export const api = {
@@ -129,10 +171,10 @@ export const api = {
   uploadExamKey: async (examId: number, files: File[]) => {
     const paths = await getOpenApiPaths();
     const candidates = [
-      '/exams/{exam_id}/key/upload',
-      '/exams/{exam_id}/key',
-      '/exams/{exam_id}/wizard/key',
-      '/exams/{exam_id}/answer-key',
+      '/api/exams/{exam_id}/key/upload',
+      '/api/exams/{exam_id}/key',
+      '/api/exams/{exam_id}/wizard/key',
+      '/api/exams/{exam_id}/answer-key',
     ];
     const selectedPath = candidates.find((path) => paths.has(path));
 
@@ -149,7 +191,7 @@ export const api = {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
 
-    return request<Record<string, unknown>>(selectedPath.replace('{exam_id}', String(examId)), {
+    return request<Record<string, unknown>>(selectedPath.replace('/api', '').replace('{exam_id}', String(examId)), {
       method: 'POST',
       body: formData,
     });
@@ -157,7 +199,7 @@ export const api = {
   getExamQuestionsForReview: async (examId: number) => {
     const paths = await getOpenApiPaths();
 
-    if (paths.has('/exams/{exam_id}/questions')) {
+    if (paths.has('/api/exams/{exam_id}/questions')) {
       return request<QuestionRead[]>(`/exams/${examId}/questions`);
     }
 
@@ -204,7 +246,7 @@ export const api = {
   }),
   updateQuestion: async (examId: number, questionId: number, payload: { label: string; max_marks: number; rubric_json: Record<string, unknown> }) => {
     const paths = await getOpenApiPaths();
-    if (paths.has('/questions/{question_id}')) {
+    if (paths.has('/api/questions/{question_id}')) {
       return request<QuestionRead>(`/questions/${questionId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -212,7 +254,7 @@ export const api = {
       });
     }
 
-    if (paths.has('/exams/{exam_id}/questions/{question_id}')) {
+    if (paths.has('/api/exams/{exam_id}/questions/{question_id}')) {
       return request<QuestionRead>(`/exams/${examId}/questions/${questionId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -220,7 +262,7 @@ export const api = {
       });
     }
 
-    if (paths.has('/exams/{exam_id}/wizard/questions/{question_id}')) {
+    if (paths.has('/api/exams/{exam_id}/wizard/questions/{question_id}')) {
       return request<QuestionRead>(`/exams/${examId}/wizard/questions/${questionId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -232,4 +274,4 @@ export const api = {
   },
 };
 
-export { API_BASE_URL, ApiError, getOpenApiPaths };
+export { API_BASE_URL, ApiError, checkBackendApiContract, getOpenApiPaths };
