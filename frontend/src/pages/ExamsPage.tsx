@@ -4,7 +4,14 @@ import { ApiError, api } from '../api/client';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
 
-type WizardStep = 'idle' | 'creating' | 'uploading' | 'parsing' | 'done';
+type WizardStep = 'creating' | 'uploading' | 'parsing' | 'done';
+
+interface WizardParseResult {
+  questions?: unknown;
+  result?: {
+    questions?: unknown;
+  };
+}
 
 function getErrorDetails(error: unknown): string {
   if (error instanceof ApiError) {
@@ -17,15 +24,26 @@ function getErrorDetails(error: unknown): string {
   return 'Unknown error';
 }
 
-function extractParsedQuestionCount(parseResult: Record<string, unknown>): number {
-  const maybeQuestions = parseResult.questions;
-  if (Array.isArray(maybeQuestions)) {
-    return maybeQuestions.length;
+function extractParsedQuestionCount(parseResult: unknown): number {
+  if (Array.isArray(parseResult)) {
+    return parseResult.length;
   }
 
-  const maybeCount = parseResult.question_count;
-  if (typeof maybeCount === 'number') {
-    return maybeCount;
+  if (typeof parseResult !== 'object' || !parseResult) {
+    return 0;
+  }
+
+  const shaped = parseResult as WizardParseResult & { question_count?: unknown };
+  if (Array.isArray(shaped.questions)) {
+    return shaped.questions.length;
+  }
+
+  if (Array.isArray(shaped.result?.questions)) {
+    return shaped.result.questions.length;
+  }
+
+  if (typeof shaped.question_count === 'number') {
+    return shaped.question_count;
   }
 
   return 0;
@@ -39,7 +57,10 @@ export function ExamsPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalName, setModalName] = useState('');
   const [modalFiles, setModalFiles] = useState<File[]>([]);
-  const [createStep, setCreateStep] = useState<WizardStep>('idle');
+  const [isRunning, setIsRunning] = useState(false);
+  const [step, setStep] = useState<WizardStep>('creating');
+  const [error, setError] = useState('');
+  const [createdExamId, setCreatedExamId] = useState<number | null>(null);
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
   const { showError, showSuccess, showWarning } = useToast();
   const navigate = useNavigate();
@@ -78,13 +99,15 @@ export function ExamsPage() {
   };
 
   const closeModal = () => {
-    if (createStep !== 'idle') {
+    if (isRunning) {
       return;
     }
     setIsModalOpen(false);
     setModalName('');
     setModalFiles([]);
     setParsedQuestionCount(null);
+    setError('');
+    setCreatedExamId(null);
   };
 
   const onCreateAndUpload = async (event: FormEvent) => {
@@ -94,79 +117,74 @@ export function ExamsPage() {
       return;
     }
 
+    setError('');
     setParsedQuestionCount(null);
+    setCreatedExamId(null);
 
-    let examId: number | null = null;
-    setCreateStep('creating');
     try {
+      setIsRunning(true);
+      setStep('creating');
       console.log('[wizard] create exam -> start');
       const exam = await api.createExam(modalName.trim());
-      examId = exam.id;
-      console.log(`[wizard] create exam -> exam_id=${exam.id}`);
+      const examId = exam.id;
+      setCreatedExamId(examId);
+      console.log('[wizard] create exam ->', { exam_id: exam.id });
       showSuccess('Exam created. Uploading key files...');
-    } catch (error) {
-      console.error('Failed at create exam step', error);
-      showError(`Create exam failed:\n${getErrorDetails(error)}`);
-      setCreateStep('idle');
-      return;
-    }
 
-    if (examId === null) {
-      setCreateStep('idle');
-      return;
-    }
-
-    setCreateStep('uploading');
-    try {
+      setStep('uploading');
       console.log('[wizard] upload key -> start');
-      await api.uploadExamKey(examId, modalFiles);
+      const uploadResult = await api.uploadExamKey(examId, modalFiles);
+      console.log('[wizard] upload key ->', uploadResult);
       showSuccess('Key uploaded. Parsing key...');
-    } catch (error) {
-      console.error('Failed at upload key step', error);
-      showError(`Upload key failed:\n${getErrorDetails(error)}`);
-      setCreateStep('idle');
-      return;
-    }
 
-    let questionCount = 0;
-    setCreateStep('parsing');
-    try {
+      setStep('parsing');
       console.log('[wizard] parse key -> start');
-      const parseResult = await api.parseExamKey(examId);
-      questionCount = extractParsedQuestionCount(parseResult);
+      const { data: parseResult, responseText } = await api.parseExamKeyRaw(examId);
+      console.log('[wizard] parse key ->', parseResult ?? responseText);
+      if (parseResult === null) {
+        const responseSnippet = responseText.slice(0, 300);
+        const parseError = `POST /exams/${examId}/key/parse\nStatus: 200\nBody: ${responseSnippet || '<empty>'}`;
+        setError(parseError);
+        showError(`Parse key failed:\n${parseError}`);
+        return;
+      }
+
+      const questionCount = extractParsedQuestionCount(parseResult);
       console.log(`[wizard] parse key -> parsed_questions=${questionCount}`);
-    } catch (error) {
-      console.error('Failed at parse key step', error);
-      showError(`Parse key failed:\n${getErrorDetails(error)}`);
-      setCreateStep('idle');
-      return;
-    }
 
-    setParsedQuestionCount(questionCount);
-    setCreateStep('done');
-    if (questionCount === 0) {
-      showWarning('Parse completed but returned 0 questions. Opening review anyway.');
-    } else {
-      showSuccess(`Key parsed successfully (${questionCount} questions). Opening review wizard...`);
-    }
+      setParsedQuestionCount(questionCount);
+      setStep('done');
+      localStorage.setItem(`supermarks:lastParse:${examId}`, JSON.stringify(parseResult));
 
-    setModalName('');
-    setModalFiles([]);
-    setIsModalOpen(false);
-    setCreateStep('idle');
-    await loadExams();
-    navigate(`/exams/${examId}/review`);
+      if (questionCount === 0) {
+        showWarning('Parse completed but returned 0 questions. Opening review anyway.');
+      } else {
+        showSuccess(`Key parsed successfully (${questionCount} questions). Opening review wizard...`);
+      }
+
+      setModalName('');
+      setModalFiles([]);
+      setIsModalOpen(false);
+      await loadExams();
+      navigate(`/exams/${examId}/review`);
+    } catch (err) {
+      console.error('Create exam wizard failed', err);
+      const details = getErrorDetails(err);
+      setError(details);
+      showError(`Create exam wizard failed:\n${details}`);
+    } finally {
+      setIsRunning(false);
+    }
   };
 
-  const creatingWithKey = createStep !== 'idle';
-  const wizardSteps: Array<{ id: Exclude<WizardStep, 'idle'>; label: string }> = [
+  const wizardSteps: Array<{ id: WizardStep; label: string }> = [
     { id: 'creating', label: 'Creating exam...' },
     { id: 'uploading', label: 'Uploading key...' },
     { id: 'parsing', label: 'Parsing key...' },
     { id: 'done', label: `Done (${parsedQuestionCount ?? 0} questions)` },
   ];
 
-  const activeStepIndex = wizardSteps.findIndex((step) => step.id === createStep);
+  const activeStepIndex = wizardSteps.findIndex((wizardStep) => wizardStep.id === step);
 
   return (
     <div>
@@ -189,7 +207,7 @@ export function ExamsPage() {
                   onChange={(e) => setModalName(e.target.value)}
                   placeholder="e.g. Midterm 1"
                   required
-                  disabled={creatingWithKey}
+                  disabled={isRunning}
                 />
               </label>
               <label className="stack">
@@ -200,24 +218,28 @@ export function ExamsPage() {
                   onChange={(e) => setModalFiles(Array.from(e.target.files || []))}
                   multiple
                   required
-                  disabled={creatingWithKey}
+                  disabled={isRunning}
                 />
               </label>
 
-              {createStep !== 'idle' && (
+              {isRunning && (
                 <ul className="subtle-text">
-                  {wizardSteps.map((step, index) => {
-                    const isActive = createStep === step.id;
+                  <li>Current step: {step}</li>
+                  {wizardSteps.map((wizardStep, index) => {
+                    const isActive = step === wizardStep.id;
                     const isComplete = activeStepIndex > index;
                     const marker = isComplete ? '✓' : isActive ? '…' : '○';
-                    return <li key={step.id}>{marker} {step.label}</li>;
+                    return <li key={wizardStep.id}>{marker} {wizardStep.label}</li>;
                   })}
                 </ul>
               )}
 
+              {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
+              {error && <p className="subtle-text">{error}</p>}
+
               <div className="actions-row">
-                <button type="submit" disabled={creatingWithKey}>{creatingWithKey ? 'Working...' : 'Enter exam & parse'}</button>
-                <button type="button" onClick={closeModal} disabled={creatingWithKey}>Cancel</button>
+                <button type="submit" disabled={isRunning}>{isRunning ? 'Working...' : 'Enter exam & parse'}</button>
+                <button type="button" onClick={closeModal} disabled={isRunning}>Cancel</button>
               </div>
             </form>
           </div>

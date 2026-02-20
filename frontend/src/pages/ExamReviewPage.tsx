@@ -55,6 +55,22 @@ export function ExamReviewPage() {
         showSuccess(`Loaded ${mapped.length} questions for review.`);
       } catch (error) {
         console.error('Failed to fetch questions for review', error);
+        const storageKey = `supermarks:lastParse:${examId}`;
+        const storedParse = localStorage.getItem(storageKey);
+        if (storedParse) {
+          try {
+            const parsed = JSON.parse(storedParse) as unknown;
+            const fallbackQuestions = mapFallbackQuestions(parsed);
+            if (fallbackQuestions.length > 0) {
+              setQuestions(fallbackQuestions);
+              showError('Failed to fetch questions from backend. Loaded fallback parse result from local storage.');
+              return;
+            }
+          } catch (storageError) {
+            console.error('Failed to parse fallback local storage parse result', storageError);
+          }
+        }
+
         showError(error instanceof Error ? error.message : 'Failed to load review questions');
       } finally {
         setLoading(false);
@@ -233,6 +249,63 @@ export function ExamReviewPage() {
       </div>
     </div>
   );
+}
+
+function mapFallbackQuestions(parseResult: unknown): EditableQuestion[] {
+  if (Array.isArray(parseResult)) {
+    return parseResult.map(mapFallbackQuestion).filter((question): question is EditableQuestion => question !== null);
+  }
+
+  if (typeof parseResult !== 'object' || parseResult === null) {
+    return [];
+  }
+
+  const value = parseResult as { questions?: unknown; result?: { questions?: unknown } };
+  if (Array.isArray(value.questions)) {
+    return value.questions.map(mapFallbackQuestion).filter((question): question is EditableQuestion => question !== null);
+  }
+
+  if (Array.isArray(value.result?.questions)) {
+    return value.result.questions.map(mapFallbackQuestion).filter((question): question is EditableQuestion => question !== null);
+  }
+
+  return [];
+}
+
+function mapFallbackQuestion(item: unknown, index: number): EditableQuestion | null {
+  if (typeof item !== 'object' || item === null) {
+    return {
+      id: index + 1,
+      label: `Question ${index + 1}`,
+      max_marks: 0,
+      criteria: [],
+      answer_key: String(item || ''),
+      model_solution: '',
+      rubric_json: {},
+    };
+  }
+
+  const value = item as Record<string, unknown>;
+  const id = typeof value.id === 'number' ? value.id : index + 1;
+  const label = String(value.label || value.question || `Question ${index + 1}`);
+  const max_marks = typeof value.max_marks === 'number'
+    ? value.max_marks
+    : typeof value.points === 'number'
+      ? value.points
+      : 0;
+  const rubric_json = typeof value.rubric_json === 'object' && value.rubric_json !== null
+    ? value.rubric_json as Record<string, unknown>
+    : {};
+
+  return {
+    id,
+    label,
+    max_marks,
+    criteria: normalizeCriteria(rubric_json.criteria),
+    answer_key: String(rubric_json.answer_key || value.answer_key || ''),
+    model_solution: String(rubric_json.model_solution || value.model_solution || ''),
+    rubric_json,
+  };
 }
 
 function buildRubric(question: Pick<EditableQuestion, 'criteria' | 'answer_key' | 'model_solution' | 'rubric_json'>) {

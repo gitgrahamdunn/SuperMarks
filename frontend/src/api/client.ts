@@ -68,6 +68,21 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return {} as T;
 }
 
+function buildErrorDetailsFromResponse(url: string, method: string, status: number, responseText: string): ApiError {
+  const responseBodySnippet = responseText.slice(0, 300);
+  let message = status === 401 ? 'Unauthorized (check API key config)' : `Request failed (${status})`;
+  try {
+    const body = JSON.parse(responseText) as { detail?: string };
+    if (body?.detail) {
+      message = body.detail;
+    }
+  } catch {
+    // ignore parse error
+  }
+
+  return new ApiError(status, url, method, responseBodySnippet, `${message} [${status}] ${url}`);
+}
+
 async function getOpenApiPaths(): Promise<Set<string>> {
   if (openApiPathCache) {
     return openApiPathCache;
@@ -150,6 +165,30 @@ export const api = {
     return examDetail.questions || [];
   },
   parseExamKey: (examId: number) => request<Record<string, unknown>>(`/exams/${examId}/key/parse`, { method: 'POST' }),
+  parseExamKeyRaw: async (examId: number) => {
+    const path = `/exams/${examId}/key/parse`;
+    const url = `${API_BASE_URL}${path}`;
+    const method = 'POST';
+    const response = await fetch(url, withApiKeyHeader({ method }));
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      throw buildErrorDetailsFromResponse(url, method, response.status, responseText);
+    }
+
+    try {
+      const data = JSON.parse(responseText) as unknown;
+      return {
+        data,
+        responseText,
+      };
+    } catch {
+      return {
+        data: null,
+        responseText,
+      };
+    }
+  },
   getSubmission: (submissionId: number) => request<SubmissionRead>(`/submissions/${submissionId}`),
   buildPages: (submissionId: number) => request<SubmissionPage[]>(`/submissions/${submissionId}/build-pages`, { method: 'POST' }),
   buildCrops: (submissionId: number) => request<{ message: string }>(`/submissions/${submissionId}/build-crops`, { method: 'POST' }),
