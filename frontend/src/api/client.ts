@@ -37,7 +37,16 @@ const REQUIRED_BACKEND_PATHS = [
 
 type ApiContractCheckResult =
   | { ok: true }
-  | { ok: false; missingPaths: string[]; message: string };
+  | {
+    ok: false;
+    missingPaths: string[];
+    message: string;
+    diagnostics: {
+      openApiUrl: string;
+      statusCode: number | null;
+      responseSnippet: string;
+    };
+  };
 
 let openApiPathCache: Set<string> | null = null;
 let openApiFetchErrorMessage: string | null = null;
@@ -50,8 +59,15 @@ function withApiKeyHeader(options: RequestInit = {}): RequestInit {
 }
 
 function getOpenApiSchemaUrl(): string {
+  if (import.meta.env.PROD && !configuredApiBaseUrl) {
+    return '/api/openapi.json';
+  }
   const normalized = API_BASE_URL.replace(/\/+$/, '');
   return `${normalized}/openapi.json`;
+}
+
+function stripSnippet(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, 200);
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -99,25 +115,70 @@ function buildErrorDetailsFromResponse(url: string, method: string, status: numb
   return new ApiError(status, url, method, responseBodySnippet, `${message} [${status}] ${url}`);
 }
 
+type OpenApiFetchDiagnostics = {
+  openApiUrl: string;
+  statusCode: number | null;
+  responseSnippet: string;
+};
+
+let openApiFetchDiagnostics: OpenApiFetchDiagnostics = {
+  openApiUrl: '',
+  statusCode: null,
+  responseSnippet: '',
+};
+
+function setOpenApiFetchDiagnostics(diagnostics: OpenApiFetchDiagnostics): void {
+  openApiFetchDiagnostics = diagnostics;
+}
+
 async function getOpenApiPaths(): Promise<Set<string>> {
   if (openApiPathCache) {
     return openApiPathCache;
   }
 
   const openApiUrl = getOpenApiSchemaUrl();
+  setOpenApiFetchDiagnostics({
+    openApiUrl,
+    statusCode: null,
+    responseSnippet: '',
+  });
   console.log(`[SuperMarks] Fetching backend OpenAPI schema from ${openApiUrl}`);
 
   try {
     const response = await fetch(openApiUrl, withApiKeyHeader());
+    const responseText = await response.text();
+    const responseSnippet = stripSnippet(responseText);
+    setOpenApiFetchDiagnostics({
+      openApiUrl,
+      statusCode: response.status,
+      responseSnippet,
+    });
+    console.log('[SuperMarks] OpenAPI fetch diagnostics', {
+      openApiUrl,
+      statusCode: response.status,
+      responseSnippet,
+    });
+
     if (!response.ok) {
       throw new Error(`Could not fetch backend OpenAPI at ${openApiUrl} (HTTP ${response.status})`);
     }
-    const data = await response.json() as { paths?: Record<string, unknown> };
+
+    const snippetLower = responseSnippet.toLowerCase();
+    if (snippetLower.startsWith('<!doctype') || snippetLower.startsWith('<html')) {
+      openApiFetchErrorMessage = 'Proxy rewrite likely not working: /api/openapi.json returned HTML';
+      console.error(`[SuperMarks] ${openApiFetchErrorMessage}`);
+      openApiPathCache = new Set<string>();
+      return openApiPathCache;
+    }
+
+    const data = JSON.parse(responseText) as { paths?: Record<string, unknown> };
     openApiPathCache = new Set(Object.keys(data.paths || {}));
     openApiFetchErrorMessage = null;
-  } catch {
-    openApiFetchErrorMessage = `Could not fetch backend OpenAPI at ${openApiUrl}`;
-    console.error(`[SuperMarks] ${openApiFetchErrorMessage}`);
+  } catch (error) {
+    if (!openApiFetchErrorMessage) {
+      openApiFetchErrorMessage = `Could not fetch backend OpenAPI at ${openApiUrl}`;
+    }
+    console.error(`[SuperMarks] ${openApiFetchErrorMessage}`, error);
     openApiPathCache = new Set<string>();
   }
 
@@ -132,6 +193,7 @@ async function checkBackendApiContract(): Promise<ApiContractCheckResult> {
       ok: false,
       missingPaths: [],
       message: openApiFetchErrorMessage,
+      diagnostics: openApiFetchDiagnostics,
     };
   }
 
@@ -151,6 +213,17 @@ async function checkBackendApiContract(): Promise<ApiContractCheckResult> {
     ok: false,
     missingPaths,
     message: `Backend API contract mismatch: missing endpoint ${firstMissing}. Please sync backend and frontend.`,
+    diagnostics: openApiFetchDiagnostics,
+  };
+}
+
+export function resetApiContractCheckCache(): void {
+  openApiPathCache = null;
+  openApiFetchErrorMessage = null;
+  openApiFetchDiagnostics = {
+    openApiUrl: '',
+    statusCode: null,
+    responseSnippet: '',
   };
 }
 

@@ -63,3 +63,26 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
   margin-top: 0;
   color: #991b1b;
 }
+
+
+.contract-error-diagnostics {
+  margin: 1rem 0;
+  padding: .75rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.contract-error-diagnostics h2 {
+  margin: 0 0 .5rem;
+  font-size: 1rem;
+}
+
+.contract-error-diagnostics ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.contract-error-card > button {
+  margin-bottom: .75rem;
+}
