@@ -39,7 +39,8 @@ def test_preflight_bypasses_auth_but_get_requires_api_key(tmp_path, monkeypatch)
     SQLModel.metadata.create_all(db.engine)
 
     with TestClient(api_app) as client:
-        preflight = client.options(
+        preflight = client.options("/api/exams")
+        cors_preflight = client.options(
             "/api/exams",
             headers={
                 "Origin": "https://example.com",
@@ -49,8 +50,9 @@ def test_preflight_bypasses_auth_but_get_requires_api_key(tmp_path, monkeypatch)
         unauthorized_get = client.get("/api/exams")
         authorized_get = client.get("/api/exams", headers={"X-API-Key": "test-api-key"})
 
-    assert preflight.status_code in (200, 204)
-    assert "access-control-allow-origin" in preflight.headers
+    assert preflight.status_code == 204
+    assert cors_preflight.status_code in (200, 204)
+    assert "access-control-allow-origin" in cors_preflight.headers
     assert unauthorized_get.status_code == 401
     assert authorized_get.status_code == 200
 
