@@ -17,7 +17,13 @@ if (import.meta.env.PROD && API_BASE_URL !== '/api') {
 }
 
 class ApiError extends Error {
-  constructor(public status: number, public url: string, message: string) {
+  constructor(
+    public status: number,
+    public url: string,
+    public method: string,
+    public responseBodySnippet: string,
+    message: string,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -38,18 +44,21 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   const url = `${API_BASE_URL}${path}`;
+  const method = (options.method || 'GET').toUpperCase();
   const response = await fetch(url, withApiKeyHeader(options));
   if (!response.ok) {
+    const responseText = await response.text();
+    const responseBodySnippet = responseText.slice(0, 300);
     let message = response.status === 401 ? 'Unauthorized (check API key config)' : `Request failed (${response.status})`;
     try {
-      const body = await response.json();
+      const body = JSON.parse(responseText) as { detail?: string };
       if (body?.detail) {
         message = body.detail;
       }
     } catch {
       // ignore parse error
     }
-    throw new ApiError(response.status, url, `${message} [${response.status}] ${url}`);
+    throw new ApiError(response.status, url, method, responseBodySnippet, `${message} [${response.status}] ${url}`);
   }
 
   const contentType = response.headers.get('content-type') || '';
@@ -113,7 +122,13 @@ export const api = {
     const selectedPath = candidates.find((path) => paths.has(path));
 
     if (!selectedPath) {
-      throw new ApiError(404, `${API_BASE_URL}/exams/${examId}/key/upload`, 'No exam-key upload endpoint available. [404] dynamic endpoint discovery');
+      throw new ApiError(
+        404,
+        `${API_BASE_URL}/exams/${examId}/key/upload`,
+        'POST',
+        '',
+        'No exam-key upload endpoint available. [404] dynamic endpoint discovery',
+      );
     }
 
     const formData = new FormData();
@@ -174,7 +189,7 @@ export const api = {
       });
     }
 
-    throw new ApiError(404, `${API_BASE_URL}/questions/${questionId}`, 'Save endpoint is not available. [404] dynamic endpoint discovery');
+    throw new ApiError(404, `${API_BASE_URL}/questions/${questionId}`, 'PATCH', '', 'Save endpoint is not available. [404] dynamic endpoint discovery');
   },
 };
 

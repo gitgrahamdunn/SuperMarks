@@ -3,12 +3,13 @@ import { createContext, useContext, useMemo, useState } from 'react';
 interface Toast {
   id: number;
   message: string;
-  type: 'success' | 'error';
+  type: 'success' | 'error' | 'warning';
 }
 
 interface ToastContextValue {
   showSuccess: (message: string) => void;
   showError: (message: string) => void;
+  showWarning: (message: string) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -28,6 +29,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     () => ({
       showSuccess: (message: string) => addToast(message, 'success'),
       showError: (message: string) => addToast(message, 'error'),
+      showWarning: (message: string) => addToast(message, 'warning'),
     }),
     [],
   );
