@@ -13,6 +13,8 @@ type ContractMismatchProps = {
     openApiUrl: string;
     statusCode: number | null;
     responseSnippet: string;
+    normalizedPathsFound: string[];
+    normalizedRequiredPaths: string[];
   };
   onRetry: () => void;
 };
@@ -31,6 +33,22 @@ function ContractMismatchPage({ message, missingPaths, diagnostics, onRetry }: C
               <li><strong>OpenAPI URL:</strong> {diagnostics.openApiUrl || '(not set)'}</li>
               <li><strong>HTTP status:</strong> {diagnostics.statusCode ?? 'N/A'}</li>
               <li><strong>Response snippet:</strong> {diagnostics.responseSnippet || '(empty response)'}</li>
+              <li>
+                <strong>Normalized paths found (first 20):</strong>
+                <ul>
+                  {diagnostics.normalizedPathsFound.map((path) => (
+                    <li key={`found-${path}`}>{path}</li>
+                  ))}
+                </ul>
+              </li>
+              <li>
+                <strong>Normalized required paths:</strong>
+                <ul>
+                  {diagnostics.normalizedRequiredPaths.map((path) => (
+                    <li key={`required-${path}`}>{path}</li>
+                  ))}
+                </ul>
+              </li>
             </ul>
           </div>
         ) : null}
