@@ -86,3 +86,48 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
 .contract-error-card > button {
   margin-bottom: .75rem;
 }
+
+.wizard-step-banner {
+  font-weight: 600;
+}
+
+.file-list-block {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: .5rem .75rem;
+  background: #f9fafb;
+}
+
+.file-list-block ul {
+  margin: .3rem 0;
+  padding-left: 1.1rem;
+}
+
+.warning-text {
+  margin: 0;
+  padding: .5rem .75rem;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.warning-strong {
+  margin: 0;
+  padding: .65rem .75rem;
+  border: 1px solid #d97706;
+  border-radius: 6px;
+  background: #fef3c7;
+  color: #78350f;
+}
+
+.wizard-detail-block {
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: .5rem .75rem;
+  background: #f9fafb;
+}
+
+.wizard-detail-block p {
+  margin: .2rem 0;
+}
