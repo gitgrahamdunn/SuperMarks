@@ -35,6 +35,8 @@ const REQUIRED_BACKEND_PATHS = [
   '/api/exams/{exam_id}/key/parse',
 ] as const;
 
+const NORMALIZED_REQUIRED_BACKEND_PATHS = REQUIRED_BACKEND_PATHS.map((path) => normalizeOpenApiPath(path));
+
 type ApiContractCheckResult =
   | { ok: true }
   | {
@@ -45,6 +47,8 @@ type ApiContractCheckResult =
       openApiUrl: string;
       statusCode: number | null;
       responseSnippet: string;
+      normalizedPathsFound: string[];
+      normalizedRequiredPaths: string[];
     };
   };
 
@@ -119,16 +123,24 @@ type OpenApiFetchDiagnostics = {
   openApiUrl: string;
   statusCode: number | null;
   responseSnippet: string;
+  normalizedPathsFound: string[];
+  normalizedRequiredPaths: string[];
 };
 
 let openApiFetchDiagnostics: OpenApiFetchDiagnostics = {
   openApiUrl: '',
   statusCode: null,
   responseSnippet: '',
+  normalizedPathsFound: [],
+  normalizedRequiredPaths: NORMALIZED_REQUIRED_BACKEND_PATHS,
 };
 
 function setOpenApiFetchDiagnostics(diagnostics: OpenApiFetchDiagnostics): void {
   openApiFetchDiagnostics = diagnostics;
+}
+
+function normalizeOpenApiPath(path: string): string {
+  return path.replace(/\{[^}]+\}/g, '{param}');
 }
 
 async function getOpenApiPaths(): Promise<Set<string>> {
@@ -141,6 +153,8 @@ async function getOpenApiPaths(): Promise<Set<string>> {
     openApiUrl,
     statusCode: null,
     responseSnippet: '',
+    normalizedPathsFound: [],
+    normalizedRequiredPaths: NORMALIZED_REQUIRED_BACKEND_PATHS,
   });
   console.log(`[SuperMarks] Fetching backend OpenAPI schema from ${openApiUrl}`);
 
@@ -152,6 +166,8 @@ async function getOpenApiPaths(): Promise<Set<string>> {
       openApiUrl,
       statusCode: response.status,
       responseSnippet,
+      normalizedPathsFound: [],
+      normalizedRequiredPaths: NORMALIZED_REQUIRED_BACKEND_PATHS,
     });
     console.log('[SuperMarks] OpenAPI fetch diagnostics', {
       openApiUrl,
@@ -172,7 +188,16 @@ async function getOpenApiPaths(): Promise<Set<string>> {
     }
 
     const data = JSON.parse(responseText) as { paths?: Record<string, unknown> };
-    openApiPathCache = new Set(Object.keys(data.paths || {}));
+    const pathKeys = Object.keys(data.paths || {});
+    openApiPathCache = new Set(pathKeys);
+    const normalizedPathsFound = [...new Set(pathKeys.map((path) => normalizeOpenApiPath(path)))].sort().slice(0, 20);
+    setOpenApiFetchDiagnostics({
+      openApiUrl,
+      statusCode: response.status,
+      responseSnippet,
+      normalizedPathsFound,
+      normalizedRequiredPaths: NORMALIZED_REQUIRED_BACKEND_PATHS,
+    });
     openApiFetchErrorMessage = null;
   } catch (error) {
     if (!openApiFetchErrorMessage) {
@@ -197,7 +222,8 @@ async function checkBackendApiContract(): Promise<ApiContractCheckResult> {
     };
   }
 
-  const missingPaths = REQUIRED_BACKEND_PATHS.filter((path) => !paths.has(path));
+  const normalizedPaths = new Set([...paths].map((path) => normalizeOpenApiPath(path)));
+  const missingPaths = REQUIRED_BACKEND_PATHS.filter((path) => !normalizedPaths.has(normalizeOpenApiPath(path)));
 
   if (missingPaths.length === 0) {
     return { ok: true };
@@ -224,6 +250,8 @@ export function resetApiContractCheckCache(): void {
     openApiUrl: '',
     statusCode: null,
     responseSnippet: '',
+    normalizedPathsFound: [],
+    normalizedRequiredPaths: NORMALIZED_REQUIRED_BACKEND_PATHS,
   };
 }
 
