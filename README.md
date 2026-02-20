@@ -63,3 +63,8 @@ The frontend API client defaults to same-origin `/api` (so production traffic st
 - SPA routing fallback is handled in `frontend/vercel.json`
 
 Do not set `VITE_API_BASE_URL` in frontend production env vars (or set it to an empty value) so production uses `/api` and the Vercel rewrite proxy.
+
+## Deployment policy note
+
+Git-based automatic deployments are disabled for both Vercel projects to avoid Hobby plan deployment-cap limits.
+When you are ready to ship, deploy manually from the Vercel UI using **Redeploy**.
