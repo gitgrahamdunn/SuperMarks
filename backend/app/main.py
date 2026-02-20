@@ -11,8 +11,8 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.auth_api_key import require_api_key
+from app import db
 from app.db import create_db_and_tables
-from app.db import engine
 from app.routers.exams import router as exams_router
 from app.routers.questions import router as questions_router
 from app.routers.submissions import router as submissions_router
@@ -26,6 +26,7 @@ def _resolve_cors_origins() -> list[str]:
         return ["*"]
     return [origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()]
 
+
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
 app.add_middleware(
@@ -35,7 +36,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 app.include_router(exams_router, dependencies=[Depends(require_api_key)])
 app.include_router(questions_router, dependencies=[Depends(require_api_key)])
@@ -82,7 +82,7 @@ def deep_health() -> dict[str, bool | str]:
 
     db_ok = False
     try:
-        with Session(engine) as session:
+        with Session(db.engine) as session:
             session.exec(text("SELECT 1"))
         db_ok = True
     except Exception:
@@ -95,6 +95,12 @@ def deep_health() -> dict[str, bool | str]:
         "data_dir": str(data_dir),
         "db_ok": db_ok,
     }
+
+
+@app.options("/api/{path:path}", include_in_schema=False)
+async def api_preflight(path: str) -> Response:
+    del path
+    return Response(status_code=204)
 
 
 @app.options("/{path:path}", include_in_schema=False)
