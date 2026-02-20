@@ -22,6 +22,7 @@ button:disabled { background: #9ca3af; cursor: not-allowed; }
 .toast { padding: .7rem .9rem; border-radius: 6px; color: white; }
 .toast-success { background: #16a34a; }
 .toast-error { background: #dc2626; }
+.toast-warning { background: #d97706; }
 pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: .5rem; white-space: pre-wrap; }
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(17, 24, 39, 0.45); display: grid; place-items: center; z-index: 15; }
