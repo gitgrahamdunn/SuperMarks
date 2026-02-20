@@ -3,15 +3,14 @@
 import os
 from uuid import uuid4
 
+from fastapi import Depends
 from fastapi import FastAPI
-from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from sqlalchemy import text
-from starlette.middleware.base import BaseHTTPMiddleware
 from sqlmodel import Session
 
+from app.auth_api_key import require_api_key
 from app.db import create_db_and_tables
 from app.db import engine
 from app.routers.exams import router as exams_router
@@ -37,39 +36,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_PUBLIC_PATHS = {
-    "/health",
-    "/health/deep",
-    "/docs",
-    "/openapi.json",
-    "/redoc",
-    "/favicon.ico",
-    "/favicon.png",
-}
 
-
-class ApiKeyAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if request.method == "OPTIONS":
-            return await call_next(request)
-
-        if request.url.path in _PUBLIC_PATHS:
-            return await call_next(request)
-
-        expected_api_key = os.getenv("BACKEND_API_KEY", "").strip()
-        if expected_api_key:
-            received_api_key = request.headers.get("X-API-Key", "")
-            if received_api_key != expected_api_key:
-                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-
-        return await call_next(request)
-
-
-app.add_middleware(ApiKeyAuthMiddleware)
-
-app.include_router(exams_router)
-app.include_router(questions_router)
-app.include_router(submissions_router)
+app.include_router(exams_router, dependencies=[Depends(require_api_key)])
+app.include_router(questions_router, dependencies=[Depends(require_api_key)])
+app.include_router(submissions_router, dependencies=[Depends(require_api_key)])
 
 
 @app.on_event("startup")

@@ -30,7 +30,7 @@ def test_exams_requires_api_key_when_configured(tmp_path, monkeypatch) -> None:
 
 
 
-def test_preflight_bypasses_auth_but_post_requires_api_key(tmp_path, monkeypatch) -> None:
+def test_preflight_bypasses_auth_but_get_requires_api_key(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
     monkeypatch.setenv("BACKEND_API_KEY", "test-api-key")
@@ -43,17 +43,13 @@ def test_preflight_bypasses_auth_but_post_requires_api_key(tmp_path, monkeypatch
             "/api/exams",
             headers={
                 "Origin": "https://example.com",
-                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Method": "GET",
             },
         )
-        unauthorized_post = client.post("/api/exams", json={"name": "Protected"})
-        authorized_post = client.post(
-            "/api/exams",
-            json={"name": "Protected"},
-            headers={"X-API-Key": "test-api-key"},
-        )
+        unauthorized_get = client.get("/api/exams")
+        authorized_get = client.get("/api/exams", headers={"X-API-Key": "test-api-key"})
 
     assert preflight.status_code in (200, 204)
     assert "access-control-allow-origin" in preflight.headers
-    assert unauthorized_post.status_code == 401
-    assert authorized_post.status_code == 201
+    assert unauthorized_get.status_code == 401
+    assert authorized_get.status_code == 200
