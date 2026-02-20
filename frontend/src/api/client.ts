@@ -8,19 +8,13 @@ import type {
   SubmissionResults,
 } from '../types/api';
 
-const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
-
-if (import.meta.env.PROD && !configuredApiBaseUrl) {
-  throw new Error('VITE_API_BASE_URL is required in production.');
-}
-
-const normalizeBaseUrl = (url: string) => {
-  const trimmed = url.replace(/\/$/, '');
-  return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
-};
-
-const API_BASE_URL = normalizeBaseUrl(configuredApiBaseUrl || 'http://localhost:8000');
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
+const API_BASE_URL = configuredApiBaseUrl || '/api';
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
+
+if (import.meta.env.PROD && API_BASE_URL !== '/api') {
+  console.info(`[SuperMarks] Production API base override detected: ${API_BASE_URL}`);
+}
 
 class ApiError extends Error {
   constructor(public status: number, public url: string, message: string) {

@@ -45,7 +45,7 @@ npm install
 npm run dev
 ```
 
-The frontend API client defaults to `http://localhost:8000` in development.
+The frontend API client defaults to same-origin `/api` (so production traffic stays on the frontend domain). For local development, set `VITE_API_BASE_URL` explicitly (for example `http://localhost:8000/api`).
 
 ## Vercel deployment (two projects)
 
@@ -62,6 +62,4 @@ The frontend API client defaults to `http://localhost:8000` in development.
 - Output directory: `dist`
 - SPA routing fallback is handled in `frontend/vercel.json`
 
-Set frontend environment variable in Vercel:
-
-- `VITE_API_BASE_URL=https://<your-backend-project-url>`
+Do not set `VITE_API_BASE_URL` in frontend production env vars (or set it to an empty value) so production uses `/api` and the Vercel rewrite proxy.

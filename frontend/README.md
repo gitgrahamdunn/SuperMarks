@@ -10,15 +10,11 @@ npm install
 npm run dev
 ```
 
-The frontend uses `VITE_API_BASE_URL` when set. For local development it defaults to `http://localhost:8000`.
+The frontend defaults to same-origin `/api`. Set `VITE_API_BASE_URL` only when you need a custom backend URL in local development (for example `http://localhost:8000/api`).
 
 ## Production configuration
 
-Set the following in Vercel (or provide it in `.env.production`):
-
-```env
-VITE_API_BASE_URL=https://REPLACE_WITH_BACKEND_PROJECT_URL
-```
+Do not set `VITE_API_BASE_URL` in production. The app should use `/api`, which Vercel rewrites to the backend via `frontend/vercel.json`.
 
 ## Vercel deployment
 
