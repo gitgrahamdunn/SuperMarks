@@ -275,29 +275,10 @@ export const api = {
     });
   },
   uploadExamKey: async (examId: number, files: File[]) => {
-    const paths = await getOpenApiPaths();
-    const candidates = [
-      '/api/exams/{exam_id}/key/upload',
-      '/api/exams/{exam_id}/key',
-      '/api/exams/{exam_id}/wizard/key',
-      '/api/exams/{exam_id}/answer-key',
-    ];
-    const selectedPath = candidates.find((path) => paths.has(path));
-
-    if (!selectedPath) {
-      throw new ApiError(
-        404,
-        `${API_BASE_URL}/exams/${examId}/key/upload`,
-        'POST',
-        '',
-        'No exam-key upload endpoint available. [404] dynamic endpoint discovery',
-      );
-    }
-
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
 
-    return request<Record<string, unknown>>(selectedPath.replace('/api', '').replace('{exam_id}', String(examId)), {
+    return request<Record<string, unknown>>(`/exams/${examId}/key/upload`, {
       method: 'POST',
       body: formData,
     });
@@ -329,11 +310,15 @@ export const api = {
       return {
         data,
         responseText,
+        status: response.status,
+        url,
       };
     } catch {
       return {
         data: null,
         responseText,
+        status: response.status,
+        url,
       };
     }
   },

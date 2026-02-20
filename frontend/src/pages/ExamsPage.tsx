@@ -1,10 +1,18 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ApiError, api } from '../api/client';
+import { API_BASE_URL, ApiError, api } from '../api/client';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
 
 type WizardStep = 'creating' | 'uploading' | 'parsing' | 'done';
+
+type StepLog = {
+  step: WizardStep;
+  endpointUrl: string;
+  status: number | 'network-error';
+  responseSnippet: string;
+  exceptionMessage?: string;
+};
 
 interface WizardParseResult {
   questions?: unknown;
@@ -13,15 +21,12 @@ interface WizardParseResult {
   };
 }
 
-function getErrorDetails(error: unknown): string {
-  if (error instanceof ApiError) {
-    const body = error.responseBodySnippet ? `\nBody: ${error.responseBodySnippet}` : '\nBody: <empty>';
-    return `${error.method} ${error.url}\nStatus: ${error.status}${body}`;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return 'Unknown error';
+const MB = 1024 * 1024;
+const LARGE_FILE_BYTES = 8 * MB;
+const LARGE_TOTAL_BYTES = 12 * MB;
+
+function formatMb(bytes: number): string {
+  return `${(bytes / MB).toFixed(2)} MB`;
 }
 
 function extractParsedQuestionCount(parseResult: unknown): number {
@@ -49,11 +54,16 @@ function extractParsedQuestionCount(parseResult: unknown): number {
   return 0;
 }
 
+function isNetworkFetchError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error instanceof TypeError || /load failed|failed to fetch|network/i.test(error.message);
+}
+
 export function ExamsPage() {
   const [exams, setExams] = useState<ExamRead[]>([]);
-  const [name, setName] = useState('');
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalName, setModalName] = useState('');
   const [modalFiles, setModalFiles] = useState<File[]>([]);
@@ -62,16 +72,22 @@ export function ExamsPage() {
   const [error, setError] = useState('');
   const [createdExamId, setCreatedExamId] = useState<number | null>(null);
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
+  const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
+  const [allowLargeUpload, setAllowLargeUpload] = useState(false);
   const { showError, showSuccess, showWarning } = useToast();
   const navigate = useNavigate();
+
+  const totalFileBytes = useMemo(() => modalFiles.reduce((sum, file) => sum + file.size, 0), [modalFiles]);
+  const hasSingleLargeFile = useMemo(() => modalFiles.some((file) => file.size > LARGE_FILE_BYTES), [modalFiles]);
+  const totalTooLarge = totalFileBytes > LARGE_TOTAL_BYTES;
 
   const loadExams = async () => {
     try {
       setLoading(true);
       setExams(await api.getExams());
-    } catch (error) {
-      console.error('Failed to load exams', error);
-      showError(error instanceof Error ? error.message : 'Failed to load exams');
+    } catch (loadError) {
+      console.error('Failed to load exams', loadError);
+      showError(loadError instanceof Error ? loadError.message : 'Failed to load exams');
     } finally {
       setLoading(false);
     }
@@ -80,23 +96,6 @@ export function ExamsPage() {
   useEffect(() => {
     void loadExams();
   }, []);
-
-  const onCreate = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!name.trim()) return;
-    try {
-      setCreating(true);
-      await api.createExam(name.trim());
-      setName('');
-      showSuccess('Exam created');
-      await loadExams();
-    } catch (error) {
-      console.error('Failed to create exam', error);
-      showError(error instanceof Error ? error.message : 'Failed to create exam');
-    } finally {
-      setCreating(false);
-    }
-  };
 
   const closeModal = () => {
     if (isRunning) {
@@ -108,6 +107,13 @@ export function ExamsPage() {
     setParsedQuestionCount(null);
     setError('');
     setCreatedExamId(null);
+    setStepLogs([]);
+    setAllowLargeUpload(false);
+    setStep('creating');
+  };
+
+  const logStep = (entry: StepLog) => {
+    setStepLogs((prev) => [...prev, entry]);
   };
 
   const onCreateAndUpload = async (event: FormEvent) => {
@@ -117,70 +123,132 @@ export function ExamsPage() {
       return;
     }
 
+    if (totalTooLarge && !allowLargeUpload) {
+      showWarning('Total files exceed 12 MB. Confirm to continue with upload.');
+      return;
+    }
+
     setError('');
     setParsedQuestionCount(null);
     setCreatedExamId(null);
+    setStepLogs([]);
+
+    let examId: number | null = null;
 
     try {
       setIsRunning(true);
+
       setStep('creating');
-      console.log('[wizard] create exam -> start');
+      const createEndpoint = `${API_BASE_URL}/exams`;
       const exam = await api.createExam(modalName.trim());
-      const examId = exam.id;
-      setCreatedExamId(examId);
-      console.log('[wizard] create exam ->', { exam_id: exam.id });
-      showSuccess('Exam created. Uploading key files...');
+      examId = exam.id;
+      setCreatedExamId(exam.id);
+      logStep({
+        step: 'creating',
+        endpointUrl: createEndpoint,
+        status: 200,
+        responseSnippet: JSON.stringify(exam).slice(0, 500),
+      });
+      showSuccess('Create step succeeded.');
 
       setStep('uploading');
-      console.log('[wizard] upload key -> start');
-      const uploadResult = await api.uploadExamKey(examId, modalFiles);
-      console.log('[wizard] upload key ->', uploadResult);
-      showSuccess('Key uploaded. Parsing key...');
+      const uploadEndpoint = `${API_BASE_URL}/exams/${exam.id}/key/upload`;
+      const uploadResult = await api.uploadExamKey(exam.id, modalFiles);
+      logStep({
+        step: 'uploading',
+        endpointUrl: uploadEndpoint,
+        status: 200,
+        responseSnippet: JSON.stringify(uploadResult).slice(0, 500),
+      });
+      showSuccess('Upload step succeeded.');
 
       setStep('parsing');
-      console.log('[wizard] parse key -> start');
-      const { data: parseResult, responseText } = await api.parseExamKeyRaw(examId);
-      console.log('[wizard] parse key ->', parseResult ?? responseText);
-      if (parseResult === null) {
-        const responseSnippet = responseText.slice(0, 300);
-        const parseError = `POST /exams/${examId}/key/parse\nStatus: 200\nBody: ${responseSnippet || '<empty>'}`;
+      const parseOutcome = await api.parseExamKeyRaw(exam.id);
+      const parseSnippet = (parseOutcome.responseText || JSON.stringify(parseOutcome.data)).slice(0, 500);
+      logStep({
+        step: 'parsing',
+        endpointUrl: parseOutcome.url,
+        status: parseOutcome.status,
+        responseSnippet: parseSnippet,
+      });
+
+      if (parseOutcome.data === null) {
+        const parseError = `Parse step failed. Endpoint: ${parseOutcome.url}. Status: ${parseOutcome.status}. Response: ${parseSnippet || '<empty>'}`;
         setError(parseError);
-        showError(`Parse key failed:\n${parseError}`);
+        showError(`parsing failed (status ${parseOutcome.status})`);
         return;
       }
 
-      const questionCount = extractParsedQuestionCount(parseResult);
-      console.log(`[wizard] parse key -> parsed_questions=${questionCount}`);
-
+      showSuccess('Parse step succeeded.');
+      const questionCount = extractParsedQuestionCount(parseOutcome.data);
       setParsedQuestionCount(questionCount);
       setStep('done');
-      localStorage.setItem(`supermarks:lastParse:${examId}`, JSON.stringify(parseResult));
+      localStorage.setItem(`supermarks:lastParse:${exam.id}`, JSON.stringify(parseOutcome.data));
 
       if (questionCount === 0) {
         showWarning('Parse completed but returned 0 questions. Opening review anyway.');
-      } else {
-        showSuccess(`Key parsed successfully (${questionCount} questions). Opening review wizard...`);
       }
 
       setModalName('');
       setModalFiles([]);
       setIsModalOpen(false);
       await loadExams();
-      navigate(`/exams/${examId}/review`);
+      navigate(`/exams/${exam.id}/review`);
     } catch (err) {
       console.error('Create exam wizard failed', err);
-      const details = getErrorDetails(err);
-      setError(details);
-      showError(`Create exam wizard failed:\n${details}`);
+      const stepName = step;
+      const stepEndpoint =
+        stepName === 'creating'
+          ? `${API_BASE_URL}/exams`
+          : stepName === 'uploading' && examId
+            ? `${API_BASE_URL}/exams/${examId}/key/upload`
+            : stepName === 'parsing' && examId
+              ? `${API_BASE_URL}/exams/${examId}/key/parse`
+              : `${API_BASE_URL}/unknown`;
+
+      if (isNetworkFetchError(err)) {
+        const networkMessage = `Network request failed (browser blocked/aborted). Step: ${stepName}. URL: ${stepEndpoint}`;
+        setError(networkMessage);
+        logStep({
+          step: stepName,
+          endpointUrl: stepEndpoint,
+          status: 'network-error',
+          responseSnippet: '',
+          exceptionMessage: err instanceof Error ? err.stack || err.message : String(err),
+        });
+        showError(networkMessage);
+      } else if (err instanceof ApiError) {
+        const details = `${err.method} ${err.url}\nStatus: ${err.status}\nBody: ${err.responseBodySnippet || '<empty>'}`;
+        setError(details);
+        logStep({
+          step: stepName,
+          endpointUrl: err.url,
+          status: err.status,
+          responseSnippet: err.responseBodySnippet || '<empty>',
+          exceptionMessage: err.stack || err.message,
+        });
+        showError(`${stepName} failed (status ${err.status})`);
+      } else {
+        const details = err instanceof Error ? err.stack || err.message : 'Unknown error';
+        setError(details);
+        logStep({
+          step: stepName,
+          endpointUrl: stepEndpoint,
+          status: 0,
+          responseSnippet: '',
+          exceptionMessage: details,
+        });
+        showError(`${stepName} failed (status unknown)`);
+      }
     } finally {
       setIsRunning(false);
     }
   };
 
   const wizardSteps: Array<{ id: WizardStep; label: string }> = [
-    { id: 'creating', label: 'Creating exam...' },
-    { id: 'uploading', label: 'Uploading key...' },
-    { id: 'parsing', label: 'Parsing key...' },
+    { id: 'creating', label: 'Creating exam' },
+    { id: 'uploading', label: 'Uploading key files' },
+    { id: 'parsing', label: 'Parsing key files' },
     { id: 'done', label: `Done (${parsedQuestionCount ?? 0} questions)` },
   ];
 
@@ -189,16 +257,15 @@ export function ExamsPage() {
   return (
     <div>
       <h1>Exams</h1>
-      <form onSubmit={onCreate} className="card inline-form wrap-mobile">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Exam name" required />
-        <button type="submit" disabled={creating}>{creating ? 'Creating...' : 'Create Exam'}</button>
-        <button type="button" onClick={() => setIsModalOpen(true)} disabled={creating}>Create Exam Wizard</button>
-      </form>
+      <div className="card actions-row">
+        <button type="button" onClick={() => setIsModalOpen(true)} disabled={isRunning}>Enter Exam Key</button>
+      </div>
 
       {isModalOpen && (
         <div className="modal-backdrop">
           <div className="card modal stack">
             <h2>Create Exam Wizard</h2>
+            <p className="subtle-text wizard-step-banner">Current step: {isRunning ? step : 'ready'}</p>
             <form onSubmit={onCreateAndUpload} className="stack" encType="multipart/form-data">
               <label className="stack">
                 Exam name
@@ -215,30 +282,80 @@ export function ExamsPage() {
                 <input
                   type="file"
                   accept="application/pdf,image/png,image/jpeg,image/jpg"
-                  onChange={(e) => setModalFiles(Array.from(e.target.files || []))}
+                  onChange={(e) => {
+                    setModalFiles(Array.from(e.target.files || []));
+                    setAllowLargeUpload(false);
+                  }}
                   multiple
                   required
                   disabled={isRunning}
                 />
               </label>
 
-              {isRunning && (
-                <ul className="subtle-text">
-                  <li>Current step: {step}</li>
-                  {wizardSteps.map((wizardStep, index) => {
-                    const isActive = step === wizardStep.id;
-                    const isComplete = activeStepIndex > index;
-                    const marker = isComplete ? '✓' : isActive ? '…' : '○';
-                    return <li key={wizardStep.id}>{marker} {wizardStep.label}</li>;
-                  })}
-                </ul>
+              {modalFiles.length > 0 && (
+                <div className="file-list-block subtle-text">
+                  <strong>Selected files</strong>
+                  <ul>
+                    {modalFiles.map((file) => (
+                      <li key={`${file.name}-${file.size}`}>{file.name} — {formatMb(file.size)}</li>
+                    ))}
+                  </ul>
+                  <p>Total: {formatMb(totalFileBytes)}</p>
+                </div>
               )}
+
+              {hasSingleLargeFile && (
+                <p className="warning-text">This file may be too large for serverless upload. Try images or a smaller PDF.</p>
+              )}
+
+              {totalTooLarge && (
+                <div className="warning-strong">
+                  <p>Total selection exceeds 12 MB and may fail in serverless environments.</p>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={allowLargeUpload}
+                      onChange={(e) => setAllowLargeUpload(e.target.checked)}
+                      disabled={isRunning}
+                    />{' '}
+                    I understand and want to continue anyway.
+                  </label>
+                </div>
+              )}
+
+              <ul className="subtle-text">
+                {wizardSteps.map((wizardStep, index) => {
+                  const isActive = step === wizardStep.id;
+                  const isComplete = activeStepIndex > index;
+                  const marker = isComplete ? '✓' : isActive ? '…' : '○';
+                  return <li key={wizardStep.id}>{marker} {wizardStep.label}</li>;
+                })}
+              </ul>
 
               {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
               {error && <p className="subtle-text">{error}</p>}
 
+              <details>
+                <summary>Show details</summary>
+                <div className="subtle-text stack">
+                  <p>API base URL: {API_BASE_URL}</p>
+                  {stepLogs.length === 0 && <p>No step details yet.</p>}
+                  {stepLogs.map((entry, index) => (
+                    <div key={`${entry.step}-${index}`} className="wizard-detail-block">
+                      <p><strong>Step:</strong> {entry.step}</p>
+                      <p><strong>Endpoint:</strong> {entry.endpointUrl}</p>
+                      <p><strong>Status:</strong> {entry.status}</p>
+                      <p><strong>Response snippet:</strong> {(entry.responseSnippet || '<empty>').slice(0, 500)}</p>
+                      {entry.exceptionMessage && <p><strong>Exception:</strong> {entry.exceptionMessage}</p>}
+                    </div>
+                  ))}
+                </div>
+              </details>
+
               <div className="actions-row">
-                <button type="submit" disabled={isRunning}>{isRunning ? 'Working...' : 'Enter exam & parse'}</button>
+                <button type="submit" disabled={isRunning || (totalTooLarge && !allowLargeUpload)}>
+                  {isRunning ? 'Working...' : 'Enter exam & parse'}
+                </button>
                 <button type="button" onClick={closeModal} disabled={isRunning}>Cancel</button>
               </div>
             </form>
