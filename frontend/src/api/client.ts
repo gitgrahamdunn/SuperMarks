@@ -63,11 +63,7 @@ function withApiKeyHeader(options: RequestInit = {}): RequestInit {
 }
 
 function getOpenApiSchemaUrl(): string {
-  if (import.meta.env.PROD && !configuredApiBaseUrl) {
-    return '/api/openapi.json';
-  }
-  const normalized = API_BASE_URL.replace(/\/+$/, '');
-  return `${normalized}/openapi.json`;
+  return '/api/openapi.json';
 }
 
 function stripSnippet(text: string): string {
