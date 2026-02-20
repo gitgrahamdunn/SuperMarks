@@ -23,7 +23,7 @@ const API_BASE_URL = normalizeBaseUrl(configuredApiBaseUrl || 'http://localhost:
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
 
 class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, public url: string, message: string) {
     super(message);
     this.name = 'ApiError';
   }
@@ -39,7 +39,12 @@ function withApiKeyHeader(options: RequestInit = {}): RequestInit {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, withApiKeyHeader(options));
+  if (!path.startsWith('/') || path === '/') {
+    throw new Error(`Invalid API path: "${path}"`);
+  }
+
+  const url = `${API_BASE_URL}${path}`;
+  const response = await fetch(url, withApiKeyHeader(options));
   if (!response.ok) {
     let message = response.status === 401 ? 'Unauthorized (check API key config)' : `Request failed (${response.status})`;
     try {
@@ -50,7 +55,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     } catch {
       // ignore parse error
     }
-    throw new ApiError(response.status, message);
+    throw new ApiError(response.status, url, `${message} [${response.status}] ${url}`);
   }
 
   const contentType = response.headers.get('content-type') || '';
@@ -114,7 +119,7 @@ export const api = {
     const selectedPath = candidates.find((path) => paths.has(path));
 
     if (!selectedPath) {
-      throw new ApiError(404, 'No exam-key upload endpoint available.');
+      throw new ApiError(404, `${API_BASE_URL}/exams/${examId}/key/upload`, 'No exam-key upload endpoint available. [404] dynamic endpoint discovery');
     }
 
     const formData = new FormData();
@@ -175,7 +180,7 @@ export const api = {
       });
     }
 
-    throw new ApiError(404, 'Save endpoint is not available.');
+    throw new ApiError(404, `${API_BASE_URL}/questions/${questionId}`, 'Save endpoint is not available. [404] dynamic endpoint discovery');
   },
 };
 

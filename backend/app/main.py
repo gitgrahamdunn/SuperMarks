@@ -48,6 +48,17 @@ def on_startup() -> None:
     create_db_and_tables()
 
 
+@app.get("/", tags=["meta"])
+def root() -> dict[str, bool | str]:
+    return {"ok": True, "service": "supermarks-backend"}
+
+
+@app.get("/favicon.ico", include_in_schema=False, tags=["meta"])
+@app.get("/favicon.png", include_in_schema=False, tags=["meta"])
+def favicon() -> Response:
+    return Response(status_code=204)
+
+
 @app.get("/health", tags=["meta"])
 def health() -> dict[str, bool]:
     openai_api_key = os.getenv("OPENAI_API_KEY", "")
