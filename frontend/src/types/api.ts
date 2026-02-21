@@ -73,3 +73,13 @@ export interface SubmissionResults {
   transcriptions: TranscriptionRead[];
   grades: GradeResultRead[];
 }
+
+
+export interface ExamKeyPage {
+  id: number;
+  exam_id: number;
+  page_number: number;
+  image_path: string;
+  width: number;
+  height: number;
+}

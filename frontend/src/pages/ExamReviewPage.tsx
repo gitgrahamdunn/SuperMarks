@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, getOpenApiPaths } from '../api/client';
+import { EvidenceOverlayCanvas, type EvidenceBox } from '../components/EvidenceOverlayCanvas';
 import { useToast } from '../components/ToastProvider';
 import type { QuestionRead } from '../types/api';
 
@@ -12,6 +13,8 @@ interface Criterion {
 type MarksSource = 'explicit' | 'inferred' | 'unknown';
 
 interface EditableQuestion {
+  needs_review: boolean;
+  evidence: EvidenceBox[];
   id: number;
   label: string;
   max_marks: number;
@@ -224,12 +227,12 @@ export function ExamReviewPage() {
       <p>Question {currentIndex + 1} of {questions.length}</p>
 
       <div className="stack" style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: 10, background: '#f8fafc' }}>
+        <label><input type="checkbox" checked={!previewError && (currentQuestion.evidence?.length ?? 0) > 0} readOnly /> Evidence loaded</label>
         {!previewError ? (
-          <img
-            src={api.getQuestionKeyVisualUrl(examId, currentQuestion.id)}
-            alt={`Key visual for ${currentQuestion.label}`}
-            style={{ maxWidth: '100%', borderRadius: 8 }}
-            onError={() => setPreviewError(true)}
+          <EvidenceOverlayCanvas
+            imageUrl={api.getQuestionKeyVisualUrl(examId, currentQuestion.id)}
+            evidence={currentQuestion.evidence || []}
+            visible
           />
         ) : (
           <p className="subtle-text">No preview available.</p>
@@ -302,7 +305,7 @@ export function ExamReviewPage() {
         <button type="button" onClick={() => setCurrentIndex((idx) => Math.min(questions.length - 1, idx + 1))} disabled={!canGoNext}>Next</button>
         <button type="button" onClick={onSave} disabled={saving || !saveAvailable}>{saving ? 'Saving...' : 'Save'}</button>
         <button type="button" onClick={onConfirmMarks} disabled={saving || !saveAvailable}>Confirm marks</button>
-        <button type="button" onClick={() => navigate(`/exams/${examId}`)}>Finish Review</button>
+        <button type="button" onClick={async () => { await api.completeExamKeyReview(examId); navigate(`/exams/${examId}`); }}>Finish setup</button>
       </div>
     </div>
   );
@@ -339,6 +342,8 @@ function mapFallbackQuestion(item: unknown, index: number): EditableQuestion | n
       answer_key: String(item || ''),
       model_solution: '',
       rubric_json: {},
+      evidence: [],
+      needs_review: true,
     };
   }
 
@@ -362,15 +367,19 @@ function mapFallbackQuestion(item: unknown, index: number): EditableQuestion | n
     answer_key: String(rubric_json.answer_key || value.answer_key || ''),
     model_solution: String(rubric_json.model_solution || value.model_solution || ''),
     rubric_json,
+    evidence: Array.isArray((rubric_json as Record<string, unknown>).evidence) ? ((rubric_json as Record<string, unknown>).evidence as EvidenceBox[]) : [],
+    needs_review: Boolean((rubric_json as Record<string, unknown>).needs_review),
   };
 }
 
-function buildRubric(question: Pick<EditableQuestion, 'criteria' | 'answer_key' | 'model_solution' | 'rubric_json'>) {
+function buildRubric(question: Pick<EditableQuestion, 'criteria' | 'answer_key' | 'model_solution' | 'rubric_json' | 'needs_review' | 'evidence'>) {
   return {
     ...question.rubric_json,
     criteria: question.criteria,
     answer_key: question.answer_key,
     model_solution: question.model_solution,
+    needs_review: question.needs_review,
+    evidence: question.evidence,
   };
 }
 
@@ -386,6 +395,8 @@ function mapQuestion(question: QuestionRead): EditableQuestion {
     answer_key: String(question.rubric_json?.answer_key || ''),
     model_solution: String(question.rubric_json?.model_solution || ''),
     rubric_json: question.rubric_json,
+    evidence: Array.isArray(question.rubric_json?.evidence) ? (question.rubric_json.evidence as EvidenceBox[]) : [],
+    needs_review: Boolean(question.rubric_json?.needs_review),
   };
 }
 

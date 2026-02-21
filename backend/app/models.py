@@ -24,7 +24,12 @@ class SubmissionStatus(str, Enum):
 
 class ExamStatus(str, Enum):
     DRAFT = "DRAFT"
+    KEY_UPLOADED = "KEY_UPLOADED"
+    KEY_PAGES_READY = "KEY_PAGES_READY"
+    PARSED = "PARSED"
     REVIEWING = "REVIEWING"
+    READY = "READY"
+    FAILED = "FAILED"
 
 
 class Exam(SQLModel, table=True):
@@ -86,6 +91,32 @@ class ExamKeyPage(SQLModel, table=True):
     image_path: str
     width: int
     height: int
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class ExamKeyParseRun(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    exam_id: int = Field(foreign_key="exam.id", index=True)
+    request_id: str = Field(index=True)
+    model_used: str
+    status: str
+    started_at: datetime = Field(default_factory=utcnow)
+    finished_at: Optional[datetime] = None
+    error_json: Optional[str] = None
+    timings_json: Optional[str] = None
+
+
+class QuestionParseEvidence(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    question_id: int = Field(foreign_key="question.id", index=True)
+    exam_id: int = Field(foreign_key="exam.id", index=True)
+    page_number: int
+    x: float
+    y: float
+    w: float
+    h: float
+    evidence_kind: str
+    confidence: float
     created_at: datetime = Field(default_factory=utcnow)
 
 
