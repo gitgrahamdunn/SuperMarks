@@ -28,7 +28,6 @@ from app.ai.openai_vision import (
 )
 from app.db import get_session
 from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
-from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
 from app.schemas import ExamCreate, ExamDetail, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, SubmissionFileRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data, save_upload_file, upload_dir
@@ -44,6 +43,7 @@ _ALLOWED_TYPES = {
 }
 
 _ALLOWED_KEY_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+_MAX_RENDERED_KEY_PAGES = 10
 
 
 def _exam_key_pages_dir(exam_id: int) -> Path:
@@ -80,6 +80,32 @@ def _normalize_to_png(input_path: Path, output_path: Path) -> tuple[int, int]:
         return rgb.width, rgb.height
 
 
+def _render_pdf_pages(input_path: Path, output_dir: Path, start_page_number: int, max_pages: int) -> list[Path]:
+    try:
+        import fitz  # pymupdf
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="PDF render failed. Try uploading images.") from exc
+
+    rendered_paths: list[Path] = []
+    try:
+        with fitz.open(input_path) as doc:
+            page_count = doc.page_count
+            if page_count > max_pages:
+                raise HTTPException(status_code=400, detail=f"PDF has {page_count} pages; maximum supported is {max_pages}.")
+
+            for index, page in enumerate(doc):
+                output_path = output_dir / f"page_{start_page_number + index:04d}.png"
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                pixmap.save(str(output_path))
+                rendered_paths.append(output_path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="PDF render failed. Try uploading images.") from exc
+
+    return rendered_paths
+
+
 def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
     existing = _load_key_page_images(exam_id, session)
     if existing:
@@ -102,6 +128,11 @@ def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
 
         extension = source_path.suffix.lower()
         if extension in {".png", ".jpg", ".jpeg"}:
+            if page_num > _MAX_RENDERED_KEY_PAGES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Too many key pages; maximum supported is {_MAX_RENDERED_KEY_PAGES}.",
+                )
             out_path = output_dir / f"page_{page_num:04d}.png"
             width, height = _normalize_to_png(source_path, out_path)
             session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(out_path), width=width, height=height))
@@ -110,16 +141,22 @@ def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
             continue
 
         if extension == ".pdf":
-            try:
-                converter = Pdf2ImageConverter()
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail="PDF rendering not available on serverless. Upload images.") from exc
-            rendered_paths = converter.convert(source_path, output_dir)
+            remaining_pages = _MAX_RENDERED_KEY_PAGES - (page_num - 1)
+            if remaining_pages <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Too many key pages; maximum supported is {_MAX_RENDERED_KEY_PAGES}.",
+                )
+            rendered_paths = _render_pdf_pages(
+                source_path,
+                output_dir,
+                start_page_number=page_num,
+                max_pages=remaining_pages,
+            )
             for rendered in rendered_paths:
-                out_path = output_dir / f"page_{page_num:04d}.png"
-                width, height = normalize_image_to_png(rendered, out_path)
-                session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(out_path), width=width, height=height))
-                created_paths.append(out_path)
+                width, height = _normalize_to_png(rendered, rendered)
+                session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(rendered), width=width, height=height))
+                created_paths.append(rendered)
                 page_num += 1
 
     session.commit()
