@@ -12,12 +12,14 @@ from typing import Protocol
 
 ANSWER_KEY_SCHEMA: dict[str, object] = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "confidence_score": {"type": "number"},
         "questions": {
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "label": {"type": "string"},
                     "max_marks": {"type": "number"},
@@ -28,6 +30,7 @@ ANSWER_KEY_SCHEMA: dict[str, object] = {
                         "type": "array",
                         "items": {
                             "type": "object",
+                            "additionalProperties": False,
                             "properties": {
                                 "desc": {"type": "string"},
                                 "marks": {"type": "number"},
