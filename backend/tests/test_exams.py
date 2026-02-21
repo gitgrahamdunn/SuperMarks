@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 pytest.importorskip("httpx")
@@ -13,6 +15,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from app import db
+from app.ai.openai_vision import OpenAIAnswerKeyParser
 from app.main import app
 from app.models import ExamKeyFile, ExamKeyPage, Question
 from app.settings import settings
@@ -185,6 +188,86 @@ def test_parse_answer_key_escalates_nano_to_mini_when_mock_nano_is_low_confidenc
             "nano questions=0 or low confidence -> escalating to mini" in record.getMessage()
             for record in caplog.records
         )
+
+
+def test_parse_answer_key_retries_timeout_and_returns_200(tmp_path, monkeypatch, caplog) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    parser = OpenAIAnswerKeyParser.__new__(OpenAIAnswerKeyParser)
+    parser._max_images_per_request = 1
+    parser._payload_limit_bytes = 2_500_000
+    parser._retry_backoffs_seconds = (0.0, 0.0)
+
+    class _FakeResponse:
+        def __init__(self, output_text: str) -> None:
+            self.output_text = output_text
+
+    class _FakeResponses:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs):
+            _ = kwargs
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.TimeoutException("Request timed out.")
+            return _FakeResponse(
+                json.dumps({
+                    "confidence_score": 0.81,
+                    "warnings": [],
+                    "questions": [{
+                        "label": "Q1",
+                        "max_marks": 4,
+                        "marks_source": "explicit",
+                        "marks_confidence": 0.9,
+                        "marks_reason": "visible",
+                        "question_text": "Find x",
+                        "answer_key": "x=2",
+                        "model_solution": "algebra",
+                        "warnings": [],
+                        "criteria": [{"desc": "correct", "marks": 4}],
+                        "evidence": [{"page_number": 1, "x": 0.1, "y": 0.1, "w": 0.8, "h": 0.2, "kind": "question_box", "confidence": 0.8}],
+                    }],
+                })
+            )
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.responses = _FakeResponses()
+
+    parser._client = _FakeClient()
+
+    app.dependency_overrides = {}
+    from app.ai.openai_vision import get_answer_key_parser
+
+    app.dependency_overrides[get_answer_key_parser] = lambda: parser
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Timeout Retry Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        caplog.set_level(logging.INFO)
+        response = client.post(f"/api/exams/{exam_id}/key/parse")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["questions_count"] == 1
+        assert payload["stage"] == "save_questions"
+        assert payload["attempts"][0]["model"] == "gpt-5-nano"
+        assert any("key/parse openai retry" in r.getMessage() for r in caplog.records)
+
+    app.dependency_overrides = {}
+
 
 
 def test_patch_question_updates_fields_and_list_reflects_changes(tmp_path) -> None:
