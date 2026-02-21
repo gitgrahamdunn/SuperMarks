@@ -76,6 +76,7 @@ def test_parse_answer_key_builds_pages_from_uploaded_images(tmp_path, monkeypatc
         response = client.post(f"/api/exams/{exam_id}/key/parse")
         assert response.status_code == 200
         assert response.json()["questions_count"] == 2
+        assert "No key page images found" not in response.text
 
         key_pages_dir = Path(settings.data_dir) / "exams" / str(exam_id) / "key_pages"
         page_files = sorted(key_pages_dir.glob("*.png"))
