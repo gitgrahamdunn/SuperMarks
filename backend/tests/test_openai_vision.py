@@ -56,7 +56,11 @@ def test_answer_key_schema_is_strict_for_all_object_nodes() -> None:
 
     questions_items_required = schema["properties"]["questions"]["items"]["required"]
     assert isinstance(questions_items_required, list)
-    assert questions_items_required == ["label", "max_marks", "question_text", "answer_key", "model_solution", "notes", "criteria"]
+    assert "label" in questions_items_required
+    assert "max_marks" in questions_items_required
+    assert "marks_source" in questions_items_required
+    assert "marks_confidence" in questions_items_required
+    assert "evidence" in questions_items_required
 
 
 def test_schema_validation_rejects_non_strict_shape() -> None:

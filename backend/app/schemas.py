@@ -112,5 +112,16 @@ class ExamDetail(BaseModel):
     questions: list[QuestionRead]
 
 
+
+
+class ExamKeyPageRead(BaseModel):
+    id: int
+    exam_id: int
+    page_number: int
+    image_path: str
+    width: int
+    height: int
+
+
 class ExamKeyUploadResponse(BaseModel):
     uploaded: int

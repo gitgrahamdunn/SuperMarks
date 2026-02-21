@@ -3,6 +3,7 @@ import type {
   ExamRead,
   QuestionRead,
   Region,
+  ExamKeyPage,
   SubmissionPage,
   SubmissionRead,
   SubmissionResults,
@@ -27,7 +28,10 @@ class ApiError extends Error {
 const REQUIRED_BACKEND_PATHS = [
   '/api/exams',
   '/api/exams/{exam_id}/key/upload',
+  '/api/exams/{exam_id}/key/build-pages',
   '/api/exams/{exam_id}/key/parse',
+  '/api/exams/{exam_id}/key/pages',
+  '/api/exams/{exam_id}/key/review/complete',
 ] as const;
 
 const NORMALIZED_REQUIRED_BACKEND_PATHS = REQUIRED_BACKEND_PATHS.map((path) => normalizeOpenApiPath(path));
@@ -299,6 +303,11 @@ export const api = {
     const examDetail = await request<ExamDetail>(`exams/${examId}`);
     return examDetail.questions || [];
   },
+
+  buildExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST' }),
+  listExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/pages`),
+  getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),
+  completeExamKeyReview: (examId: number) => request<{ exam_id: number; status: string; warnings: string[] }>(`exams/${examId}/key/review/complete`, { method: 'POST' }),
   parseExamKey: (examId: number) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST' }),
   parseExamKeyRaw: async (examId: number) => {
     const path = `exams/${examId}/key/parse`;

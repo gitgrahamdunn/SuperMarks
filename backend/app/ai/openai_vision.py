@@ -52,6 +52,7 @@ def _base_answer_key_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "confidence_score": {"type": "number"},
+            "warnings": {"type": "array", "items": {"type": "string"}},
             "questions": {
                 "type": "array",
                 "items": {
@@ -59,10 +60,13 @@ def _base_answer_key_schema() -> dict[str, Any]:
                     "properties": {
                         "label": {"type": "string"},
                         "max_marks": {"type": "number"},
+                        "marks_source": {"type": "string", "enum": ["explicit", "inferred", "unknown"]},
+                        "marks_confidence": {"type": "number"},
+                        "marks_reason": {"type": "string"},
                         "question_text": {"type": "string"},
                         "answer_key": {"type": "string"},
                         "model_solution": {"type": "string"},
-                        "notes": {"type": "string"},
+                        "warnings": {"type": "array", "items": {"type": "string"}},
                         "criteria": {
                             "type": "array",
                             "items": {
@@ -70,6 +74,21 @@ def _base_answer_key_schema() -> dict[str, Any]:
                                 "properties": {
                                     "desc": {"type": "string"},
                                     "marks": {"type": "number"},
+                                },
+                            },
+                        },
+                        "evidence": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "page_number": {"type": "integer"},
+                                    "x": {"type": "number"},
+                                    "y": {"type": "number"},
+                                    "w": {"type": "number"},
+                                    "h": {"type": "number"},
+                                    "kind": {"type": "string", "enum": ["question_box", "answer_box", "marks_box"]},
+                                    "confidence": {"type": "number"},
                                 },
                             },
                         },
@@ -199,8 +218,7 @@ class OpenAIAnswerKeyParser:
             "You are parsing an exam answer key and must produce exam-aware structured output. "
             "Identify question boundaries using patterns like Q1, Q2, Question 1, 1., 2), (a), (b). "
             "Identify marks using patterns like [3 marks], (5 marks), /5, out of 5, 5 pts. "
-            "For each question extract: label, max_marks, question_text, answer_key (final answer token), "
-            "model_solution, and criteria[] with desc + marks. "
+            "For each question extract: label, max_marks, marks_source, marks_confidence, marks_reason, question_text, answer_key, model_solution, criteria[] with desc + marks, warnings[], and evidence[] boxes using normalized coordinates 0..1 plus page_number and kind. "
             "If marks are not explicit, make a best guess for max_marks and include uncertainty notes inside "
             "question_text or model_solution while still conforming to the schema. "
             "IMPORTANT: If any problem text exists but reliable question splitting is not possible, return exactly "
@@ -283,7 +301,7 @@ class OpenAIAnswerKeyParser:
             if isinstance(confidence, (int, float)):
                 confidence_scores.append(float(confidence))
         merged_confidence = min(confidence_scores) if confidence_scores else 0.0
-        return ParseResult(payload={"confidence_score": merged_confidence, "questions": merged_questions}, model=model)
+        return ParseResult(payload={"confidence_score": merged_confidence, "questions": merged_questions, "warnings": []}, model=model)
 
 
 class MockAnswerKeyParser:
@@ -295,29 +313,40 @@ class MockAnswerKeyParser:
         return ParseResult(
             payload={
                 "confidence_score": 0.8,
+                "warnings": [],
                 "questions": [
                     {
                         "label": "Q1",
                         "max_marks": 5,
+                        "marks_source": "explicit",
+                        "marks_confidence": 0.9,
+                        "marks_reason": "Found (5 marks) near question heading",
                         "question_text": "Solve for x",
                         "answer_key": "x=4",
                         "model_solution": "x+3=7 so x=4",
+                        "warnings": [],
                         "criteria": [
                             {"desc": "Correct algebra", "marks": 3},
-                            {"desc": "Correct final answer", "marks": 2},
+                            {"desc": "Correct final answer", "marks": 2}
                         ],
+                        "evidence": [{"page_number": 1, "x": 0.1, "y": 0.2, "w": 0.7, "h": 0.15, "kind": "question_box", "confidence": 0.88}]
                     },
                     {
                         "label": "Q2",
                         "max_marks": 3,
+                        "marks_source": "inferred",
+                        "marks_confidence": 0.66,
+                        "marks_reason": "Summed subparts",
                         "question_text": "Find y",
                         "answer_key": "y=7",
                         "model_solution": "Substitute and solve",
+                        "warnings": ["marks inferred"],
                         "criteria": [
                             {"desc": "Method", "marks": 1},
-                            {"desc": "Correct final answer", "marks": 2},
+                            {"desc": "Correct final answer", "marks": 2}
                         ],
-                    },
+                        "evidence": [{"page_number": 1, "x": 0.1, "y": 0.4, "w": 0.7, "h": 0.15, "kind": "question_box", "confidence": 0.75}]
+                    }
                 ],
             },
             model=model,

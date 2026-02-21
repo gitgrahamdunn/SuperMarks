@@ -5,7 +5,7 @@ import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
 
-type WizardStep = 'creating' | 'uploading' | 'parsing' | 'done';
+type WizardStep = 'creating' | 'uploading' | 'building_pages' | 'parsing' | 'done';
 
 type StepLog = {
   step: WizardStep;
@@ -168,6 +168,17 @@ export function ExamsPage() {
       });
       showSuccess('Upload step succeeded.');
 
+      setStep('building_pages');
+      const buildEndpoint = buildApiUrl(`exams/${exam.id}/key/build-pages`);
+      const buildPages = await api.buildExamKeyPages(exam.id);
+      logStep({
+        step: 'building_pages',
+        endpointUrl: buildEndpoint,
+        status: 200,
+        responseSnippet: JSON.stringify(buildPages).slice(0, 500),
+      });
+      showSuccess('Pages preview is ready.');
+
       setStep('parsing');
       const parseOutcome = await api.parseExamKeyRaw(exam.id);
       const parseSnippet = (parseOutcome.responseText || JSON.stringify(parseOutcome.data)).slice(0, 500);
@@ -282,7 +293,7 @@ export function ExamsPage() {
       {isModalOpen && (
         <div className="modal-backdrop">
           <div className="card modal stack">
-            <h2>Create Exam Wizard</h2>
+            <h2>Enter Exam Key</h2>
             <p className="subtle-text wizard-step-banner">Current step: {isRunning ? step : 'ready'}</p>
             <form onSubmit={onCreateAndUpload} className="stack" encType="multipart/form-data">
               <label className="stack">
