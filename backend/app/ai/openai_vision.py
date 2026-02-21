@@ -5,10 +5,14 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+
+logger = logging.getLogger(__name__)
 
 
 ANSWER_KEY_SCHEMA: dict[str, object] = {
@@ -89,8 +93,6 @@ def build_key_parse_request(
             }
         )
 
-    strict_schema = make_schema_strict(copy.deepcopy(schema))
-
     return {
         "model": model,
         "input": [{"role": "user", "content": content}],
@@ -99,10 +101,21 @@ def build_key_parse_request(
                 "type": "json_schema",
                 "name": "answer_key_parse",
                 "strict": True,
-                "schema": strict_schema,
+                "schema": schema,
             }
         },
     }
+
+
+def force_questions_items_schema_requirements(schema: dict[str, object]) -> None:
+    items = schema["properties"]["questions"]["items"]
+    items["type"] = "object"
+    items["additionalProperties"] = False
+    items["required"] = ["label", "max_marks", "criteria"]
+    items.setdefault("properties", {})
+    items["properties"].setdefault("label", {"type": "string"})
+    items["properties"].setdefault("max_marks", {"type": "number"})
+    items["properties"].setdefault("criteria", {"type": "array"})
 
 
 def make_schema_strict(schema: dict) -> dict:
@@ -169,12 +182,21 @@ class OpenAIAnswerKeyParser:
         for chunk in chunks:
             images = [path.read_bytes() for path in chunk]
             mime_types = ["image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png" for path in chunk]
+            schema = copy.deepcopy(ANSWER_KEY_SCHEMA)
+            force_questions_items_schema_requirements(schema)
+            strict_schema = make_schema_strict(schema)
+            questions_items_schema = strict_schema["properties"]["questions"]["items"]
+            logger.debug(
+                "OpenAI answer_key_parse schema questions.items=%s required_type=%s",
+                json.dumps(questions_items_schema, default=str)[:800],
+                type(questions_items_schema.get("required")).__name__,
+            )
             request_payload = build_key_parse_request(
                 model=model,
                 prompt=prompt,
                 images=images,
                 mime_types=mime_types,
-                schema=ANSWER_KEY_SCHEMA,
+                schema=strict_schema,
             )
             try:
                 response = self._client.responses.create(**request_payload)
