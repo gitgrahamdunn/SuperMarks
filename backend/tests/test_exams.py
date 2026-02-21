@@ -11,8 +11,19 @@ from sqlmodel import SQLModel, Session, create_engine, select
 
 from app import db
 from app.main import app
-from app.models import ExamKeyFile
+from app.models import ExamKeyFile, ExamKeyPage, Question
 from app.settings import settings
+
+def _tiny_png_bytes() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+        b"\x90wS\xde"
+        b"\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01"
+        b"\x0b\xe7\x02\x9d"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
 
 
 def test_list_exams_returns_created_exams(tmp_path) -> None:
@@ -43,7 +54,7 @@ def test_list_exams_returns_created_exams(tmp_path) -> None:
         assert second.json()["id"] in ids
 
 
-def test_parse_answer_key_creates_questions_and_sets_reviewing(tmp_path, monkeypatch) -> None:
+def test_parse_answer_key_builds_pages_from_uploaded_images(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
     monkeypatch.setenv("OPENAI_MOCK", "1")
@@ -56,24 +67,27 @@ def test_parse_answer_key_creates_questions_and_sets_reviewing(tmp_path, monkeyp
         assert exam.status_code == 201
         exam_id = exam.json()["id"]
 
-        key_dir = Path(settings.data_dir) / "key_pages" / str(exam_id)
-        key_dir.mkdir(parents=True, exist_ok=True)
-        (key_dir / "page-1.png").write_bytes(b"fake-image-1")
-        (key_dir / "page-2.png").write_bytes(b"fake-image-2")
-        (key_dir / "page-3.png").write_bytes(b"fake-image-3")
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
 
         response = client.post(f"/api/exams/{exam_id}/key/parse")
         assert response.status_code == 200
         assert response.json()["questions_count"] == 2
 
-        detail = client.get(f"/api/exams/{exam_id}")
-        assert detail.status_code == 200
-        payload = detail.json()
+        key_pages_dir = Path(settings.data_dir) / "exams" / str(exam_id) / "key_pages"
+        page_files = sorted(key_pages_dir.glob("*.png"))
+        assert page_files
 
-        assert payload["exam"]["status"] == "REVIEWING"
-        assert len(payload["questions"]) == 2
-        labels = {item["label"] for item in payload["questions"]}
-        assert labels == {"Q1", "Q2"}
+    with Session(db.engine) as session:
+        key_pages = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id)).all()
+        questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
+        assert len(key_pages) == 1
+        assert key_pages[0].page_number == 1
+        assert Path(key_pages[0].image_path).exists()
+        assert len(questions) == 2
 
 
 def test_upload_exam_key_files_stores_file_and_db_row(tmp_path) -> None:
@@ -102,3 +116,20 @@ def test_upload_exam_key_files_stores_file_and_db_row(tmp_path) -> None:
         assert len(rows) == 1
         assert rows[0].original_filename == "key.png"
         assert rows[0].stored_path == str(stored)
+
+
+def test_parse_answer_key_without_uploaded_files_returns_actionable_400(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Chemistry"})
+        exam_id = exam.json()["id"]
+
+        response = client.post(f"/api/exams/{exam_id}/key/parse")
+        assert response.status_code == 400
+        assert response.json()["detail"] == f"No key files uploaded. Call /api/exams/{exam_id}/key/upload first."

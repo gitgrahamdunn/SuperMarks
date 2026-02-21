@@ -79,6 +79,16 @@ class ExamKeyFile(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class ExamKeyPage(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    exam_id: int = Field(foreign_key="exam.id", index=True)
+    page_number: int
+    image_path: str
+    width: int
+    height: int
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class QuestionRegion(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     question_id: int = Field(foreign_key="question.id", index=True)

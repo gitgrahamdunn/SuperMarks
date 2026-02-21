@@ -6,15 +6,18 @@ import json
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, ImageOps
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 
 from app.ai.openai_vision import AnswerKeyParser, ParseResult, get_answer_key_parser
 from app.db import get_session
-from app.models import Exam, ExamKeyFile, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
+from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
+from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
 from app.schemas import ExamCreate, ExamDetail, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, RegionRead, SubmissionFileRead, SubmissionRead
 from app.settings import settings
-from app.storage import ensure_dir, relative_to_data, save_upload_file, upload_dir
+from app.storage import ensure_dir, reset_dir, relative_to_data, save_upload_file, upload_dir
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -28,20 +31,82 @@ _ALLOWED_TYPES = {
 _ALLOWED_KEY_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 
 
-def _list_key_page_images(exam_id: int) -> list[Path]:
-    candidates = [
-        settings.data_path / "key_pages" / str(exam_id),
-        settings.data_path / "pages" / str(exam_id) / "key",
-        settings.data_path / "uploads" / str(exam_id) / "key",
-    ]
-    images: list[Path] = []
-    for base in candidates:
-        if not base.exists() or not base.is_dir():
+def _exam_key_pages_dir(exam_id: int) -> Path:
+    return settings.data_path / "exams" / str(exam_id) / "key_pages"
+
+
+def _load_key_page_images(exam_id: int, session: Session) -> list[Path]:
+    rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
+    paths = [Path(row.image_path) for row in rows if Path(row.image_path).exists()]
+    if paths:
+        return paths
+
+    legacy_dir = settings.data_path / "key_pages" / str(exam_id)
+    if not legacy_dir.exists() or not legacy_dir.is_dir():
+        return []
+    return [path for path in sorted(legacy_dir.iterdir()) if path.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+
+
+def _normalize_to_png(input_path: Path, output_path: Path) -> tuple[int, int]:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(input_path) as image:
+        corrected = ImageOps.exif_transpose(image)
+        rgb = corrected.convert("RGB")
+        rgb.save(output_path, format="PNG")
+        return rgb.width, rgb.height
+
+
+def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
+    existing = _load_key_page_images(exam_id, session)
+    if existing:
+        return existing
+
+    key_files = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id).order_by(ExamKeyFile.id)).all()
+    if not key_files:
+        raise HTTPException(status_code=400, detail=f"No key files uploaded. Call /api/exams/{exam_id}/key/upload first.")
+
+    output_dir = reset_dir(_exam_key_pages_dir(exam_id))
+    session.exec(delete(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id))
+
+    created_paths: list[Path] = []
+    page_num = 1
+
+    for key_file in key_files:
+        source_path = Path(key_file.stored_path)
+        if not source_path.exists():
             continue
-        for path in sorted(base.iterdir()):
-            if path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
-                images.append(path)
-    return images
+
+        extension = source_path.suffix.lower()
+        if extension in {".png", ".jpg", ".jpeg"}:
+            out_path = output_dir / f"page_{page_num:04d}.png"
+            width, height = _normalize_to_png(source_path, out_path)
+            session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(out_path), width=width, height=height))
+            created_paths.append(out_path)
+            page_num += 1
+            continue
+
+        if extension == ".pdf":
+            try:
+                converter = Pdf2ImageConverter()
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail="PDF rendering not available on serverless. Upload images instead.") from exc
+            rendered_paths = converter.convert(source_path, output_dir)
+            for rendered in rendered_paths:
+                out_path = output_dir / f"page_{page_num:04d}.png"
+                width, height = normalize_image_to_png(rendered, out_path)
+                session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(out_path), width=width, height=height))
+                created_paths.append(out_path)
+                page_num += 1
+
+    session.commit()
+
+    if not created_paths:
+        raise HTTPException(
+            status_code=400,
+            detail="Key files exist, but key pages could not be produced. Upload png/jpg images or ensure PDF rendering support is available.",
+        )
+
+    return created_paths
 
 
 def _validate_parse_payload(payload: dict[str, Any]) -> tuple[float, list[dict[str, Any]]]:
@@ -315,9 +380,7 @@ def parse_answer_key(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    image_paths = _list_key_page_images(exam_id)
-    if not image_paths:
-        raise HTTPException(status_code=400, detail="No key page images found")
+    image_paths = build_key_pages_for_exam(exam_id=exam_id, session=session)
 
     result = _parse_with_fallback(parser, image_paths)
     try:
