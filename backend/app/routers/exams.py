@@ -157,17 +157,6 @@ def _validate_parse_payload(payload: dict[str, Any]) -> tuple[float, list[dict[s
     return float(confidence), questions, warnings
 
 
-def _is_transient_openai_status(status_code: int | None) -> bool:
-    return status_code in {429, 503, 504}
-
-
-def _is_schema_openai_error(exc: OpenAIRequestError) -> bool:
-    if exc.status_code != 400:
-        return False
-    body = (exc.body or "").lower()
-    return "schema" in body or "json_schema" in body or "additionalproperties" in body
-
-
 def _allowed_parse_models() -> list[str]:
     configured = os.getenv("SUPERMARKS_KEY_PARSE_MODELS", "gpt-5-nano,gpt-5-mini")
     models = [m.strip() for m in configured.split(",") if m.strip()]
@@ -190,42 +179,6 @@ def _invoke_parser(parser: AnswerKeyParser, image_paths: list[Path], model: str,
         return parser.parse(image_paths, model=model, request_id=request_id)
     except TypeError:
         return parser.parse(image_paths, model=model)
-
-def _parse_with_fallback(parser: AnswerKeyParser, image_paths: list[Path], request_id: str) -> ParseResult:
-    nano_model, mini_model = _resolve_models()
-
-    try:
-        nano = _invoke_parser(parser, image_paths, model=nano_model, request_id=request_id)
-    except OpenAIRequestError as exc:
-        if _is_transient_openai_status(exc.status_code):
-            time.sleep(0.5)
-            try:
-                nano = _invoke_parser(parser, image_paths, model=nano_model, request_id=request_id)
-            except OpenAIRequestError as retry_exc:
-                if _is_transient_openai_status(retry_exc.status_code):
-                    return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
-                if retry_exc.status_code == 400 and _is_schema_openai_error(retry_exc):
-                    raise
-                return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
-        elif exc.status_code == 400 and _is_schema_openai_error(exc):
-            raise
-        else:
-            return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
-    except (httpx.TimeoutException, TimeoutError):
-        time.sleep(0.5)
-        try:
-            nano = _invoke_parser(parser, image_paths, model=nano_model, request_id=request_id)
-        except Exception:
-            return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
-    except Exception:
-        return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
-
-    try:
-        _validate_parse_payload(nano.payload)
-        return nano
-    except ValueError:
-        return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
-
 
 def _exam_key_dir(exam_id: int) -> Path:
     return ensure_dir(settings.data_path / "exams" / str(exam_id) / "key")
@@ -499,55 +452,83 @@ def parse_answer_key(
         image_paths = build_key_pages_for_exam(exam_id=exam_id, session=session)
         timings["build_pages_ms"] = int((time.perf_counter() - pages_started) * 1000)
 
+        attempts: list[dict[str, object]] = []
+
+        def _run_attempt(model_name: str, attempt_stage: str) -> ParseResult:
+            stage_start = time.perf_counter()
+            result_inner = _invoke_parser(parser, image_paths, model=model_name, request_id=request_id)
+            openai_ms = int((time.perf_counter() - stage_start) * 1000)
+            timings["openai_ms"] += openai_ms
+
+            attempt_confidence = result_inner.payload.get("confidence_score")
+            attempt_questions = result_inner.payload.get("questions")
+            question_count = len(attempt_questions) if isinstance(attempt_questions, list) else 0
+
+            logger.info(
+                "key/parse attempt completed",
+                extra={
+                    "request_id": request_id,
+                    "stage": attempt_stage,
+                    "exam_id": exam_id,
+                    "model": model_name,
+                    "num_images": len(image_paths),
+                    "question_count": question_count,
+                    "confidence_score": attempt_confidence if isinstance(attempt_confidence, (int, float)) else None,
+                    "openai_ms": openai_ms,
+                },
+            )
+            attempts.append(
+                {
+                    "model": model_name,
+                    "question_count": question_count,
+                    "confidence_score": float(attempt_confidence) if isinstance(attempt_confidence, (int, float)) else None,
+                    "openai_ms": openai_ms,
+                }
+            )
+            return result_inner
+
         stage = "call_openai_nano"
-        openai_started = time.perf_counter()
-        logger.info(
-            "key/parse begin model call",
-            extra={"request_id": request_id, "stage": stage, "exam_id": exam_id, "model": nano_model, "num_images": len(image_paths)},
-        )
-        result = _parse_with_fallback(parser, image_paths, request_id=request_id)
-        timings["openai_ms"] = int((time.perf_counter() - openai_started) * 1000)
-        stage = "call_openai_mini" if result.model == mini_model else "call_openai_nano"
+        nano_result = _run_attempt(nano_model, stage)
 
         validate_started = time.perf_counter()
         stage = "validate_output"
         try:
-            confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
+            confidence, questions_payload, warnings = _validate_parse_payload(nano_result.payload)
         except ValueError:
-            if result.model == nano_model:
-                stage = "call_openai_mini"
-                result = _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
-                stage = "validate_output"
-                try:
-                    confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
-                except ValueError:
-                    timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
-                    return {
-                        "request_id": request_id,
-                        "stage": stage,
-                        "ok": True,
-                        "model_used": mini_model,
-                        "confidence_score": 0.0,
-                        "questions": [],
-                        "questions_count": 0,
-                        "warnings": ["Model output invalid; please add questions manually in review."],
-                        "timings": timings,
-                    }
-            else:
-                timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
-                return {
-                    "request_id": request_id,
-                    "stage": stage,
-                    "ok": True,
-                    "model_used": result.model,
-                    "confidence_score": 0.0,
-                    "questions": [],
-                    "questions_count": 0,
-                    "warnings": ["Model output invalid; please add questions manually in review."],
-                    "timings": timings,
-                }
+            confidence, questions_payload, warnings = 0.0, [], ["Model output invalid; please add questions manually in review."]
+
+        escalate_to_mini = (not questions_payload) or confidence < 0.60
+        if escalate_to_mini:
+            logger.info(
+                "nano questions=0 or low confidence -> escalating to mini",
+                extra={"request_id": request_id, "exam_id": exam_id, "stage": "call_openai_mini"},
+            )
+            stage = "call_openai_mini"
+            mini_result = _run_attempt(mini_model, stage)
+            stage = "validate_output"
+            try:
+                confidence, questions_payload, warnings = _validate_parse_payload(mini_result.payload)
+            except ValueError:
+                confidence, questions_payload, warnings = 0.0, [], ["Model output invalid; please add questions manually in review."]
+            result = mini_result
+        else:
+            result = nano_result
 
         timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
+
+        if not questions_payload:
+            return {
+                "request_id": request_id,
+                "stage": stage,
+                "ok": True,
+                "model_used": result.model,
+                "confidence_score": 0.0,
+                "questions": [],
+                "questions_count": 0,
+                "warnings": ["No questions extracted. Please add questions manually in review."],
+                "timings": timings,
+                "attempts": attempts,
+            }
 
         save_started = time.perf_counter()
         stage = "save_questions"
@@ -597,6 +578,7 @@ def parse_answer_key(
             "questions_count": len(questions_payload),
             "warnings": warnings,
             "timings": timings,
+            "attempts": attempts,
         }
     except HTTPException as exc:
         return _err(exc.status_code, str(exc.detail))
