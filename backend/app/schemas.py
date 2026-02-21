@@ -74,6 +74,12 @@ class QuestionRead(BaseModel):
     regions: list[RegionRead] = Field(default_factory=list)
 
 
+class QuestionUpdate(BaseModel):
+    label: str | None = None
+    max_marks: int | None = Field(default=None, ge=0)
+    rubric_json: dict[str, Any] | None = None
+
+
 class TranscriptionRead(BaseModel):
     id: int
     submission_id: int

@@ -9,6 +9,8 @@ interface Criterion {
   marks: number;
 }
 
+type MarksSource = 'explicit' | 'inferred' | 'unknown';
+
 interface EditableQuestion {
   id: number;
   label: string;
@@ -27,6 +29,7 @@ export function ExamReviewPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveAvailable, setSaveAvailable] = useState(true);
+  const [previewError, setPreviewError] = useState(false);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
 
@@ -80,6 +83,10 @@ export function ExamReviewPage() {
     void loadQuestions();
   }, [examId, showError, showSuccess]);
 
+  useEffect(() => {
+    setPreviewError(false);
+  }, [currentIndex]);
+
   const currentQuestion = questions[currentIndex];
 
   const updateCurrentQuestion = (updater: (question: EditableQuestion) => EditableQuestion) => {
@@ -132,6 +139,14 @@ export function ExamReviewPage() {
     });
   };
 
+  const saveQuestion = async (question: EditableQuestion) => {
+    await api.updateQuestion(examId, question.id, {
+      label: question.label,
+      max_marks: question.max_marks,
+      rubric_json: buildRubric(question),
+    });
+  };
+
   const onSave = async () => {
     if (!currentQuestion || !saveAvailable) {
       if (!saveAvailable) {
@@ -142,11 +157,7 @@ export function ExamReviewPage() {
 
     try {
       setSaving(true);
-      await api.updateQuestion(examId, currentQuestion.id, {
-        label: currentQuestion.label,
-        max_marks: currentQuestion.max_marks,
-        rubric_json: buildRubric(currentQuestion),
-      });
+      await saveQuestion(currentQuestion);
       showSuccess('Question saved successfully.');
     } catch (error) {
       console.error('Failed to save question', error);
@@ -161,12 +172,37 @@ export function ExamReviewPage() {
     }
   };
 
+  const onConfirmMarks = async () => {
+    if (!currentQuestion || !saveAvailable) return;
+    try {
+      setSaving(true);
+      const suggestion = getMarksSuggestion(currentQuestion);
+      const rubricWithMeta = {
+        ...buildRubric(currentQuestion),
+        marks_source: suggestion.source,
+        marks_confidence: suggestion.confidence,
+      };
+      await api.updateQuestion(examId, currentQuestion.id, {
+        max_marks: currentQuestion.max_marks,
+        rubric_json: rubricWithMeta,
+        label: currentQuestion.label,
+      });
+      showSuccess('Saved');
+      setCurrentIndex((idx) => Math.min(questions.length - 1, idx + 1));
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to confirm marks');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const canGoBack = currentIndex > 0;
   const canGoNext = currentIndex < questions.length - 1;
   const criteriaTotalMarks = useMemo(
     () => currentQuestion?.criteria.reduce((sum, criterion) => sum + (Number.isFinite(criterion.marks) ? criterion.marks : 0), 0) || 0,
     [currentQuestion],
   );
+  const marksSuggestion = useMemo(() => (currentQuestion ? getMarksSuggestion(currentQuestion) : null), [currentQuestion]);
 
   if (loading) {
     return <p>Loading review...</p>;
@@ -187,6 +223,19 @@ export function ExamReviewPage() {
       <h1>Create Exam Wizard: Review Questions</h1>
       <p>Question {currentIndex + 1} of {questions.length}</p>
 
+      <div className="stack" style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: 10, background: '#f8fafc' }}>
+        {!previewError ? (
+          <img
+            src={api.getQuestionKeyVisualUrl(examId, currentQuestion.id)}
+            alt={`Key visual for ${currentQuestion.label}`}
+            style={{ maxWidth: '100%', borderRadius: 8 }}
+            onError={() => setPreviewError(true)}
+          />
+        ) : (
+          <p className="subtle-text">No preview available.</p>
+        )}
+      </div>
+
       <label className="stack">
         Label
         <input value={currentQuestion.label} onChange={(e) => onFieldChange('label', e.target.value)} />
@@ -194,12 +243,19 @@ export function ExamReviewPage() {
 
       <label className="stack">
         Max marks
-        <input
-          type="number"
-          min={0}
-          value={currentQuestion.max_marks}
-          onChange={(e) => onFieldChange('max_marks', Number(e.target.value))}
-        />
+        <div className="actions-row" style={{ alignItems: 'center' }}>
+          <input
+            type="number"
+            min={0}
+            value={currentQuestion.max_marks}
+            onChange={(e) => onFieldChange('max_marks', Number(e.target.value))}
+          />
+          {marksSuggestion && (
+            <button type="button" onClick={() => onFieldChange('max_marks', marksSuggestion.value)}>
+              Suggest: {marksSuggestion.value} ({marksSuggestion.confidence.toFixed(2)})
+            </button>
+          )}
+        </div>
       </label>
 
       <div className="stack criteria-block">
@@ -245,6 +301,7 @@ export function ExamReviewPage() {
         <button type="button" onClick={() => setCurrentIndex((idx) => Math.max(0, idx - 1))} disabled={!canGoBack}>Back</button>
         <button type="button" onClick={() => setCurrentIndex((idx) => Math.min(questions.length - 1, idx + 1))} disabled={!canGoNext}>Next</button>
         <button type="button" onClick={onSave} disabled={saving || !saveAvailable}>{saving ? 'Saving...' : 'Save'}</button>
+        <button type="button" onClick={onConfirmMarks} disabled={saving || !saveAvailable}>Confirm marks</button>
         <button type="button" onClick={() => navigate(`/exams/${examId}`)}>Finish Review</button>
       </div>
     </div>
@@ -330,6 +387,31 @@ function mapQuestion(question: QuestionRead): EditableQuestion {
     model_solution: String(question.rubric_json?.model_solution || ''),
     rubric_json: question.rubric_json,
   };
+}
+
+function getMarksSuggestion(question: EditableQuestion): { value: number; confidence: number; source: MarksSource } {
+  const source = (question.rubric_json.marks_source as MarksSource) || 'unknown';
+  const storedConfidence = Number(question.rubric_json.marks_confidence || 0);
+  const hasMarks = Number(question.max_marks) > 0;
+  if (source === 'explicit' && hasMarks) {
+    return { value: question.max_marks, confidence: 0.95, source };
+  }
+  if (source === 'inferred' && hasMarks) {
+    return { value: question.max_marks, confidence: Math.max(0, Math.min(1, storedConfidence || 0.6)), source };
+  }
+
+  const criteriaCount = question.criteria.length;
+  const criteriaSum = question.criteria.reduce((sum, c) => sum + (Number.isFinite(c.marks) ? c.marks : 0), 0);
+  const questionText = String(question.rubric_json.question_text || '');
+  let guess = 2;
+  if (criteriaCount > 0 && criteriaSum === 0) {
+    guess = 1;
+  } else if (criteriaSum > 0) {
+    guess = criteriaSum;
+  } else if (questionText.length > 180) {
+    guess = 4;
+  }
+  return { value: guess, confidence: 0.3, source: 'unknown' };
 }
 
 function normalizeCriteria(criteriaSource: unknown): Criterion[] {

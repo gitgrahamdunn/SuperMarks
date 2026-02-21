@@ -15,7 +15,7 @@ import httpx
 from PIL import Image, ImageOps
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlmodel import Session, delete, select
 
 from app.ai.openai_vision import (
@@ -29,7 +29,7 @@ from app.ai.openai_vision import (
 from app.db import get_session
 from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
 from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
-from app.schemas import ExamCreate, ExamDetail, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, RegionRead, SubmissionFileRead, SubmissionRead
+from app.schemas import ExamCreate, ExamDetail, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, SubmissionFileRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data, save_upload_file, upload_dir
 
@@ -60,6 +60,15 @@ def _load_key_page_images(exam_id: int, session: Session) -> list[Path]:
     if not legacy_dir.exists() or not legacy_dir.is_dir():
         return []
     return [path for path in sorted(legacy_dir.iterdir()) if path.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+
+
+
+
+def _get_exam_question_or_404(exam_id: int, question_id: int, session: Session) -> Question:
+    question = session.get(Question, question_id)
+    if not question or question.exam_id != exam_id:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return question
 
 
 def _normalize_to_png(input_path: Path, output_path: Path) -> tuple[int, int]:
@@ -407,6 +416,98 @@ def list_questions(exam_id: int, session: Session = Depends(get_session)) -> lis
     return result
 
 
+@router.patch("/{exam_id}/questions/{question_id}", response_model=QuestionRead)
+def update_question(
+    exam_id: int,
+    question_id: int,
+    payload: QuestionUpdate,
+    session: Session = Depends(get_session),
+) -> QuestionRead:
+    question = _get_exam_question_or_404(exam_id, question_id, session)
+
+    if payload.label is not None:
+        question.label = payload.label
+    if payload.max_marks is not None:
+        question.max_marks = payload.max_marks
+
+    rubric = json.loads(question.rubric_json)
+    if payload.rubric_json is not None:
+        rubric = payload.rubric_json
+        question.rubric_json = json.dumps(rubric)
+
+    session.add(question)
+    session.commit()
+    session.refresh(question)
+
+    regions = session.exec(select(QuestionRegion).where(QuestionRegion.question_id == question.id)).all()
+    return QuestionRead(
+        id=question.id,
+        exam_id=question.exam_id,
+        label=question.label,
+        max_marks=question.max_marks,
+        rubric_json=rubric,
+        regions=[RegionRead(id=r.id, page_number=r.page_number, x=r.x, y=r.y, w=r.w, h=r.h) for r in regions],
+    )
+
+
+@router.get("/{exam_id}/key/page/{page_number}")
+def get_key_page_image(
+    exam_id: int,
+    page_number: int,
+    session: Session = Depends(get_session),
+) -> FileResponse:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    page = session.exec(
+        select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id, ExamKeyPage.page_number == page_number)
+    ).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Key page not found")
+
+    image_path = Path(page.image_path)
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Key page image missing")
+
+    media_type = "image/png"
+    suffix = image_path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        media_type = "image/jpeg"
+    return FileResponse(path=image_path, media_type=media_type)
+
+
+@router.get("/{exam_id}/questions/{question_id}/key-visual")
+def get_question_key_visual(
+    exam_id: int,
+    question_id: int,
+    session: Session = Depends(get_session),
+) -> FileResponse:
+    question = _get_exam_question_or_404(exam_id, question_id, session)
+    rubric = json.loads(question.rubric_json)
+    page_number = int(rubric.get("key_page_number") or 1)
+
+    page = session.exec(
+        select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id, ExamKeyPage.page_number == page_number)
+    ).first()
+    if not page:
+        page = session.exec(
+            select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)
+        ).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Key page not found")
+
+    image_path = Path(page.image_path)
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Key page image missing")
+
+    media_type = "image/png"
+    suffix = image_path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        media_type = "image/jpeg"
+    return FileResponse(path=image_path, media_type=media_type)
+
+
 @router.post("/{exam_id}/key/parse")
 def parse_answer_key(
     exam_id: int,
@@ -536,6 +637,15 @@ def parse_answer_key(
         for parsed in questions_payload:
             label = str(parsed["label"])
             max_marks = int(parsed["max_marks"])
+            parsed_marks_source = str(parsed.get("marks_source") or "").strip().lower()
+            if parsed_marks_source not in {"explicit", "inferred", "unknown"}:
+                parsed_marks_source = "explicit" if max_marks > 0 else "unknown"
+            parsed_marks_confidence = parsed.get("marks_confidence")
+            if isinstance(parsed_marks_confidence, (int, float)):
+                marks_confidence = max(0.0, min(1.0, float(parsed_marks_confidence)))
+            else:
+                marks_confidence = 0.95 if parsed_marks_source == "explicit" else (0.6 if parsed_marks_source == "inferred" else 0.3)
+
             rubric = {
                 "total_marks": max_marks,
                 "criteria": parsed.get("criteria", []),
@@ -543,6 +653,9 @@ def parse_answer_key(
                 "model_solution": parsed.get("model_solution", ""),
                 "question_text": parsed.get("question_text", ""),
                 "notes": parsed.get("notes", ""),
+                "marks_source": parsed_marks_source,
+                "marks_confidence": marks_confidence,
+                "key_page_number": int(parsed.get("key_page_number") or 1),
             }
 
             question = existing.get(label)
