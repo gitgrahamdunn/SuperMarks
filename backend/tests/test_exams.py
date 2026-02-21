@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from pathlib import Path
 
 import pytest
@@ -77,6 +79,7 @@ def test_parse_answer_key_builds_pages_from_uploaded_images(tmp_path, monkeypatc
         assert response.status_code == 200
         payload = response.json()
         assert payload["questions_count"] == 2
+        assert payload["model_used"] == "gpt-5-mini"
         assert payload["request_id"]
         assert payload["stage"] == "save_questions"
         assert isinstance(payload["timings"]["openai_ms"], int)
@@ -141,3 +144,39 @@ def test_parse_answer_key_without_uploaded_files_returns_actionable_400(tmp_path
         assert payload["detail"] == f"No key files uploaded. Call /api/exams/{exam_id}/key/upload first."
         assert payload["request_id"]
         assert payload["stage"] == "build_key_pages"
+
+
+def test_parse_answer_key_escalates_nano_to_mini_when_mock_nano_is_low_confidence(tmp_path, monkeypatch, caplog) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Math Final"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        caplog.set_level(logging.INFO)
+        caplog.clear()
+        response = client.post(f"/api/exams/{exam_id}/key/parse")
+        assert response.status_code == 200
+        payload = response.json()
+
+        assert payload["model_used"] == "gpt-5-mini"
+        assert payload["questions_count"] >= 1
+        assert payload["attempts"][0]["model"] == "gpt-5-nano"
+        assert payload["attempts"][0]["confidence_score"] == 0.4
+        assert payload["attempts"][1]["model"] == "gpt-5-mini"
+        assert any(
+            "nano questions=0 or low confidence -> escalating to mini" in record.getMessage()
+            for record in caplog.records
+        )

@@ -196,7 +196,15 @@ class OpenAIAnswerKeyParser:
 
     def parse(self, image_paths: list[Path], model: str, request_id: str) -> ParseResult:
         prompt = (
-            "You are parsing an exam answer key. Identify questions, marks, and a draft rubric. "
+            "You are parsing an exam answer key and must produce exam-aware structured output. "
+            "Identify question boundaries using patterns like Q1, Q2, Question 1, 1., 2), (a), (b). "
+            "Identify marks using patterns like [3 marks], (5 marks), /5, out of 5, 5 pts. "
+            "For each question extract: label, max_marks, question_text, answer_key (final answer token), "
+            "model_solution, and criteria[] with desc + marks. "
+            "If marks are not explicit, make a best guess for max_marks and include uncertainty notes inside "
+            "question_text or model_solution while still conforming to the schema. "
+            "IMPORTANT: If any problem text exists but reliable question splitting is not possible, return exactly "
+            "one fallback question with label='Q1', max_marks=0, criteria=[{\"desc\":\"Needs teacher review\",\"marks\":0}]. "
             "Return ONLY JSON matching the provided schema."
         )
         schema = build_answer_key_response_schema()
@@ -281,9 +289,12 @@ class OpenAIAnswerKeyParser:
 class MockAnswerKeyParser:
     def parse(self, image_paths: list[Path], model: str, request_id: str) -> ParseResult:
         _ = (image_paths, request_id)
+        if model == "gpt-5-nano":
+            return ParseResult(payload={"confidence_score": 0.4, "questions": []}, model=model)
+
         return ParseResult(
             payload={
-                "confidence_score": 0.92,
+                "confidence_score": 0.8,
                 "questions": [
                     {
                         "label": "Q1",
