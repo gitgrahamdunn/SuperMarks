@@ -131,3 +131,46 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
 .wizard-detail-block p {
   margin: .2rem 0;
 }
+
+.debug-panel {
+  width: 100%;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: .65rem .75rem;
+  background: #fff7f7;
+}
+
+.debug-panel-summary {
+  font-weight: 600;
+  margin-bottom: .4rem;
+}
+
+.debug-panel details {
+  width: 100%;
+}
+
+.debug-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.debug-panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: .5rem;
+}
+
+.debug-panel-content {
+  margin-top: .5rem;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: .85rem;
+}
+
+@media (max-width: 640px) {
+  .debug-panel {
+    width: 100%;
+  }
+}
