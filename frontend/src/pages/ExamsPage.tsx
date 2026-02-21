@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, ApiError, api } from '../api/client';
+import { API_BASE_URL, ApiError, api, buildApiUrl } from '../api/client';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
 
@@ -139,7 +139,7 @@ export function ExamsPage() {
       setIsRunning(true);
 
       setStep('creating');
-      const createEndpoint = `${API_BASE_URL}/exams`;
+      const createEndpoint = buildApiUrl('exams');
       const exam = await api.createExam(modalName.trim());
       examId = exam.id;
       setCreatedExamId(exam.id);
@@ -152,7 +152,7 @@ export function ExamsPage() {
       showSuccess('Create step succeeded.');
 
       setStep('uploading');
-      const uploadEndpoint = `${API_BASE_URL}/exams/${exam.id}/key/upload`;
+      const uploadEndpoint = buildApiUrl(`exams/${exam.id}/key/upload`);
       const uploadResult = await api.uploadExamKey(exam.id, modalFiles);
       logStep({
         step: 'uploading',
@@ -199,12 +199,12 @@ export function ExamsPage() {
       const stepName = step;
       const stepEndpoint =
         stepName === 'creating'
-          ? `${API_BASE_URL}/exams`
+          ? buildApiUrl('exams')
           : stepName === 'uploading' && examId
-            ? `${API_BASE_URL}/exams/${examId}/key/upload`
+            ? buildApiUrl(`exams/${examId}/key/upload`)
             : stepName === 'parsing' && examId
-              ? `${API_BASE_URL}/exams/${examId}/key/parse`
-              : `${API_BASE_URL}/unknown`;
+              ? buildApiUrl(`exams/${examId}/key/parse`)
+              : buildApiUrl('unknown');
 
       if (isNetworkFetchError(err)) {
         const networkMessage = `Network request failed (browser blocked/aborted). Step: ${stepName}. URL: ${stepEndpoint}`;
@@ -339,6 +339,7 @@ export function ExamsPage() {
                 <summary>Show details</summary>
                 <div className="subtle-text stack">
                   <p>API base URL: {API_BASE_URL}</p>
+                  <p>Computed create endpoint: {buildApiUrl('exams')}</p>
                   {stepLogs.length === 0 && <p>No step details yet.</p>}
                   {stepLogs.map((entry, index) => (
                     <div key={`${entry.step}-${index}`} className="wizard-detail-block">
