@@ -9,8 +9,8 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 
-_MAX_WIDTH = 1024
-_JPEG_QUALITY = 70
+_MAX_WIDTH = 800
+_JPEG_QUALITY = 60
 
 
 @dataclass
