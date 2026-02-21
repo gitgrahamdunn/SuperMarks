@@ -584,14 +584,25 @@ def parse_answer_key(
     request_id = str(uuid.uuid4())
     stage = "load_exam"
     timings: dict[str, int] = {"build_pages_ms": 0, "openai_ms": 0, "validate_ms": 0, "save_ms": 0}
+    page_index = 0
+    page_count = 0
 
-    def _err(status_code: int, detail: str, *, openai_status: int | None = None, openai_error: str | None = None) -> JSONResponse:
+    def _err(
+        status_code: int,
+        detail: str,
+        *,
+        openai_status: int | None = None,
+        openai_error: str | None = None,
+        error_page_index: int | None = None,
+    ) -> JSONResponse:
         payload: dict[str, object] = {
             "detail": detail,
             "request_id": request_id,
             "stage": stage,
             "openai_status": openai_status,
             "openai_error": openai_error,
+            "page_index": error_page_index if error_page_index is not None else page_index,
+            "page_count": page_count,
         }
         return JSONResponse(status_code=status_code, content=payload)
 
@@ -626,47 +637,113 @@ def parse_answer_key(
         if not image_paths:
             raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
 
+        page_count = len(image_paths)
+
         stage = "model_config"
         nano_model, mini_model = _resolve_models()
 
         attempts: list[dict[str, object]] = []
+        merged_questions_payload: list[dict[str, object]] = []
+        merged_warnings: list[str] = []
+        confidence_scores: list[float] = []
+        result_model = nano_model
 
-        def _run_attempt(model_name: str, attempt_stage: str) -> ParseResult:
-            nonlocal stage
-            stage = attempt_stage
-            started = time.perf_counter()
-            result_inner = _invoke_parser(parser, image_paths, model_name, request_id)
-            openai_ms = int((time.perf_counter() - started) * 1000)
-            timings["openai_ms"] += openai_ms
-            attempts.append({"model": model_name, "openai_ms": openai_ms, "confidence_score": result_inner.payload.get("confidence_score")})
-            return result_inner
+        for idx, page_path in enumerate(image_paths, start=1):
+            page_index = idx
+            nano_failures = 0
+            mini_failures = 0
 
-        nano_result = _run_attempt(nano_model, "call_openai_nano")
-
-        stage = "validate_output"
-        validate_started = time.perf_counter()
-        try:
-            confidence, questions_payload, warnings = _validate_parse_payload(nano_result.payload)
-        except ValueError:
-            confidence, questions_payload, warnings = 0.0, [], ["Model output invalid; please add questions manually in review."]
-        result = nano_result
-
-        if not questions_payload or confidence < 0.60:
-            logger.info("nano questions=0 or low confidence -> escalating to mini")
-            mini_result = _run_attempt(mini_model, "call_openai_mini")
+            stage = f"call_openai_nano_page_{idx}"
+            nano_started = time.perf_counter()
             try:
-                confidence, questions_payload, warnings = _validate_parse_payload(mini_result.payload)
+                nano_result = _invoke_parser(parser, [page_path], nano_model, request_id)
+            except OpenAIRequestError as exc:
+                nano_failures = 2
+                timings["openai_ms"] += int((time.perf_counter() - nano_started) * 1000)
+                attempts.append({"model": nano_model, "openai_ms": int((time.perf_counter() - nano_started) * 1000), "page_index": idx, "failed": True})
+
+                stage = f"call_openai_mini_page_{idx}"
+                mini_started = time.perf_counter()
+                try:
+                    mini_result = _invoke_parser(parser, [page_path], mini_model, request_id)
+                except OpenAIRequestError as mini_exc:
+                    mini_failures = 1
+                    timings["openai_ms"] += int((time.perf_counter() - mini_started) * 1000)
+                    if nano_failures >= 2 and mini_failures >= 1:
+                        stage = f"call_openai_mini_page_{idx}"
+                        run.status = "failed"
+                        run.finished_at = utcnow()
+                        run.error_json = json.dumps({
+                            "detail": f"OpenAI timed out on page {idx}",
+                            "request_id": request_id,
+                            "page_index": idx,
+                            "page_count": page_count,
+                            "stage": stage,
+                        })
+                        session.add(run)
+                        session.commit()
+                        return _err(504, f"OpenAI timed out on page {idx}", openai_status=mini_exc.status_code, openai_error=mini_exc.body[:2000], error_page_index=idx)
+                    raise mini_exc
+
+                attempts.append({"model": mini_model, "openai_ms": int((time.perf_counter() - mini_started) * 1000), "page_index": idx, "confidence_score": mini_result.payload.get("confidence_score")})
+                result = mini_result
+                result_model = mini_result.model
+            else:
+                nano_ms = int((time.perf_counter() - nano_started) * 1000)
+                timings["openai_ms"] += nano_ms
+                attempts.append({"model": nano_model, "openai_ms": nano_ms, "page_index": idx, "confidence_score": nano_result.payload.get("confidence_score")})
+                result = nano_result
+
+            stage = "validate_output"
+            validate_started = time.perf_counter()
+            try:
+                confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
             except ValueError:
                 confidence, questions_payload, warnings = 0.0, [], ["Model output invalid; please add questions manually in review."]
-            result = mini_result
 
-        timings["validate_ms"] = int((time.perf_counter() - validate_started) * 1000)
+            if result.model == nano_model and (not questions_payload or confidence < 0.60):
+                logger.info("nano questions=0 or low confidence -> escalating to mini", extra={"request_id": request_id, "page_index": idx, "stage": f"call_openai_mini_page_{idx}"})
+                stage = f"call_openai_mini_page_{idx}"
+                mini_started = time.perf_counter()
+                try:
+                    mini_result = _invoke_parser(parser, [page_path], mini_model, request_id)
+                except OpenAIRequestError as mini_exc:
+                    mini_failures = 1
+                    timings["openai_ms"] += int((time.perf_counter() - mini_started) * 1000)
+                    if nano_failures >= 2 and mini_failures >= 1:
+                        run.status = "failed"
+                        run.finished_at = utcnow()
+                        run.error_json = json.dumps({
+                            "detail": f"OpenAI timed out on page {idx}",
+                            "request_id": request_id,
+                            "page_index": idx,
+                            "page_count": page_count,
+                            "stage": stage,
+                        })
+                        session.add(run)
+                        session.commit()
+                        return _err(504, f"OpenAI timed out on page {idx}", openai_status=mini_exc.status_code, openai_error=mini_exc.body[:2000], error_page_index=idx)
+                    raise mini_exc
+
+                mini_ms = int((time.perf_counter() - mini_started) * 1000)
+                timings["openai_ms"] += mini_ms
+                attempts.append({"model": mini_model, "openai_ms": mini_ms, "page_index": idx, "confidence_score": mini_result.payload.get("confidence_score")})
+                try:
+                    confidence, questions_payload, warnings = _validate_parse_payload(mini_result.payload)
+                except ValueError:
+                    confidence, questions_payload, warnings = 0.0, [], ["Model output invalid; please add questions manually in review."]
+                result_model = mini_result.model
+
+            timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
+            confidence_scores.append(confidence)
+            merged_questions_payload.extend(questions_payload)
+            merged_warnings.extend(warnings)
 
         stage = "save_questions"
         save_started = time.perf_counter()
         existing = {q.label: q for q in session.exec(select(Question).where(Question.exam_id == exam_id)).all()}
 
-        for parsed in questions_payload:
+        for parsed in merged_questions_payload:
             label = str(parsed.get("label") or "Q?")
             max_marks = int(parsed.get("max_marks") or 0)
             marks_source = str(parsed.get("marks_source") or "unknown")
@@ -722,12 +799,12 @@ def parse_answer_key(
 
         exam.status = ExamStatus.PARSED
         session.add(exam)
-        if questions_payload:
+        if merged_questions_payload:
             exam.status = ExamStatus.REVIEWING
             session.add(exam)
 
         timings["save_ms"] = int((time.perf_counter() - save_started) * 1000)
-        run.model_used = result.model
+        run.model_used = result_model
         run.status = "success"
         run.finished_at = utcnow()
         run.timings_json = json.dumps(timings)
@@ -738,39 +815,45 @@ def parse_answer_key(
             "ok": True,
             "request_id": request_id,
             "stage": stage,
-            "model_used": result.model,
-            "confidence_score": confidence,
-            "questions": questions_payload,
-            "questions_count": len(questions_payload),
-            "warnings": warnings,
+            "model_used": result_model,
+            "confidence_score": min(confidence_scores) if confidence_scores else 0.0,
+            "questions": merged_questions_payload,
+            "questions_count": len(merged_questions_payload),
+            "warnings": merged_warnings,
             "timings": timings,
             "attempts": attempts,
+            "page_index": page_count,
+            "page_count": page_count,
         }
     except HTTPException as exc:
         run.status = "failed"
         run.finished_at = utcnow()
-        run.error_json = json.dumps({"detail": str(exc.detail), "stage": stage})
+        run.error_json = json.dumps({"detail": str(exc.detail), "stage": stage, "page_index": page_index, "page_count": page_count})
         session.add(run)
         session.commit()
         return _err(exc.status_code, str(exc.detail))
     except OpenAIRequestError as exc:
         run.status = "failed"
         run.finished_at = utcnow()
-        run.error_json = json.dumps({"detail": "OpenAI request failed", "stage": stage, "openai_status": exc.status_code})
+        run.error_json = json.dumps({
+            "detail": "OpenAI request failed",
+            "stage": stage,
+            "openai_status": exc.status_code,
+            "page_index": page_index,
+            "page_count": page_count,
+        })
         session.add(run)
         session.commit()
         if exc.status_code == 504:
             return _err(504, "OpenAI request timed out", openai_status=exc.status_code, openai_error=exc.body[:2000])
         return _err(502, "OpenAI request failed", openai_status=exc.status_code, openai_error=exc.body[:2000])
     except Exception as exc:
-        logger.exception("key/parse failed", extra={"stage": stage, "exam_id": exam_id, "request_id": request_id})
+        logger.exception("key/parse failed", extra={"stage": stage, "exam_id": exam_id, "request_id": request_id, "page_index": page_index, "page_count": page_count})
         run.status = "failed"
         run.finished_at = utcnow()
-        run.error_json = json.dumps({"detail": str(exc)[:300], "stage": stage})
+        run.error_json = json.dumps({"detail": str(exc)[:300], "stage": stage, "page_index": page_index, "page_count": page_count})
         session.add(run)
         session.commit()
-        return _err(500, f"Key parsing failed: {type(exc).__name__}: {str(exc)[:300]}")
-        logger.exception("key/parse failed", extra={"stage": stage, "exam_id": exam_id, "request_id": request_id})
         return _err(500, f"Key parsing failed: {type(exc).__name__}: {str(exc)[:300]}")
 
 

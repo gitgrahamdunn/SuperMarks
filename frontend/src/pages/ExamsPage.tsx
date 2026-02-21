@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE_URL, ApiError, api, buildApiUrl } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
@@ -19,6 +19,62 @@ type WizardError = {
   summary: string;
   details: unknown;
 };
+
+
+type ParseErrorDetails = {
+  stage?: string;
+  page_index?: number;
+  page_count?: number;
+  detail?: string;
+};
+
+type ParseChecklistStepId =
+  | 'creating_exam'
+  | 'uploading_key'
+  | 'building_key_pages'
+  | 'reading_questions'
+  | 'detecting_marks'
+  | 'drafting_rubric'
+  | 'finalizing';
+
+type ParseChecklistStatus = 'pending' | 'active' | 'done' | 'failed';
+
+type ParseChecklistStep = {
+  id: ParseChecklistStepId;
+  label: string;
+  status: ParseChecklistStatus;
+};
+
+const CHECKLIST_ORDER: Array<{ id: ParseChecklistStepId; label: string }> = [
+  { id: 'creating_exam', label: 'Creating exam' },
+  { id: 'uploading_key', label: 'Uploading key' },
+  { id: 'building_key_pages', label: 'Building key pages' },
+  { id: 'reading_questions', label: 'Reading questions' },
+  { id: 'detecting_marks', label: 'Detecting marks' },
+  { id: 'drafting_rubric', label: 'Drafting rubric' },
+  { id: 'finalizing', label: 'Finalizing' },
+];
+
+function initChecklist(): ParseChecklistStep[] {
+  return CHECKLIST_ORDER.map((step) => ({ ...step, status: 'pending' }));
+}
+
+function stageToChecklistId(stage?: string): ParseChecklistStepId {
+  if (!stage) return 'finalizing';
+  if (stage.includes('call_openai')) return 'reading_questions';
+  if (stage.includes('validate')) return 'detecting_marks';
+  if (stage.includes('save')) return 'drafting_rubric';
+  if (stage.includes('build_key_pages')) return 'building_key_pages';
+  if (stage.includes('upload')) return 'uploading_key';
+  if (stage.includes('create')) return 'creating_exam';
+  return 'finalizing';
+}
+
+function formatElapsed(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+  const seconds = (totalSeconds % 60).toString().padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
 
 interface WizardParseResult {
   questions?: unknown;
@@ -80,6 +136,12 @@ export function ExamsPage() {
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
   const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
   const [allowLargeUpload, setAllowLargeUpload] = useState(false);
+  const [parseProgress, setParseProgress] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [failedSummary, setFailedSummary] = useState<string | null>(null);
+  const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
+  const parseProgressIntervalRef = useRef<number | null>(null);
+  const elapsedIntervalRef = useRef<number | null>(null);
   const { showError, showSuccess, showWarning } = useToast();
   const navigate = useNavigate();
 
@@ -116,11 +178,45 @@ export function ExamsPage() {
     setStepLogs([]);
     setAllowLargeUpload(false);
     setStep('creating');
+    setParseProgress(0);
+    setElapsedSeconds(0);
+    setFailedSummary(null);
+    setChecklistSteps(initChecklist());
   };
 
   const logStep = (entry: StepLog) => {
     setStepLogs((prev) => [...prev, entry]);
   };
+
+
+  const clearIntervals = () => {
+    if (parseProgressIntervalRef.current !== null) {
+      window.clearInterval(parseProgressIntervalRef.current);
+      parseProgressIntervalRef.current = null;
+    }
+    if (elapsedIntervalRef.current !== null) {
+      window.clearInterval(elapsedIntervalRef.current);
+      elapsedIntervalRef.current = null;
+    }
+  };
+
+  const markChecklist = (id: ParseChecklistStepId, status: ParseChecklistStatus) => {
+    setChecklistSteps((prev) => prev.map((step) => (step.id === id ? { ...step, status } : step)));
+  };
+
+  const startParseProgress = () => {
+    clearIntervals();
+    setElapsedSeconds(0);
+    elapsedIntervalRef.current = window.setInterval(() => {
+      setElapsedSeconds((prev) => prev + 1);
+    }, 1000);
+
+    parseProgressIntervalRef.current = window.setInterval(() => {
+      setParseProgress((prev) => (prev < 92 ? prev + 2 : prev));
+    }, 2000);
+  };
+
+  useEffect(() => () => clearIntervals(), []);
 
   const onCreateAndUpload = async (event: FormEvent) => {
     event.preventDefault();
@@ -138,6 +234,10 @@ export function ExamsPage() {
     setParsedQuestionCount(null);
     setCreatedExamId(null);
     setStepLogs([]);
+    setParseProgress(0);
+    setElapsedSeconds(0);
+    setFailedSummary(null);
+    setChecklistSteps(initChecklist());
 
     let examId: number | null = null;
 
@@ -145,6 +245,7 @@ export function ExamsPage() {
       setIsRunning(true);
 
       setStep('creating');
+      markChecklist('creating_exam', 'active');
       const createEndpoint = buildApiUrl('exams');
       const exam = await api.createExam(modalName.trim());
       examId = exam.id;
@@ -155,9 +256,12 @@ export function ExamsPage() {
         status: 200,
         responseSnippet: JSON.stringify(exam).slice(0, 500),
       });
+      markChecklist('creating_exam', 'done');
+      setParseProgress(14);
       showSuccess('Create step succeeded.');
 
       setStep('uploading');
+      markChecklist('uploading_key', 'active');
       const uploadEndpoint = buildApiUrl(`exams/${exam.id}/key/upload`);
       const uploadResult = await api.uploadExamKey(exam.id, modalFiles);
       logStep({
@@ -166,9 +270,12 @@ export function ExamsPage() {
         status: 200,
         responseSnippet: JSON.stringify(uploadResult).slice(0, 500),
       });
+      markChecklist('uploading_key', 'done');
+      setParseProgress(28);
       showSuccess('Upload step succeeded.');
 
       setStep('building_pages');
+      markChecklist('building_key_pages', 'active');
       const buildEndpoint = buildApiUrl(`exams/${exam.id}/key/build-pages`);
       const buildPages = await api.buildExamKeyPages(exam.id);
       logStep({
@@ -177,9 +284,14 @@ export function ExamsPage() {
         status: 200,
         responseSnippet: JSON.stringify(buildPages).slice(0, 500),
       });
+      markChecklist('building_key_pages', 'done');
+      setParseProgress(42);
       showSuccess('Pages preview is ready.');
 
       setStep('parsing');
+      markChecklist('reading_questions', 'active');
+      setParseProgress(50);
+      startParseProgress();
       const parseOutcome = await api.parseExamKeyRaw(exam.id);
       const parseSnippet = (parseOutcome.responseText || JSON.stringify(parseOutcome.data)).slice(0, 500);
       logStep({
@@ -190,6 +302,7 @@ export function ExamsPage() {
       });
 
       if (parseOutcome.data === null) {
+        clearIntervals();
         const parseSummary = `Step: parsing | Status: ${parseOutcome.status}`;
         setWizardError({
           summary: parseSummary,
@@ -199,6 +312,12 @@ export function ExamsPage() {
         return;
       }
 
+      clearIntervals();
+      markChecklist('reading_questions', 'done');
+      markChecklist('detecting_marks', 'done');
+      markChecklist('drafting_rubric', 'done');
+      markChecklist('finalizing', 'done');
+      setParseProgress(100);
       showSuccess('Parse step succeeded.');
       const questionCount = extractParsedQuestionCount(parseOutcome.data);
       setParsedQuestionCount(questionCount);
@@ -215,6 +334,7 @@ export function ExamsPage() {
       await loadExams();
       navigate(`/exams/${exam.id}/review`);
     } catch (err) {
+      clearIntervals();
       console.error('Create exam wizard failed', err);
       const stepName = step;
       const stepEndpoint =
@@ -242,6 +362,22 @@ export function ExamsPage() {
         showError(networkMessage);
       } else if (err instanceof ApiError) {
         const details = err.responseBodySnippet || '<empty>';
+        let parseDetails: ParseErrorDetails | null = null;
+        try {
+          parseDetails = JSON.parse(details) as ParseErrorDetails;
+        } catch {
+          parseDetails = null;
+        }
+        if (stepName === 'parsing') {
+          const failedStepId = stageToChecklistId(parseDetails?.stage);
+          markChecklist(failedStepId, 'failed');
+          const stageLabel = parseDetails?.stage || 'unknown';
+          if (parseDetails?.page_index && parseDetails?.page_count) {
+            setFailedSummary(`Failed at: ${stageLabel} (page ${parseDetails.page_index}/${parseDetails.page_count})`);
+          } else {
+            setFailedSummary(`Failed at: ${stageLabel}`);
+          }
+        }
         setWizardError({
           summary: `Step: ${stepName} | Status: ${err.status}`,
           details,
@@ -270,18 +406,11 @@ export function ExamsPage() {
         showError(`${stepName} failed (status unknown)`);
       }
     } finally {
+      clearIntervals();
       setIsRunning(false);
     }
   };
 
-  const wizardSteps: Array<{ id: WizardStep; label: string }> = [
-    { id: 'creating', label: 'Creating exam' },
-    { id: 'uploading', label: 'Uploading key files' },
-    { id: 'parsing', label: 'Parsing key files' },
-    { id: 'done', label: `Done (${parsedQuestionCount ?? 0} questions)` },
-  ];
-
-  const activeStepIndex = wizardSteps.findIndex((wizardStep) => wizardStep.id === step);
 
   return (
     <div>
@@ -352,16 +481,28 @@ export function ExamsPage() {
                 </div>
               )}
 
-              <ul className="subtle-text">
-                {wizardSteps.map((wizardStep, index) => {
-                  const isActive = step === wizardStep.id;
-                  const isComplete = activeStepIndex > index;
-                  const marker = isComplete ? '✓' : isActive ? '…' : '○';
-                  return <li key={wizardStep.id}>{marker} {wizardStep.label}</li>;
-                })}
-              </ul>
+              <div className="wizard-progress-block">
+                <div className="wizard-progress-header subtle-text">
+                  <span>Progress: {parseProgress}%</span>
+                  <span>Elapsed: {formatElapsed(elapsedSeconds)}</span>
+                </div>
+                <div className="wizard-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={parseProgress}>
+                  <div className="wizard-progress-fill" style={{ width: `${parseProgress}%` }} />
+                </div>
+                <ul className="wizard-checklist subtle-text">
+                  {checklistSteps.map((item) => {
+                    const marker = item.status === 'done' ? '✓' : item.status === 'active' ? '…' : item.status === 'failed' ? '✕' : '○';
+                    return (
+                      <li key={item.id} className={`wizard-checklist-item status-${item.status}`}>
+                        <span>{marker}</span> {item.label}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
 
               {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
+              {failedSummary && <p className="warning-text">{failedSummary}</p>}
               {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
 
               <details>

@@ -205,10 +205,11 @@ def build_key_parse_request(
 class OpenAIAnswerKeyParser:
     def __init__(
         self,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 60.0,
         max_images_per_request: int = 1,
         payload_limit_bytes: int = 2_500_000,
-        retry_backoffs_seconds: tuple[float, ...] = (0.5, 1.5),
+        retry_backoffs_seconds: tuple[float, ...] = (1.0, 2.0),
+        mini_retry_backoffs_seconds: tuple[float, ...] = (),
     ) -> None:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
@@ -220,6 +221,7 @@ class OpenAIAnswerKeyParser:
         self._max_images_per_request = max_images_per_request
         self._payload_limit_bytes = payload_limit_bytes
         self._retry_backoffs_seconds = retry_backoffs_seconds
+        self._mini_retry_backoffs_seconds = mini_retry_backoffs_seconds
 
     def _build_prompt_for_batch(self, batch_number: int, total_batches: int) -> str:
         return (
@@ -236,7 +238,8 @@ class OpenAIAnswerKeyParser:
 
     def _call_openai_with_retry(self, request_payload: dict[str, object], model: str, request_id: str, batch_number: int) -> dict[str, object]:
         last_exc: OpenAIRequestError | None = None
-        attempts = len(self._retry_backoffs_seconds)
+        backoffs = self._mini_retry_backoffs_seconds if model.endswith("mini") else self._retry_backoffs_seconds
+        attempts = len(backoffs) + 1
         for attempt in range(attempts):
             try:
                 response = self._client.responses.create(**request_payload)
@@ -267,7 +270,7 @@ class OpenAIAnswerKeyParser:
                             "status_code": status_code,
                         },
                     )
-                    time.sleep(self._retry_backoffs_seconds[attempt])
+                    time.sleep(backoffs[attempt])
                     continue
                 raise last_exc from exc
 
@@ -299,6 +302,7 @@ class OpenAIAnswerKeyParser:
             for sub_batch in sub_batches:
                 images = [normalized[idx].image_bytes for idx in sub_batch]
                 mime_types = [normalized[idx].mime_type for idx in sub_batch]
+                payload_size_bytes = sum(len(item) for item in images)
                 request_payload = build_key_parse_request(
                     model=model,
                     prompt=self._build_prompt_for_batch(batch_number=batch_number, total_batches=len(chunks)),
@@ -306,7 +310,20 @@ class OpenAIAnswerKeyParser:
                     mime_types=mime_types,
                     schema=schema,
                 )
-                payloads.append(self._call_openai_with_retry(request_payload, model=model, request_id=request_id, batch_number=batch_number))
+                started = time.perf_counter()
+                response_payload = self._call_openai_with_retry(request_payload, model=model, request_id=request_id, batch_number=batch_number)
+                logger.info(
+                    "key/parse openai page timing",
+                    extra={
+                        "request_id": request_id,
+                        "stage": "call_openai_page",
+                        "model": model,
+                        "batch_number": batch_number,
+                        "payload_size_bytes": payload_size_bytes,
+                        "openai_ms": int((time.perf_counter() - started) * 1000),
+                    },
+                )
+                payloads.append(response_payload)
 
         if len(payloads) == 1:
             return ParseResult(payload=payloads[0], model=model)

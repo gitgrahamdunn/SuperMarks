@@ -201,6 +201,7 @@ def test_parse_answer_key_retries_timeout_and_returns_200(tmp_path, monkeypatch,
     parser._max_images_per_request = 1
     parser._payload_limit_bytes = 2_500_000
     parser._retry_backoffs_seconds = (0.0, 0.0)
+    parser._mini_retry_backoffs_seconds = ()
 
     class _FakeResponse:
         def __init__(self, output_text: str) -> None:
