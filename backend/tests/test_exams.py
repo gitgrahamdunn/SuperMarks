@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("httpx")
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine, select
 
@@ -26,6 +27,10 @@ def _tiny_png_bytes() -> bytes:
         b"\x0b\xe7\x02\x9d"
         b"\x00\x00\x00\x00IEND\xaeB`\x82"
     )
+
+
+def _tiny_pdf_bytes() -> bytes:
+    return b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
 
 
 def test_list_exams_returns_created_exams(tmp_path) -> None:
@@ -248,3 +253,71 @@ def test_get_key_page_and_key_visual_returns_image(tmp_path, monkeypatch) -> Non
         visual = client.get(f"/api/exams/{exam_id}/questions/{question_id}/key-visual")
         assert visual.status_code == 200
         assert visual.headers["content-type"].startswith("image/")
+
+
+def test_parse_answer_key_uses_pdf_renderer_for_pdf_uploads(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    called: dict[str, int] = {"count": 0}
+
+    def _fake_render(input_path: Path, output_dir: Path, start_page_number: int, max_pages: int) -> list[Path]:
+        called["count"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        rendered = output_dir / f"page_{start_page_number:04d}.png"
+        rendered.write_bytes(_tiny_png_bytes())
+        return [rendered]
+
+    monkeypatch.setattr("app.routers.exams._render_pdf_pages", _fake_render)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "PDF Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.pdf", _tiny_pdf_bytes(), "application/pdf"))],
+        )
+        assert upload.status_code == 200
+
+        response = client.post(f"/api/exams/{exam_id}/key/parse")
+        assert response.status_code == 200
+        assert called["count"] == 1
+        assert "PDF rendering not available on serverless" not in response.text
+
+
+def test_parse_answer_key_returns_400_when_pdf_render_fails(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    def _fake_render_fail(input_path: Path, output_dir: Path, start_page_number: int, max_pages: int) -> list[Path]:
+        raise HTTPException(status_code=400, detail="PDF render failed. Try uploading images.")
+
+    monkeypatch.setattr("app.routers.exams._render_pdf_pages", _fake_render_fail)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "PDF Fail Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.pdf", _tiny_pdf_bytes(), "application/pdf"))],
+        )
+        assert upload.status_code == 200
+
+        response = client.post(f"/api/exams/{exam_id}/key/parse")
+        assert response.status_code == 400
+        payload = response.json()
+        assert payload["detail"] == "PDF render failed. Try uploading images."
+        assert payload["stage"] == "build_key_pages"
+        assert payload["request_id"]
