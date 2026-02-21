@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from PIL import Image, ImageOps
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
 from sqlmodel import Session, delete, select
 
-from app.ai.openai_vision import AnswerKeyParser, ParseResult, get_answer_key_parser
+from app.ai.openai_vision import AnswerKeyParser, OpenAIRequestError, ParseResult, get_answer_key_parser
 from app.db import get_session
 from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
 from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
@@ -20,6 +25,7 @@ from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data, save_upload_file, upload_dir
 
 router = APIRouter(prefix="/exams", tags=["exams"])
+logger = logging.getLogger(__name__)
 
 _ALLOWED_TYPES = {
     "application/pdf": "pdf",
@@ -129,17 +135,39 @@ def _validate_parse_payload(payload: dict[str, Any]) -> tuple[float, list[dict[s
     return float(confidence), questions
 
 
+def _is_transient_openai_status(status_code: int | None) -> bool:
+    return status_code in {429, 503, 504}
+
+
 def _parse_with_fallback(parser: AnswerKeyParser, image_paths: list[Path]) -> ParseResult:
+    first: ParseResult | None = None
+    nano_error: Exception | None = None
     try:
         first = parser.parse(image_paths, model="gpt-5-nano")
-    except Exception:
+    except OpenAIRequestError as exc:
+        nano_error = exc
+        if _is_transient_openai_status(exc.status_code):
+            time.sleep(0.5)
+            first = parser.parse(image_paths, model="gpt-5-nano")
+        elif exc.status_code == 400:
+            return parser.parse(image_paths, model="gpt-5-mini")
+        else:
+            raise
+    except Exception as exc:
+        nano_error = exc
         return parser.parse(image_paths, model="gpt-5-mini")
+
+    if first is None:
+        if nano_error is not None:
+            raise nano_error
+        raise RuntimeError("Nano parse produced no result")
+
     try:
         confidence, _ = _validate_parse_payload(first.payload)
         if confidence >= 0.75:
             return first
     except (ValueError, TypeError, json.JSONDecodeError):
-        pass
+        return parser.parse(image_paths, model="gpt-5-mini")
     return parser.parse(image_paths, model="gpt-5-mini")
 
 
@@ -376,53 +404,123 @@ def parse_answer_key(
     session: Session = Depends(get_session),
     parser: AnswerKeyParser = Depends(get_answer_key_parser),
 ) -> dict[str, object]:
-    exam = session.get(Exam, exam_id)
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-
-    image_paths = build_key_pages_for_exam(exam_id=exam_id, session=session)
-
-    result = _parse_with_fallback(parser, image_paths)
+    stage = "load_exam"
     try:
-        confidence, questions_payload = _validate_parse_payload(result.payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid parser response: {exc}") from exc
+        exam = session.get(Exam, exam_id)
+        if not exam:
+            raise HTTPException(status_code=404, detail="Exam not found")
 
-    existing = {q.label: q for q in session.exec(select(Question).where(Question.exam_id == exam_id)).all()}
-    for parsed in questions_payload:
-        label = str(parsed["label"])
-        max_marks = int(parsed["max_marks"])
-        rubric = {
-            "total_marks": max_marks,
-            "criteria": parsed.get("criteria", []),
-            "answer_key": parsed.get("answer_key", ""),
-            "model_solution": parsed.get("model_solution", ""),
-            "question_text": parsed.get("question_text", ""),
-            "notes": parsed.get("notes", ""),
-        }
+        stage = "load_key_files"
+        stage = "build_key_pages"
+        image_paths = build_key_pages_for_exam(exam_id=exam_id, session=session)
 
-        question = existing.get(label)
-        if question:
-            question.max_marks = max_marks
-            question.rubric_json = json.dumps(rubric)
-            session.add(question)
-        else:
-            session.add(
-                Question(
-                    exam_id=exam_id,
-                    label=label,
-                    max_marks=max_marks,
-                    rubric_json=json.dumps(rubric),
+        stage = "prepare_openai_request"
+        stage = "call_openai_nano"
+        result = _parse_with_fallback(parser, image_paths)
+        if result.model == "gpt-5-mini":
+            stage = "call_openai_mini"
+
+        stage = "validate_openai_json"
+        try:
+            confidence, questions_payload = _validate_parse_payload(result.payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid parser response: {exc}") from exc
+
+        stage = "save_questions"
+        existing = {q.label: q for q in session.exec(select(Question).where(Question.exam_id == exam_id)).all()}
+        for parsed in questions_payload:
+            label = str(parsed["label"])
+            max_marks = int(parsed["max_marks"])
+            rubric = {
+                "total_marks": max_marks,
+                "criteria": parsed.get("criteria", []),
+                "answer_key": parsed.get("answer_key", ""),
+                "model_solution": parsed.get("model_solution", ""),
+                "question_text": parsed.get("question_text", ""),
+                "notes": parsed.get("notes", ""),
+            }
+
+            question = existing.get(label)
+            if question:
+                question.max_marks = max_marks
+                question.rubric_json = json.dumps(rubric)
+                session.add(question)
+            else:
+                session.add(
+                    Question(
+                        exam_id=exam_id,
+                        label=label,
+                        max_marks=max_marks,
+                        rubric_json=json.dumps(rubric),
+                    )
                 )
-            )
 
-    exam.status = ExamStatus.REVIEWING
-    session.add(exam)
-    session.commit()
+        exam.status = ExamStatus.REVIEWING
+        session.add(exam)
+        session.commit()
 
-    return {
-        "ok": True,
-        "model_used": result.model,
-        "confidence_score": confidence,
-        "questions_count": len(questions_payload),
-    }
+        return {
+            "ok": True,
+            "model_used": result.model,
+            "confidence_score": confidence,
+            "questions_count": len(questions_payload),
+        }
+    except HTTPException:
+        raise
+    except OpenAIRequestError as exc:
+        openai_body = exc.body[:2000]
+        status_code = exc.status_code or 502
+        logger.exception(
+            "key/parse openai failed",
+            extra={"stage": stage, "exam_id": exam_id, "openai_status": status_code, "openai_body": openai_body},
+        )
+        detail = {
+            "detail": "OpenAI request failed",
+            "stage": stage,
+            "openai_status": status_code,
+            "openai_error": openai_body,
+        }
+        if status_code == 401:
+            detail["hint"] = "Check OPENAI_API_KEY"
+            return JSONResponse(status_code=500, content=detail)
+        if status_code == 429:
+            detail["hint"] = "Rate limited, retry"
+            return JSONResponse(status_code=503, content=detail)
+        if status_code == 400:
+            detail["hint"] = "Bad request payload, check request format"
+            return JSONResponse(status_code=502, content=detail)
+        return JSONResponse(status_code=502, content=detail)
+    except httpx.HTTPStatusError as exc:
+        response_body = exc.response.text[:2000] if exc.response is not None else str(exc)[:2000]
+        status_code = exc.response.status_code if exc.response is not None else 502
+        logger.exception(
+            "key/parse openai failed",
+            extra={"stage": stage, "exam_id": exam_id, "openai_status": status_code, "openai_body": response_body},
+        )
+        detail = {
+            "detail": "OpenAI request failed",
+            "stage": stage,
+            "openai_status": status_code,
+            "openai_error": response_body,
+        }
+        if status_code == 401:
+            detail["hint"] = "Check OPENAI_API_KEY"
+            return JSONResponse(status_code=500, content=detail)
+        if status_code == 429:
+            detail["hint"] = "Rate limited, retry"
+            return JSONResponse(status_code=503, content=detail)
+        if status_code == 400:
+            detail["hint"] = "Bad request payload, check request format"
+            return JSONResponse(status_code=502, content=detail)
+        return JSONResponse(status_code=502, content=detail)
+    except Exception as exc:
+        logger.exception("key/parse failed", extra={"stage": stage, "exam_id": exam_id})
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Key parsing failed",
+                "stage": stage,
+                "error_type": type(exc).__name__,
+                "message": str(exc)[:500],
+            },
+        )

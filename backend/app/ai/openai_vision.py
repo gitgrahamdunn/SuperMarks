@@ -50,12 +50,58 @@ class ParseResult:
     model: str
 
 
+@dataclass
+class OpenAIRequestError(Exception):
+    status_code: int | None
+    body: str
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
+
+
 class AnswerKeyParser(Protocol):
     def parse(self, image_paths: list[Path], model: str) -> ParseResult:
         """Parse answer key images into structured data."""
 
 
+def build_key_parse_request(
+    model: str,
+    prompt: str,
+    images: list[bytes],
+    mime_types: list[str],
+    schema: dict[str, object],
+) -> dict[str, object]:
+    content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
+    for image_bytes, mime_type in zip(images, mime_types, strict=True):
+        encoded = base64.b64encode(image_bytes).decode("utf-8")
+        normalized_mime = mime_type.lower().strip()
+        if normalized_mime not in {"image/png", "image/jpeg"}:
+            normalized_mime = "image/png"
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": f"data:{normalized_mime};base64,{encoded}",
+            }
+        )
+
+    return {
+        "model": model,
+        "input": [{"role": "user", "content": content}],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "answer_key_parse",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+    }
+
+
 class OpenAIAnswerKeyParser:
+    _max_images_per_request = 6
+
     def __init__(self) -> None:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
@@ -66,55 +112,52 @@ class OpenAIAnswerKeyParser:
         self._client = OpenAI(api_key=api_key)
 
     def parse(self, image_paths: list[Path], model: str) -> ParseResult:
-        content: list[dict[str, object]] = [
-            {
-                "type": "input_text",
-                "text": (
-                    "You are parsing an exam answer key. Identify questions, marks, and a draft rubric. "
-                    "Return JSON only matching schema."
-                ),
-            }
-        ]
-
-        for image_path in image_paths:
-            encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
-            suffix = image_path.suffix.lower().lstrip(".") or "png"
-            mime = "jpeg" if suffix in {"jpg", "jpeg"} else "png"
-            content.append(
-                {
-                    "type": "input_image",
-                    "image_url": f"data:image/{mime};base64,{encoded}",
-                }
-            )
-
-        response = self._client.responses.create(
-            model=model,
-            input=[
-                {
-                    "role": "system",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": (
-                                "You are parsing an exam answer key. Identify questions, marks, draft rubric. "
-                                "Return JSON only matching schema."
-                            ),
-                        }
-                    ],
-                },
-                {"role": "user", "content": content},
-            ],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "answer_key_parse",
-                    "strict": True,
-                    "schema": ANSWER_KEY_SCHEMA,
-                }
-            },
+        prompt = (
+            "You are parsing an exam answer key. Identify questions, marks, and a draft rubric. "
+            "Return ONLY JSON matching the provided schema."
         )
-        output = response.output_text
-        return ParseResult(payload=json.loads(output), model=model)
+        chunks: list[list[Path]] = [
+            image_paths[i : i + self._max_images_per_request] for i in range(0, len(image_paths), self._max_images_per_request)
+        ]
+        payloads: list[dict[str, object]] = []
+
+        for chunk in chunks:
+            images = [path.read_bytes() for path in chunk]
+            mime_types = ["image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png" for path in chunk]
+            request_payload = build_key_parse_request(
+                model=model,
+                prompt=prompt,
+                images=images,
+                mime_types=mime_types,
+                schema=ANSWER_KEY_SCHEMA,
+            )
+            try:
+                response = self._client.responses.create(**request_payload)
+            except Exception as exc:  # pragma: no cover - network errors are integration-level
+                status_code = getattr(exc, "status_code", None)
+                response_obj = getattr(exc, "response", None)
+                body_text = ""
+                if response_obj is not None:
+                    body_text = getattr(response_obj, "text", "") or ""
+                if not body_text:
+                    body_text = str(exc)
+                raise OpenAIRequestError(status_code=status_code, body=body_text, message=f"OpenAI request failed: {exc}") from exc
+            payloads.append(json.loads(response.output_text))
+
+        if len(payloads) == 1:
+            return ParseResult(payload=payloads[0], model=model)
+
+        merged_questions: list[object] = []
+        confidence_scores: list[float] = []
+        for payload in payloads:
+            questions = payload.get("questions", [])
+            if isinstance(questions, list):
+                merged_questions.extend(questions)
+            confidence = payload.get("confidence_score")
+            if isinstance(confidence, (int, float)):
+                confidence_scores.append(float(confidence))
+        merged_confidence = min(confidence_scores) if confidence_scores else 0.0
+        return ParseResult(payload={"confidence_score": merged_confidence, "questions": merged_questions}, model=model)
 
 
 class MockAnswerKeyParser:
