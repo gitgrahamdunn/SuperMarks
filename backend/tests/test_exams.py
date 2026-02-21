@@ -75,7 +75,11 @@ def test_parse_answer_key_builds_pages_from_uploaded_images(tmp_path, monkeypatc
 
         response = client.post(f"/api/exams/{exam_id}/key/parse")
         assert response.status_code == 200
-        assert response.json()["questions_count"] == 2
+        payload = response.json()
+        assert payload["questions_count"] == 2
+        assert payload["request_id"]
+        assert payload["stage"] == "save_questions"
+        assert isinstance(payload["timings"]["openai_ms"], int)
         assert "No key page images found" not in response.text
 
         key_pages_dir = Path(settings.data_dir) / "exams" / str(exam_id) / "key_pages"
@@ -133,4 +137,7 @@ def test_parse_answer_key_without_uploaded_files_returns_actionable_400(tmp_path
 
         response = client.post(f"/api/exams/{exam_id}/key/parse")
         assert response.status_code == 400
-        assert response.json()["detail"] == f"No key files uploaded. Call /api/exams/{exam_id}/key/upload first."
+        payload = response.json()
+        assert payload["detail"] == f"No key files uploaded. Call /api/exams/{exam_id}/key/upload first."
+        assert payload["request_id"]
+        assert payload["stage"] == "build_key_pages"

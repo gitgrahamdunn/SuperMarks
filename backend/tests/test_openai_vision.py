@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-import copy
+import pytest
 
 from app.ai.openai_vision import (
-    ANSWER_KEY_SCHEMA,
+    SchemaBuildError,
+    build_answer_key_response_schema,
     build_key_parse_request,
-    force_questions_items_schema_requirements,
-    make_schema_strict,
+    validate_schema_strictness,
 )
 
 
 def test_build_key_parse_request_uses_vision_and_schema() -> None:
+    schema = build_answer_key_response_schema()
     payload = build_key_parse_request(
         model="gpt-5-nano",
         prompt="Parse this key",
         images=[b"img-a", b"img-b"],
         mime_types=["image/png", "image/jpeg"],
-        schema=ANSWER_KEY_SCHEMA,
+        schema=schema,
     )
 
     assert payload["model"] == "gpt-5-nano"
@@ -37,16 +38,8 @@ def test_build_key_parse_request_uses_vision_and_schema() -> None:
     assert text_format["strict"] is True
 
 
-
 def test_answer_key_schema_is_strict_for_all_object_nodes() -> None:
-    payload = build_key_parse_request(
-        model="gpt-5-nano",
-        prompt="Parse this key",
-        images=[b"img-a"],
-        mime_types=["image/png"],
-        schema=ANSWER_KEY_SCHEMA,
-    )
-    schema = payload["text"]["format"]["schema"]
+    schema = build_answer_key_response_schema()
 
     def _assert_object_nodes(node: object) -> None:
         if isinstance(node, dict):
@@ -63,14 +56,10 @@ def test_answer_key_schema_is_strict_for_all_object_nodes() -> None:
 
     questions_items_required = schema["properties"]["questions"]["items"]["required"]
     assert isinstance(questions_items_required, list)
-    assert questions_items_required == ["label", "max_marks", "criteria"]
+    assert questions_items_required == ["label", "max_marks", "question_text", "answer_key", "model_solution", "notes", "criteria"]
 
 
-def test_forced_questions_items_required_is_list_when_sent_to_openai() -> None:
-    schema = copy.deepcopy(ANSWER_KEY_SCHEMA)
-    force_questions_items_schema_requirements(schema)
-    strict_schema = make_schema_strict(schema)
-    required = strict_schema["properties"]["questions"]["items"]["required"]
-
-    assert isinstance(required, list)
-    assert required == ["label", "max_marks", "criteria"]
+def test_schema_validation_rejects_non_strict_shape() -> None:
+    invalid_schema = {"type": "object", "properties": {"x": {"type": "object", "properties": {"a": {"type": "string"}}}}}
+    with pytest.raises(SchemaBuildError):
+        validate_schema_strictness(invalid_schema)

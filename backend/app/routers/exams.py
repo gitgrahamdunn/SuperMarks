@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,14 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from fastapi.responses import JSONResponse
 from sqlmodel import Session, delete, select
 
-from app.ai.openai_vision import AnswerKeyParser, OpenAIRequestError, ParseResult, get_answer_key_parser
+from app.ai.openai_vision import (
+    AnswerKeyParser,
+    OpenAIRequestError,
+    ParseResult,
+    SchemaBuildError,
+    build_answer_key_response_schema,
+    get_answer_key_parser,
+)
 from app.db import get_session
 from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamStatus, Question, QuestionRegion, Submission, SubmissionFile, SubmissionStatus
 from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
@@ -95,7 +104,7 @@ def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
             try:
                 converter = Pdf2ImageConverter()
             except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail="PDF rendering not available on serverless. Upload images instead.") from exc
+                raise HTTPException(status_code=400, detail="PDF rendering not available on serverless. Upload images.") from exc
             rendered_paths = converter.convert(source_path, output_dir)
             for rendered in rendered_paths:
                 out_path = output_dir / f"page_{page_num:04d}.png"
@@ -115,60 +124,107 @@ def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
     return created_paths
 
 
-def _validate_parse_payload(payload: dict[str, Any]) -> tuple[float, list[dict[str, Any]]]:
+def _validate_parse_payload(payload: dict[str, Any]) -> tuple[float, list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
     confidence = payload.get("confidence_score")
     questions = payload.get("questions")
     if not isinstance(confidence, (int, float)):
         raise ValueError("confidence_score missing or invalid")
     if confidence < 0 or confidence > 1:
         raise ValueError("confidence_score out of range")
-    if not isinstance(questions, list) or not questions:
-        raise ValueError("questions missing or empty")
+    if not isinstance(questions, list):
+        raise ValueError("questions missing or invalid")
+    if not questions:
+        warnings.append("No questions extracted; please review manually.")
 
     for question in questions:
         if not isinstance(question, dict):
             raise ValueError("question item must be object")
-        if not question.get("label"):
+        if not str(question.get("label", "")).strip():
             raise ValueError("question label missing")
         if not isinstance(question.get("max_marks"), (int, float)):
             raise ValueError("question max_marks missing")
-    return float(confidence), questions
+
+        criteria = question.get("criteria", [])
+        if not isinstance(criteria, list):
+            raise ValueError("question criteria must be list")
+        for criterion in criteria:
+            if not isinstance(criterion, dict):
+                raise ValueError("criteria item must be object")
+            if not isinstance(criterion.get("marks"), (int, float)):
+                raise ValueError("criteria marks missing")
+
+    return float(confidence), questions, warnings
 
 
 def _is_transient_openai_status(status_code: int | None) -> bool:
     return status_code in {429, 503, 504}
 
 
-def _parse_with_fallback(parser: AnswerKeyParser, image_paths: list[Path]) -> ParseResult:
-    first: ParseResult | None = None
-    nano_error: Exception | None = None
+def _is_schema_openai_error(exc: OpenAIRequestError) -> bool:
+    if exc.status_code != 400:
+        return False
+    body = (exc.body or "").lower()
+    return "schema" in body or "json_schema" in body or "additionalproperties" in body
+
+
+def _allowed_parse_models() -> list[str]:
+    configured = os.getenv("SUPERMARKS_KEY_PARSE_MODELS", "gpt-5-nano,gpt-5-mini")
+    models = [m.strip() for m in configured.split(",") if m.strip()]
+    return models
+
+
+def _resolve_models() -> tuple[str, str]:
+    allowed = _allowed_parse_models()
+    expected = ["gpt-5-nano", "gpt-5-mini"]
+    for model in expected:
+        if model not in allowed:
+            raise ValueError(f"Missing required model in allowlist: {model}")
+    return expected[0], expected[1]
+
+
+
+
+def _invoke_parser(parser: AnswerKeyParser, image_paths: list[Path], model: str, request_id: str) -> ParseResult:
     try:
-        first = parser.parse(image_paths, model="gpt-5-nano")
+        return parser.parse(image_paths, model=model, request_id=request_id)
+    except TypeError:
+        return parser.parse(image_paths, model=model)
+
+def _parse_with_fallback(parser: AnswerKeyParser, image_paths: list[Path], request_id: str) -> ParseResult:
+    nano_model, mini_model = _resolve_models()
+
+    try:
+        nano = _invoke_parser(parser, image_paths, model=nano_model, request_id=request_id)
     except OpenAIRequestError as exc:
-        nano_error = exc
         if _is_transient_openai_status(exc.status_code):
             time.sleep(0.5)
-            first = parser.parse(image_paths, model="gpt-5-nano")
-        elif exc.status_code == 400:
-            return parser.parse(image_paths, model="gpt-5-mini")
-        else:
+            try:
+                nano = _invoke_parser(parser, image_paths, model=nano_model, request_id=request_id)
+            except OpenAIRequestError as retry_exc:
+                if _is_transient_openai_status(retry_exc.status_code):
+                    return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
+                if retry_exc.status_code == 400 and _is_schema_openai_error(retry_exc):
+                    raise
+                return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
+        elif exc.status_code == 400 and _is_schema_openai_error(exc):
             raise
-    except Exception as exc:
-        nano_error = exc
-        return parser.parse(image_paths, model="gpt-5-mini")
-
-    if first is None:
-        if nano_error is not None:
-            raise nano_error
-        raise RuntimeError("Nano parse produced no result")
+        else:
+            return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
+    except (httpx.TimeoutException, TimeoutError):
+        time.sleep(0.5)
+        try:
+            nano = _invoke_parser(parser, image_paths, model=nano_model, request_id=request_id)
+        except Exception:
+            return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
+    except Exception:
+        return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
 
     try:
-        confidence, _ = _validate_parse_payload(first.payload)
-        if confidence >= 0.75:
-            return first
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return parser.parse(image_paths, model="gpt-5-mini")
-    return parser.parse(image_paths, model="gpt-5-mini")
+        _validate_parse_payload(nano.payload)
+        return nano
+    except ValueError:
+        return _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
 
 
 def _exam_key_dir(exam_id: int) -> Path:
@@ -404,28 +460,96 @@ def parse_answer_key(
     session: Session = Depends(get_session),
     parser: AnswerKeyParser = Depends(get_answer_key_parser),
 ) -> dict[str, object]:
+    request_id = str(uuid.uuid4())
     stage = "load_exam"
+    timings: dict[str, int] = {"build_pages_ms": 0, "openai_ms": 0, "validate_ms": 0, "save_ms": 0}
+
+    def _err(status_code: int, detail: str, *, openai_status: int | None = None, openai_error: str | None = None) -> JSONResponse:
+        payload: dict[str, object] = {
+            "detail": detail,
+            "request_id": request_id,
+            "stage": stage,
+            "openai_status": openai_status,
+            "openai_error": openai_error,
+        }
+        return JSONResponse(status_code=status_code, content=payload)
+
     try:
         exam = session.get(Exam, exam_id)
         if not exam:
             raise HTTPException(status_code=404, detail="Exam not found")
 
-        stage = "load_key_files"
+        schema_started = time.perf_counter()
+        stage = "build_schema"
+        try:
+            build_answer_key_response_schema()
+        except SchemaBuildError as exc:
+            logger.exception("key/parse schema build failed", extra={"request_id": request_id, "stage": stage, "exam_id": exam_id})
+            return _err(500, f"Failed to build OpenAI schema: {exc}")
+        timings["validate_ms"] += int((time.perf_counter() - schema_started) * 1000)
+
+        stage = "model_config"
+        try:
+            nano_model, mini_model = _resolve_models()
+        except ValueError as exc:
+            return _err(500, str(exc))
+
+        pages_started = time.perf_counter()
         stage = "build_key_pages"
         image_paths = build_key_pages_for_exam(exam_id=exam_id, session=session)
+        timings["build_pages_ms"] = int((time.perf_counter() - pages_started) * 1000)
 
-        stage = "prepare_openai_request"
         stage = "call_openai_nano"
-        result = _parse_with_fallback(parser, image_paths)
-        if result.model == "gpt-5-mini":
-            stage = "call_openai_mini"
+        openai_started = time.perf_counter()
+        logger.info(
+            "key/parse begin model call",
+            extra={"request_id": request_id, "stage": stage, "exam_id": exam_id, "model": nano_model, "num_images": len(image_paths)},
+        )
+        result = _parse_with_fallback(parser, image_paths, request_id=request_id)
+        timings["openai_ms"] = int((time.perf_counter() - openai_started) * 1000)
+        stage = "call_openai_mini" if result.model == mini_model else "call_openai_nano"
 
-        stage = "validate_openai_json"
+        validate_started = time.perf_counter()
+        stage = "validate_output"
         try:
-            confidence, questions_payload = _validate_parse_payload(result.payload)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"Invalid parser response: {exc}") from exc
+            confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
+        except ValueError:
+            if result.model == nano_model:
+                stage = "call_openai_mini"
+                result = _invoke_parser(parser, image_paths, model=mini_model, request_id=request_id)
+                stage = "validate_output"
+                try:
+                    confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
+                except ValueError:
+                    timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
+                    return {
+                        "request_id": request_id,
+                        "stage": stage,
+                        "ok": True,
+                        "model_used": mini_model,
+                        "confidence_score": 0.0,
+                        "questions": [],
+                        "questions_count": 0,
+                        "warnings": ["Model output invalid; please add questions manually in review."],
+                        "timings": timings,
+                    }
+            else:
+                timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
+                return {
+                    "request_id": request_id,
+                    "stage": stage,
+                    "ok": True,
+                    "model_used": result.model,
+                    "confidence_score": 0.0,
+                    "questions": [],
+                    "questions_count": 0,
+                    "warnings": ["Model output invalid; please add questions manually in review."],
+                    "timings": timings,
+                }
 
+        timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
+
+        save_started = time.perf_counter()
         stage = "save_questions"
         existing = {q.label: q for q in session.exec(select(Question).where(Question.exam_id == exam_id)).all()}
         for parsed in questions_payload:
@@ -446,81 +570,43 @@ def parse_answer_key(
                 question.rubric_json = json.dumps(rubric)
                 session.add(question)
             else:
-                session.add(
-                    Question(
-                        exam_id=exam_id,
-                        label=label,
-                        max_marks=max_marks,
-                        rubric_json=json.dumps(rubric),
-                    )
-                )
+                session.add(Question(exam_id=exam_id, label=label, max_marks=max_marks, rubric_json=json.dumps(rubric)))
 
         exam.status = ExamStatus.REVIEWING
         session.add(exam)
         session.commit()
+        timings["save_ms"] = int((time.perf_counter() - save_started) * 1000)
 
+        logger.info(
+            "key/parse completed",
+            extra={
+                "request_id": request_id,
+                "stage": stage,
+                "exam_id": exam_id,
+                "model": result.model,
+                "num_images": len(image_paths),
+                "timings": timings,
+            },
+        )
         return {
             "ok": True,
+            "request_id": request_id,
+            "stage": stage,
             "model_used": result.model,
             "confidence_score": confidence,
             "questions_count": len(questions_payload),
+            "warnings": warnings,
+            "timings": timings,
         }
-    except HTTPException:
-        raise
+    except HTTPException as exc:
+        return _err(exc.status_code, str(exc.detail))
     except OpenAIRequestError as exc:
-        openai_body = exc.body[:2000]
-        status_code = exc.status_code or 502
-        logger.exception(
-            "key/parse openai failed",
-            extra={"stage": stage, "exam_id": exam_id, "openai_status": status_code, "openai_body": openai_body},
-        )
-        detail = {
-            "detail": "OpenAI request failed",
-            "stage": stage,
-            "openai_status": status_code,
-            "openai_error": openai_body,
-        }
-        if status_code == 401:
-            detail["hint"] = "Check OPENAI_API_KEY"
-            return JSONResponse(status_code=500, content=detail)
-        if status_code == 429:
-            detail["hint"] = "Rate limited, retry"
-            return JSONResponse(status_code=503, content=detail)
-        if status_code == 400:
-            detail["hint"] = "Bad request payload, check request format"
-            return JSONResponse(status_code=502, content=detail)
-        return JSONResponse(status_code=502, content=detail)
-    except httpx.HTTPStatusError as exc:
-        response_body = exc.response.text[:2000] if exc.response is not None else str(exc)[:2000]
-        status_code = exc.response.status_code if exc.response is not None else 502
-        logger.exception(
-            "key/parse openai failed",
-            extra={"stage": stage, "exam_id": exam_id, "openai_status": status_code, "openai_body": response_body},
-        )
-        detail = {
-            "detail": "OpenAI request failed",
-            "stage": stage,
-            "openai_status": status_code,
-            "openai_error": response_body,
-        }
-        if status_code == 401:
-            detail["hint"] = "Check OPENAI_API_KEY"
-            return JSONResponse(status_code=500, content=detail)
-        if status_code == 429:
-            detail["hint"] = "Rate limited, retry"
-            return JSONResponse(status_code=503, content=detail)
-        if status_code == 400:
-            detail["hint"] = "Bad request payload, check request format"
-            return JSONResponse(status_code=502, content=detail)
-        return JSONResponse(status_code=502, content=detail)
+        stage = "call_openai_timeout" if exc.status_code == 504 else stage
+        status_code = 504 if exc.status_code == 504 else (exc.status_code or 502)
+        return _err(status_code, "OpenAI request failed", openai_status=exc.status_code, openai_error=exc.body[:2000])
+    except httpx.TimeoutException as exc:
+        stage = "call_openai_timeout"
+        return _err(504, "OpenAI request timeout", openai_status=504, openai_error=str(exc))
     except Exception as exc:
-        logger.exception("key/parse failed", extra={"stage": stage, "exam_id": exam_id})
-        return JSONResponse(
-            status_code=500,
-            content={
-                "detail": "Key parsing failed",
-                "stage": stage,
-                "error_type": type(exc).__name__,
-                "message": str(exc)[:500],
-            },
-        )
+        logger.exception("key/parse failed", extra={"stage": stage, "exam_id": exam_id, "request_id": request_id})
+        return _err(500, f"Key parsing failed: {type(exc).__name__}: {str(exc)[:300]}")
