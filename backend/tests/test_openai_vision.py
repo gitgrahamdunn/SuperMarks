@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.ai.openai_vision import ANSWER_KEY_SCHEMA, build_key_parse_request
+import copy
+
+from app.ai.openai_vision import (
+    ANSWER_KEY_SCHEMA,
+    build_key_parse_request,
+    force_questions_items_schema_requirements,
+    make_schema_strict,
+)
 
 
 def test_build_key_parse_request_uses_vision_and_schema() -> None:
@@ -57,3 +64,13 @@ def test_answer_key_schema_is_strict_for_all_object_nodes() -> None:
     questions_items_required = schema["properties"]["questions"]["items"]["required"]
     assert isinstance(questions_items_required, list)
     assert questions_items_required == ["label", "max_marks", "criteria"]
+
+
+def test_forced_questions_items_required_is_list_when_sent_to_openai() -> None:
+    schema = copy.deepcopy(ANSWER_KEY_SCHEMA)
+    force_questions_items_schema_requirements(schema)
+    strict_schema = make_schema_strict(schema)
+    required = strict_schema["properties"]["questions"]["items"]["required"]
+
+    assert isinstance(required, list)
+    assert required == ["label", "max_marks", "criteria"]

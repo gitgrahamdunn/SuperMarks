@@ -108,14 +108,34 @@ def build_key_parse_request(
 
 
 def force_questions_items_schema_requirements(schema: dict[str, object]) -> None:
-    items = schema["properties"]["questions"]["items"]
+    schema["type"] = "object"
+    schema["additionalProperties"] = False
+    schema.setdefault("properties", {})
+    schema["properties"]["confidence_score"] = {"type": "number"}
+    q = schema.setdefault("properties", {}).setdefault("questions", {})
+    q["type"] = "array"
+    items = q.get("items")
+    if not isinstance(items, dict):
+        items = {}
+    q["items"] = items
+
     items["type"] = "object"
     items["additionalProperties"] = False
+    items["properties"] = items.get("properties", {})
+    items["properties"]["label"] = {"type": "string"}
+    items["properties"]["max_marks"] = {"type": "number"}
+    items["properties"]["criteria"] = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"desc": {"type": "string"}, "marks": {"type": "number"}},
+            "required": ["desc", "marks"],
+        },
+    }
     items["required"] = ["label", "max_marks", "criteria"]
-    items.setdefault("properties", {})
-    items["properties"].setdefault("label", {"type": "string"})
-    items["properties"].setdefault("max_marks", {"type": "number"})
-    items["properties"].setdefault("criteria", {"type": "array"})
+    schema["properties"]["questions"] = q
+    schema["required"] = ["confidence_score", "questions"]
 
 
 def make_schema_strict(schema: dict) -> dict:
@@ -185,11 +205,15 @@ class OpenAIAnswerKeyParser:
             schema = copy.deepcopy(ANSWER_KEY_SCHEMA)
             force_questions_items_schema_requirements(schema)
             strict_schema = make_schema_strict(schema)
-            questions_items_schema = strict_schema["properties"]["questions"]["items"]
+            questions_schema = strict_schema.get("properties", {}).get("questions", {})
+            questions_items_schema = questions_schema.get("items") if isinstance(questions_schema, dict) else None
+            questions_items_value = json.dumps(questions_items_schema, default=str)[:500]
             logger.debug(
-                "OpenAI answer_key_parse schema questions.items=%s required_type=%s",
-                json.dumps(questions_items_schema, default=str)[:800],
-                type(questions_items_schema.get("required")).__name__,
+                "OpenAI answer_key_parse schema diagnostics: questions_type=%s items_type=%s items=%s items_required_type=%s",
+                type(questions_schema).__name__,
+                type(questions_items_schema).__name__,
+                questions_items_value,
+                type(questions_items_schema.get("required")).__name__ if isinstance(questions_items_schema, dict) else None,
             )
             request_payload = build_key_parse_request(
                 model=model,
