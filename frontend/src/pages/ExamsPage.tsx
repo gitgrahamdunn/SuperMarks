@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE_URL, ApiError, api, buildApiUrl } from '../api/client';
+import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
 
@@ -12,6 +13,11 @@ type StepLog = {
   status: number | 'network-error';
   responseSnippet: string;
   exceptionMessage?: string;
+};
+
+type WizardError = {
+  summary: string;
+  details: unknown;
 };
 
 interface WizardParseResult {
@@ -69,7 +75,7 @@ export function ExamsPage() {
   const [modalFiles, setModalFiles] = useState<File[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [step, setStep] = useState<WizardStep>('creating');
-  const [error, setError] = useState('');
+  const [wizardError, setWizardError] = useState<WizardError | null>(null);
   const [createdExamId, setCreatedExamId] = useState<number | null>(null);
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
   const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
@@ -105,7 +111,7 @@ export function ExamsPage() {
     setModalName('');
     setModalFiles([]);
     setParsedQuestionCount(null);
-    setError('');
+    setWizardError(null);
     setCreatedExamId(null);
     setStepLogs([]);
     setAllowLargeUpload(false);
@@ -128,7 +134,7 @@ export function ExamsPage() {
       return;
     }
 
-    setError('');
+    setWizardError(null);
     setParsedQuestionCount(null);
     setCreatedExamId(null);
     setStepLogs([]);
@@ -173,8 +179,11 @@ export function ExamsPage() {
       });
 
       if (parseOutcome.data === null) {
-        const parseError = `Parse step failed. Endpoint: ${parseOutcome.url}. Status: ${parseOutcome.status}. Response: ${parseSnippet || '<empty>'}`;
-        setError(parseError);
+        const parseSummary = `Step: parsing | Status: ${parseOutcome.status}`;
+        setWizardError({
+          summary: parseSummary,
+          details: parseOutcome.data ?? parseOutcome.responseText ?? '<empty>',
+        });
         showError(`parsing failed (status ${parseOutcome.status})`);
         return;
       }
@@ -208,7 +217,10 @@ export function ExamsPage() {
 
       if (isNetworkFetchError(err)) {
         const networkMessage = `Network request failed (browser blocked/aborted). Step: ${stepName}. URL: ${stepEndpoint}`;
-        setError(networkMessage);
+        setWizardError({
+          summary: `Step: ${stepName} | Status: network-error`,
+          details: err instanceof Error ? err.stack || err.message : String(err),
+        });
         logStep({
           step: stepName,
           endpointUrl: stepEndpoint,
@@ -218,8 +230,11 @@ export function ExamsPage() {
         });
         showError(networkMessage);
       } else if (err instanceof ApiError) {
-        const details = `${err.method} ${err.url}\nStatus: ${err.status}\nBody: ${err.responseBodySnippet || '<empty>'}`;
-        setError(details);
+        const details = err.responseBodySnippet || '<empty>';
+        setWizardError({
+          summary: `Step: ${stepName} | Status: ${err.status}`,
+          details,
+        });
         logStep({
           step: stepName,
           endpointUrl: err.url,
@@ -230,7 +245,10 @@ export function ExamsPage() {
         showError(`${stepName} failed (status ${err.status})`);
       } else {
         const details = err instanceof Error ? err.stack || err.message : 'Unknown error';
-        setError(details);
+        setWizardError({
+          summary: `Step: ${stepName} | Status: unknown`,
+          details,
+        });
         logStep({
           step: stepName,
           endpointUrl: stepEndpoint,
@@ -333,7 +351,7 @@ export function ExamsPage() {
               </ul>
 
               {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
-              {error && <p className="subtle-text">{error}</p>}
+              {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
 
               <details>
                 <summary>Show details</summary>
