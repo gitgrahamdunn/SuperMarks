@@ -54,9 +54,6 @@ def test_answer_key_schema_is_strict_for_all_object_nodes() -> None:
 
     _assert_object_nodes(schema)
 
-    questions_items_required = (
-        schema["properties"]["questions"]["items"]["required"]
-    )
-    assert "label" in questions_items_required
-    assert "max_marks" in questions_items_required
-    assert "criteria" in questions_items_required
+    questions_items_required = schema["properties"]["questions"]["items"]["required"]
+    assert isinstance(questions_items_required, list)
+    assert questions_items_required == ["label", "max_marks", "criteria"]
