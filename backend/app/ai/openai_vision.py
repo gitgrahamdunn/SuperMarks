@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 from dataclasses import dataclass
@@ -88,6 +89,8 @@ def build_key_parse_request(
             }
         )
 
+    strict_schema = make_schema_strict(copy.deepcopy(schema))
+
     return {
         "model": model,
         "input": [{"role": "user", "content": content}],
@@ -96,10 +99,49 @@ def build_key_parse_request(
                 "type": "json_schema",
                 "name": "answer_key_parse",
                 "strict": True,
-                "schema": schema,
+                "schema": strict_schema,
             }
         },
     }
+
+
+def make_schema_strict(schema: dict) -> dict:
+    def _walk(node: object) -> None:
+        if not isinstance(node, dict):
+            if isinstance(node, list):
+                for item in node:
+                    _walk(item)
+            return
+
+        if node.get("type") == "object":
+            properties = node.get("properties")
+            if not isinstance(properties, dict):
+                properties = {}
+                node["properties"] = properties
+
+            node["additionalProperties"] = False
+
+            required = node.get("required")
+            if not isinstance(required, list):
+                node["required"] = list(properties.keys())
+
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            for value in properties.values():
+                _walk(value)
+
+        items = node.get("items")
+        if items is not None:
+            _walk(items)
+
+        for key in ("anyOf", "oneOf", "allOf"):
+            variants = node.get(key)
+            if isinstance(variants, list):
+                for variant in variants:
+                    _walk(variant)
+
+    _walk(schema)
+    return schema
 
 
 class OpenAIAnswerKeyParser:
