@@ -759,6 +759,8 @@ def parse_answer_key(
         run.error_json = json.dumps({"detail": "OpenAI request failed", "stage": stage, "openai_status": exc.status_code})
         session.add(run)
         session.commit()
+        if exc.status_code == 504:
+            return _err(504, "OpenAI request timed out", openai_status=exc.status_code, openai_error=exc.body[:2000])
         return _err(502, "OpenAI request failed", openai_status=exc.status_code, openai_error=exc.body[:2000])
     except Exception as exc:
         logger.exception("key/parse failed", extra={"stage": stage, "exam_id": exam_id, "request_id": request_id})

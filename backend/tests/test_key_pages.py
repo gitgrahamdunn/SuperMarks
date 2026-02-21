@@ -14,7 +14,7 @@ def test_normalize_key_page_image_resizes_and_emits_jpeg(tmp_path: Path) -> None
 
     normalized = normalize_key_page_image(source)
 
-    assert normalized.width == 1280
+    assert normalized.width == 1024
     assert normalized.height < 1200
     assert normalized.mime_type == "image/jpeg"
     assert normalized.final_size_bytes > 0

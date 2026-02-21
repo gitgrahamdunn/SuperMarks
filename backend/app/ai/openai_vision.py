@@ -7,13 +7,14 @@ import copy
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
 
-from app.pipeline.key_pages import normalize_key_page_image
+from app.pipeline.key_pages import NormalizedImage, normalize_key_page_image
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +203,13 @@ def build_key_parse_request(
 
 
 class OpenAIAnswerKeyParser:
-    def __init__(self, timeout_seconds: float = 20.0, max_images_per_request: int = 6, payload_limit_bytes: int = 2_500_000) -> None:
+    def __init__(
+        self,
+        timeout_seconds: float = 30.0,
+        max_images_per_request: int = 1,
+        payload_limit_bytes: int = 2_500_000,
+        retry_backoffs_seconds: tuple[float, ...] = (0.5, 1.5),
+    ) -> None:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set")
@@ -212,42 +219,68 @@ class OpenAIAnswerKeyParser:
         self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
         self._max_images_per_request = max_images_per_request
         self._payload_limit_bytes = payload_limit_bytes
+        self._retry_backoffs_seconds = retry_backoffs_seconds
 
-    def parse(self, image_paths: list[Path], model: str, request_id: str) -> ParseResult:
-        prompt = (
+    def _build_prompt_for_batch(self, batch_number: int, total_batches: int) -> str:
+        return (
             "You are parsing an exam answer key and must produce exam-aware structured output. "
+            "This request contains only a subset of pages. Extract ONLY questions that appear on the provided pages for this batch. "
+            f"Batch {batch_number} of {total_batches}. "
             "Identify question boundaries using patterns like Q1, Q2, Question 1, 1., 2), (a), (b). "
             "Identify marks using patterns like [3 marks], (5 marks), /5, out of 5, 5 pts. "
             "For each question extract: label, max_marks, marks_source, marks_confidence, marks_reason, question_text, answer_key, model_solution, criteria[] with desc + marks, warnings[], and evidence[] boxes using normalized coordinates 0..1 plus page_number and kind. "
-            "If marks are not explicit, make a best guess for max_marks and include uncertainty notes inside "
-            "question_text or model_solution while still conforming to the schema. "
-            "IMPORTANT: If any problem text exists but reliable question splitting is not possible, return exactly "
-            "one fallback question with label='Q1', max_marks=0, criteria=[{\"desc\":\"Needs teacher review\",\"marks\":0}]. "
+            "If marks are not explicit, make a best guess for max_marks and include uncertainty notes inside question_text or model_solution while still conforming to the schema. "
+            "IMPORTANT: If any problem text exists but reliable question splitting is not possible, return exactly one fallback question with label='Q1', max_marks=0, criteria=[{\"desc\":\"Needs teacher review\",\"marks\":0}]. "
             "Return ONLY JSON matching the provided schema."
         )
-        schema = build_answer_key_response_schema()
 
-        normalized = [normalize_key_page_image(path) for path in image_paths]
-        for path, norm in zip(image_paths, normalized, strict=True):
-            logger.info(
-                "key/parse normalized image",
-                extra={
-                    "request_id": request_id,
-                    "stage": "prepare_openai_request",
-                    "image": str(path),
-                    "original_size_bytes": norm.original_size_bytes,
-                    "final_size_bytes": norm.final_size_bytes,
-                    "width": norm.width,
-                    "height": norm.height,
-                    "model": model,
-                },
-            )
+    def _call_openai_with_retry(self, request_payload: dict[str, object], model: str, request_id: str, batch_number: int) -> dict[str, object]:
+        last_exc: OpenAIRequestError | None = None
+        attempts = len(self._retry_backoffs_seconds)
+        for attempt in range(attempts):
+            try:
+                response = self._client.responses.create(**request_payload)
+                return json.loads(response.output_text)
+            except Exception as exc:  # pragma: no cover
+                status_code = getattr(exc, "status_code", None)
+                if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+                    status_code = 504
+                response_obj = getattr(exc, "response", None)
+                body_text = ""
+                if response_obj is not None:
+                    body_text = getattr(response_obj, "text", "") or ""
+                if not body_text:
+                    body_text = str(exc)
 
+                retryable = isinstance(exc, (httpx.TimeoutException, TimeoutError)) or status_code in {429, 503, 504}
+                last_exc = OpenAIRequestError(status_code=status_code, body=body_text, message=f"OpenAI request failed: {exc}")
+
+                if retryable and attempt < attempts - 1:
+                    logger.warning(
+                        "key/parse openai retry",
+                        extra={
+                            "request_id": request_id,
+                            "stage": "openai_retry",
+                            "model": model,
+                            "batch_number": batch_number,
+                            "attempt": attempt + 1,
+                            "status_code": status_code,
+                        },
+                    )
+                    time.sleep(self._retry_backoffs_seconds[attempt])
+                    continue
+                raise last_exc from exc
+
+        if last_exc:
+            raise last_exc
+        raise OpenAIRequestError(status_code=None, body="Unknown OpenAI error", message="OpenAI request failed")
+
+    def _parse_model_batches(self, image_paths: list[Path], normalized: list[NormalizedImage], model: str, request_id: str, schema: dict[str, Any]) -> ParseResult:
         indexed_paths = list(range(len(image_paths)))
         chunks = [indexed_paths[i : i + self._max_images_per_request] for i in range(0, len(indexed_paths), self._max_images_per_request)]
 
         payloads: list[dict[str, object]] = []
-        for chunk in chunks:
+        for batch_number, chunk in enumerate(chunks, start=1):
             sub_batches: list[list[int]] = []
             current: list[int] = []
             current_bytes = 0
@@ -268,40 +301,73 @@ class OpenAIAnswerKeyParser:
                 mime_types = [normalized[idx].mime_type for idx in sub_batch]
                 request_payload = build_key_parse_request(
                     model=model,
-                    prompt=prompt,
+                    prompt=self._build_prompt_for_batch(batch_number=batch_number, total_batches=len(chunks)),
                     images=images,
                     mime_types=mime_types,
                     schema=schema,
                 )
-                try:
-                    response = self._client.responses.create(**request_payload)
-                except Exception as exc:  # pragma: no cover
-                    status_code = getattr(exc, "status_code", None)
-                    if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
-                        status_code = 504
-                    response_obj = getattr(exc, "response", None)
-                    body_text = ""
-                    if response_obj is not None:
-                        body_text = getattr(response_obj, "text", "") or ""
-                    if not body_text:
-                        body_text = str(exc)
-                    raise OpenAIRequestError(status_code=status_code, body=body_text, message=f"OpenAI request failed: {exc}") from exc
-                payloads.append(json.loads(response.output_text))
+                payloads.append(self._call_openai_with_retry(request_payload, model=model, request_id=request_id, batch_number=batch_number))
 
         if len(payloads) == 1:
             return ParseResult(payload=payloads[0], model=model)
 
         merged_questions: list[object] = []
+        seen_labels: set[str] = set()
         confidence_scores: list[float] = []
+        merged_warnings: list[str] = []
         for payload in payloads:
             questions = payload.get("questions", [])
             if isinstance(questions, list):
-                merged_questions.extend(questions)
+                for question in questions:
+                    if isinstance(question, dict):
+                        label = str(question.get("label") or "").strip()
+                        if label and label in seen_labels:
+                            continue
+                        if label:
+                            seen_labels.add(label)
+                    merged_questions.append(question)
             confidence = payload.get("confidence_score")
             if isinstance(confidence, (int, float)):
                 confidence_scores.append(float(confidence))
+            warnings = payload.get("warnings")
+            if isinstance(warnings, list):
+                merged_warnings.extend([str(item) for item in warnings])
         merged_confidence = min(confidence_scores) if confidence_scores else 0.0
-        return ParseResult(payload={"confidence_score": merged_confidence, "questions": merged_questions, "warnings": []}, model=model)
+        return ParseResult(payload={"confidence_score": merged_confidence, "questions": merged_questions, "warnings": merged_warnings}, model=model)
+
+    def parse(self, image_paths: list[Path], model: str, request_id: str) -> ParseResult:
+        schema = build_answer_key_response_schema()
+
+        normalized = [normalize_key_page_image(path) for path in image_paths]
+        for path, norm in zip(image_paths, normalized, strict=True):
+            logger.info(
+                "key/parse normalized image",
+                extra={
+                    "request_id": request_id,
+                    "stage": "prepare_openai_request",
+                    "image": str(path),
+                    "original_size_bytes": norm.original_size_bytes,
+                    "final_size_bytes": norm.final_size_bytes,
+                    "width": norm.width,
+                    "height": norm.height,
+                    "model": model,
+                },
+            )
+
+        primary_result = self._parse_model_batches(image_paths, normalized, model=model, request_id=request_id, schema=schema)
+        questions = primary_result.payload.get("questions")
+        if isinstance(questions, list) and questions:
+            return primary_result
+
+        if model.endswith("nano"):
+            fallback_model = model.replace("nano", "mini")
+            logger.info(
+                "key/parse nano batches returned empty questions -> retrying with mini",
+                extra={"request_id": request_id, "stage": "call_openai_mini_fallback", "model": fallback_model},
+            )
+            return self._parse_model_batches(image_paths, normalized, model=fallback_model, request_id=request_id, schema=schema)
+
+        return primary_result
 
 
 class MockAnswerKeyParser:
