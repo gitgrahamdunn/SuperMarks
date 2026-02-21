@@ -180,3 +180,71 @@ def test_parse_answer_key_escalates_nano_to_mini_when_mock_nano_is_low_confidenc
             "nano questions=0 or low confidence -> escalating to mini" in record.getMessage()
             for record in caplog.records
         )
+
+
+def test_patch_question_updates_fields_and_list_reflects_changes(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Patch Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        create = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={"label": "Q1", "max_marks": 2, "rubric_json": {"criteria": []}},
+        )
+        assert create.status_code == 201
+        question_id = create.json()["id"]
+
+        patch_marks = client.patch(f"/api/exams/{exam_id}/questions/{question_id}", json={"max_marks": 5})
+        assert patch_marks.status_code == 200
+        assert patch_marks.json()["max_marks"] == 5
+
+        patch_rubric = client.patch(
+            f"/api/exams/{exam_id}/questions/{question_id}",
+            json={"rubric_json": {"criteria": [{"desc": "method", "marks": 5}], "marks_source": "explicit"}},
+        )
+        assert patch_rubric.status_code == 200
+        assert patch_rubric.json()["rubric_json"]["marks_source"] == "explicit"
+
+        listing = client.get(f"/api/exams/{exam_id}/questions")
+        assert listing.status_code == 200
+        assert listing.json()[0]["max_marks"] == 5
+        assert listing.json()[0]["rubric_json"]["criteria"][0]["marks"] == 5
+
+
+def test_get_key_page_and_key_visual_returns_image(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Visual Exam"})
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        parse = client.post(f"/api/exams/{exam_id}/key/parse")
+        assert parse.status_code == 200
+
+        page = client.get(f"/api/exams/{exam_id}/key/page/1")
+        assert page.status_code == 200
+        assert page.headers["content-type"].startswith("image/")
+
+        questions = client.get(f"/api/exams/{exam_id}/questions")
+        question_id = questions.json()[0]["id"]
+        visual = client.get(f"/api/exams/{exam_id}/questions/{question_id}/key-visual")
+        assert visual.status_code == 200
+        assert visual.headers["content-type"].startswith("image/")

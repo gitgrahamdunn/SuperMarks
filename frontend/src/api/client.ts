@@ -336,6 +336,7 @@ export const api = {
   getResults: (submissionId: number) => request<SubmissionResults>(`submissions/${submissionId}/results`),
   getPageImageUrl: (submissionId: number, pageNumber: number) => buildApiUrl(`submissions/${submissionId}/page/${pageNumber}`),
   getCropImageUrl: (submissionId: number, questionId: number) => buildApiUrl(`submissions/${submissionId}/crop/${questionId}`),
+  getQuestionKeyVisualUrl: (examId: number, questionId: number) => buildApiUrl(`exams/${examId}/questions/${questionId}/key-visual`),
   saveRegions: (questionId: number, regions: Region[]) => request<Region[]>(`questions/${questionId}/regions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
