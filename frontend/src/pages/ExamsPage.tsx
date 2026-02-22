@@ -392,34 +392,16 @@ export function ExamsPage() {
 
       setStep('creating');
       markChecklist('creating_exam', 'active');
-      const createEndpoint = '/api/exams';
+      const createEndpoint = buildApiUrl('exams');
       const createName = modalName.trim() || `Untitled ${Date.now()}`;
-      const createResponse = await fetch(createEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(API_KEY ? { 'X-API-Key': API_KEY } : {}),
-        },
-        body: JSON.stringify({ name: createName }),
-      });
-      const createText = await createResponse.text();
-      if (!createResponse.ok) {
-        throw new ApiError(
-          createResponse.status,
-          createEndpoint,
-          'POST',
-          createText.slice(0, 300),
-          `Request failed (${createResponse.status}) [${createResponse.status}] ${createEndpoint}`,
-        );
-      }
-      const exam = JSON.parse(createText) as ExamRead;
+      const exam = await api.createExam(createName);
       examId = exam.id;
       setCreatedExamId(exam.id);
       logStep({
         step: 'creating',
         endpointUrl: createEndpoint,
         status: 200,
-        responseSnippet: createText.slice(0, 500),
+        responseSnippet: JSON.stringify(exam).slice(0, 500),
       });
       markChecklist('creating_exam', 'done');
       setParseProgress(14);
