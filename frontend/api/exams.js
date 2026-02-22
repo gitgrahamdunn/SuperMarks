@@ -34,12 +34,14 @@ async function proxy(req, res, targetUrl) {
       if (key.toLowerCase() === 'transfer-encoding') return;
       res.setHeader(key, value);
     });
+    res.setHeader('x-supermarks-proxy', 'frontend-function');
 
     const buf = Buffer.from(await resp.arrayBuffer());
     res.end(buf);
   } catch (err) {
     res.statusCode = 502;
     res.setHeader('content-type', 'application/json');
+    res.setHeader('x-supermarks-proxy', 'frontend-function');
     res.end(
       JSON.stringify({
         detail: 'Frontend proxy failed',
