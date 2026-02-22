@@ -103,26 +103,32 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method || 'GET').toUpperCase();
   options.headers = withAuthHeaders(options.headers);
   const response = await fetch(url, options);
+  const responseText = await response.text();
+  let parsedJson: unknown = null;
+
+  try {
+    parsedJson = responseText ? JSON.parse(responseText) : null;
+  } catch {
+    parsedJson = null;
+  }
+
   if (!response.ok) {
-    const responseText = await response.text();
     const responseBodySnippet = responseText.slice(0, 300);
     let message = response.status === 401 ? 'Unauthorized (check API key config)' : `Request failed (${response.status})`;
-    try {
-      const body = JSON.parse(responseText) as { detail?: string };
-      if (body?.detail) {
-        message = body.detail;
+    if (parsedJson && typeof parsedJson === 'object' && 'detail' in parsedJson) {
+      const detail = (parsedJson as { detail?: unknown }).detail;
+      if (typeof detail === 'string' && detail.trim()) {
+        message = detail;
       }
-    } catch {
-      // ignore parse error
     }
     throw new ApiError(response.status, url, method, responseBodySnippet, `${message} [${response.status}] ${url}`);
   }
 
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    return (await response.json()) as T;
+  if (parsedJson === null) {
+    throw new Error(`Expected JSON response from ${method} ${url}, but received empty or invalid JSON.`);
   }
-  return {} as T;
+
+  return parsedJson as T;
 }
 
 
@@ -300,7 +306,7 @@ export function resetApiContractCheckCache(): void {
 }
 
 export const api = {
-  getExams: () => request<ExamRead[]>('exams'),
+  getExams: () => request<unknown>('exams'),
   createExam: (name: string) => createExamRequest(name),
   getExamDetail: (examId: number) => request<ExamDetail>(`exams/${examId}`),
   addQuestion: (examId: number, label: string, max_marks: number) => request<QuestionRead>(`exams/${examId}/questions`, {
