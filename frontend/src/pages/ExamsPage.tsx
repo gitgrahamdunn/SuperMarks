@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, ApiError, api, buildApiUrl } from '../api/client';
+import { API_BASE_URL, ApiError, api, buildApiUrl, IS_PROD_ABSOLUTE_API_BASE_CONFIGURED } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
 import type { ExamCostResponse, ExamRead } from '../types/api';
@@ -20,6 +20,11 @@ type WizardError = {
   details: unknown;
 };
 
+type PingResult = {
+  status: number | 'network-error';
+  bodySnippet: string;
+  message?: string;
+};
 
 type ParseErrorDetails = {
   stage?: string;
@@ -151,6 +156,35 @@ export function ExamsPage() {
   const hasSingleLargeFile = useMemo(() => modalFiles.some((file) => file.size > LARGE_FILE_BYTES), [modalFiles]);
   const totalTooLarge = totalFileBytes > LARGE_TOTAL_BYTES;
 
+  const [pingResult, setPingResult] = useState<PingResult | null>(null);
+  const [pinging, setPinging] = useState(false);
+
+  const endpointMap = {
+    create: buildApiUrl('exams'),
+    upload: createdExamId ? buildApiUrl(`exams/${createdExamId}/key/upload`) : buildApiUrl('exams/{exam_id}/key/upload'),
+    parse: createdExamId ? buildApiUrl(`exams/${createdExamId}/key/parse`) : buildApiUrl('exams/{exam_id}/key/parse'),
+  };
+
+  const pingApi = async () => {
+    setPinging(true);
+    try {
+      const response = await fetch('/api/health');
+      const responseText = await response.text();
+      setPingResult({
+        status: response.status,
+        bodySnippet: responseText.slice(0, 200),
+      });
+    } catch (error) {
+      setPingResult({
+        status: 'network-error',
+        bodySnippet: '',
+        message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
+    } finally {
+      setPinging(false);
+    }
+  };
+
   const loadExams = async () => {
     try {
       setLoading(true);
@@ -175,6 +209,11 @@ export function ExamsPage() {
   useEffect(() => {
     void loadExams();
   }, []);
+
+  useEffect(() => {
+    if (!isModalOpen) return;
+    void pingApi();
+  }, [isModalOpen]);
 
   const closeModal = () => {
     if (isRunning) {
@@ -359,15 +398,24 @@ export function ExamsPage() {
           ? buildApiUrl('exams')
           : stepName === 'uploading' && examId
             ? buildApiUrl(`exams/${examId}/key/upload`)
-            : stepName === 'parsing' && examId
-              ? buildApiUrl(`exams/${examId}/key/parse`)
-              : buildApiUrl('unknown');
+            : stepName === 'building_pages' && examId
+              ? buildApiUrl(`exams/${examId}/key/build-pages`)
+              : stepName === 'parsing' && examId
+                ? buildApiUrl(`exams/${examId}/key/parse`)
+                : buildApiUrl('unknown');
 
       if (isNetworkFetchError(err)) {
+        const note = 'No backend logs implies request never sent (bad URL or browser abort)';
         const networkMessage = `Network request failed (browser blocked/aborted). Step: ${stepName}. URL: ${stepEndpoint}`;
         setWizardError({
           summary: `Step: ${stepName} | Status: network-error`,
-          details: err instanceof Error ? err.stack || err.message : String(err),
+          details: {
+            step: stepName,
+            attemptedUrl: stepEndpoint,
+            errorName: err instanceof Error ? err.name : 'UnknownError',
+            errorMessage: err instanceof Error ? err.message : String(err),
+            note,
+          },
         });
         logStep({
           step: stepName,
@@ -397,7 +445,15 @@ export function ExamsPage() {
         }
         setWizardError({
           summary: `Step: ${stepName} | Status: ${err.status}`,
-          details,
+          details: {
+            step: stepName,
+            attemptedUrl: err.url,
+            errorName: err.name,
+            errorMessage: err.message,
+            responseStatus: err.status,
+            responseBodySnippet: details,
+            note: 'No backend logs implies request never sent (bad URL or browser abort)',
+          },
         });
         logStep({
           step: stepName,
@@ -411,7 +467,14 @@ export function ExamsPage() {
         const details = err instanceof Error ? err.stack || err.message : 'Unknown error';
         setWizardError({
           summary: `Step: ${stepName} | Status: unknown`,
-          details,
+          details: {
+            step: stepName,
+            attemptedUrl: stepEndpoint,
+            errorName: err instanceof Error ? err.name : 'UnknownError',
+            errorMessage: err instanceof Error ? err.message : String(err),
+            stackOrDetails: details,
+            note: 'No backend logs implies request never sent (bad URL or browser abort)',
+          },
         });
         logStep({
           step: stepName,
@@ -441,6 +504,9 @@ export function ExamsPage() {
           <div className="card modal stack">
             <h2>Enter Exam Key</h2>
             <p className="subtle-text wizard-step-banner">Current step: {isRunning ? step : 'ready'}</p>
+            {IS_PROD_ABSOLUTE_API_BASE_CONFIGURED && (
+              <p className="warning-text">Warning: production API base should be relative (/api), not an absolute URL.</p>
+            )}
             <form onSubmit={onCreateAndUpload} className="stack" encType="multipart/form-data">
               <label className="stack">
                 Exam name
@@ -531,10 +597,25 @@ export function ExamsPage() {
               {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
 
               <details>
-                <summary>Show details</summary>
+                <summary>Network diagnostics</summary>
                 <div className="subtle-text stack">
-                  <p>API base URL: {API_BASE_URL}</p>
-                  <p>Computed create endpoint: {buildApiUrl('exams')}</p>
+                  <p><strong>window.location.origin:</strong> {window.location.origin}</p>
+                  <p><strong>Computed API_BASE:</strong> {API_BASE_URL}</p>
+                  <p><strong>Create endpoint:</strong> {endpointMap.create}</p>
+                  <p><strong>Upload endpoint:</strong> {endpointMap.upload}</p>
+                  <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
+                  <div className="actions-row">
+                    <button type="button" onClick={() => void pingApi()} disabled={pinging || isRunning}>
+                      {pinging ? 'Pinging…' : 'Ping API'}
+                    </button>
+                  </div>
+                  {pingResult && (
+                    <div className="wizard-detail-block">
+                      <p><strong>Ping status:</strong> {pingResult.status}</p>
+                      <p><strong>Ping response:</strong> {(pingResult.bodySnippet || '<empty>').slice(0, 200)}</p>
+                      {pingResult.message && <p><strong>Ping error:</strong> {pingResult.message}</p>}
+                    </div>
+                  )}
                   {stepLogs.length === 0 && <p>No step details yet.</p>}
                   {stepLogs.map((entry, index) => (
                     <div key={`${entry.step}-${index}`} className="wizard-detail-block">
