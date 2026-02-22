@@ -2,14 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
-      "source": "/api/openapi.json",
-      "destination": "https://super-marks-2-backend.vercel.app/openapi.json"
-    },
-    {
-      "source": "/api/(.*)",
-      "destination": "https://super-marks-2-backend.vercel.app/api/$1"
-    },
-    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
