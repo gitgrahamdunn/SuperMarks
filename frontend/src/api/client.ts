@@ -14,8 +14,9 @@ import type {
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 const API_BASE_URL = import.meta.env.PROD ? '/api' : (configuredApiBaseUrl || '/api');
+const BASE = (API_BASE_URL || '/api').replace(/\/+$/, '');
 const IS_PROD_ABSOLUTE_API_BASE_CONFIGURED = import.meta.env.PROD && /^https?:\/\//i.test(configuredApiBaseUrl);
-const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
+const API_KEY = import.meta.env.VITE_BACKEND_API_KEY;
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -58,11 +59,10 @@ type ApiContractCheckResult =
 let openApiPathCache: Set<string> | null = null;
 let openApiFetchErrorMessage: string | null = null;
 
-function withApiKeyHeader(options: RequestInit = {}): RequestInit {
-  if (!BACKEND_API_KEY) return options;
-  const headers = new Headers(options.headers || {});
-  headers.set('X-API-Key', BACKEND_API_KEY);
-  return { ...options, headers };
+function withAuthHeaders(headers?: HeadersInit): HeadersInit {
+  const h = new Headers(headers || {});
+  if (API_KEY) h.set('X-API-Key', API_KEY);
+  return h;
 }
 
 function getOpenApiSchemaUrl(): string {
@@ -89,18 +89,20 @@ function joinUrl(base: string, path: string): string {
 }
 
 function buildApiUrl(path: string): string {
-  return joinUrl(API_BASE_URL, path);
+  return `${BASE}${joinUrl('', path)}`;
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const normalizedPath = path.replace(/^\/+/, '');
+  const normalizedPath = path.trim().replace(/^\/+/, '');
   if (!normalizedPath) {
     throw new Error(`Invalid API path: "${path}"`);
   }
 
-  const url = buildApiUrl(normalizedPath);
+  const requestPath = `/${normalizedPath}`;
+  const url = `${BASE}${requestPath}`;
   const method = (options.method || 'GET').toUpperCase();
-  const response = await fetch(url, withApiKeyHeader(options));
+  options.headers = withAuthHeaders(options.headers);
+  const response = await fetch(url, options);
   if (!response.ok) {
     const responseText = await response.text();
     const responseBodySnippet = responseText.slice(0, 300);
@@ -122,6 +124,29 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   return {} as T;
 }
+
+
+async function createExamRequest(name: string): Promise<ExamRead> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 20_000);
+
+  try {
+    return await request<ExamRead>('exams', {
+      method: 'POST',
+      headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ name }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('Create exam request timed out after 20 seconds. Please retry.');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 
 function buildErrorDetailsFromResponse(url: string, method: string, status: number, responseText: string): ApiError {
   const responseBodySnippet = responseText.slice(0, 300);
@@ -178,7 +203,7 @@ async function getOpenApiPaths(): Promise<Set<string>> {
   console.log(`[SuperMarks] Fetching backend OpenAPI schema from ${openApiUrl}`);
 
   try {
-    const response = await fetch(openApiUrl, withApiKeyHeader());
+    const response = await fetch(openApiUrl, { headers: withAuthHeaders() });
     const responseText = await response.text();
     const responseSnippet = stripSnippet(responseText);
     setOpenApiFetchDiagnostics({
@@ -276,11 +301,7 @@ export function resetApiContractCheckCache(): void {
 
 export const api = {
   getExams: () => request<ExamRead[]>('exams'),
-  createExam: (name: string) => request<ExamRead>('exams', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  }),
+  createExam: (name: string) => createExamRequest(name),
   getExamDetail: (examId: number) => request<ExamDetail>(`exams/${examId}`),
   addQuestion: (examId: number, label: string, max_marks: number) => request<QuestionRead>(`exams/${examId}/questions`, {
     method: 'POST',
@@ -327,7 +348,7 @@ export const api = {
     const path = `exams/${examId}/key/parse`;
     const url = buildApiUrl(path);
     const method = 'POST';
-    const response = await fetch(url, withApiKeyHeader({ method }));
+    const response = await fetch(url, { method, headers: withAuthHeaders() });
     const responseText = await response.text();
 
     if (!response.ok) {
@@ -402,4 +423,4 @@ export const api = {
   }),
 };
 
-export { API_BASE_URL, ApiError, buildApiUrl, checkBackendApiContract, getOpenApiPaths, IS_PROD_ABSOLUTE_API_BASE_CONFIGURED, joinUrl };
+export { API_BASE_URL, API_KEY, ApiError, buildApiUrl, checkBackendApiContract, getOpenApiPaths, IS_PROD_ABSOLUTE_API_BASE_CONFIGURED, joinUrl };
