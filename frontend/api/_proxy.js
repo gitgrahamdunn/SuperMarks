@@ -1,60 +1,61 @@
-const HOP_BY_HOP_HEADERS = new Set([
-  'host',
-  'connection',
-  'content-length',
-  'keep-alive',
-  'proxy-authenticate',
-  'proxy-authorization',
-  'te',
-  'trailer',
-  'transfer-encoding',
-  'upgrade',
-]);
+const { request } = require('undici');
 
-async function readBodyBuffer(req) {
+function sanitizeHeaders(h) {
+  const out = {};
+  for (const [k, v] of Object.entries(h || {})) {
+    const key = k.toLowerCase();
+    if (key === 'host' || key === 'connection' || key === 'content-length') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+async function readRawBody(req) {
   const chunks = [];
-  for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-
-  return chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return chunks.length ? Buffer.concat(chunks) : null;
 }
 
-function filterHeaders(headers) {
-  const filtered = {};
-  for (const [key, value] of Object.entries(headers)) {
-    if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
-      filtered[key] = value;
-    }
-  }
-  return filtered;
-}
-
-async function proxy(req, res, targetUrl) {
+module.exports = async function proxy(req, res, targetUrl) {
   try {
-    const headers = filterHeaders(req.headers);
-    const method = (req.method || 'GET').toUpperCase();
-    const body = await readBodyBuffer(req);
+    const method = req.method || 'GET';
+    const headers = sanitizeHeaders(req.headers);
 
-    const upstreamResponse = await fetch(targetUrl, {
+    const body = method === 'GET' || method === 'HEAD' ? null : await readRawBody(req);
+
+    console.log('[proxy]', method, req.url, '->', targetUrl);
+
+    const r = await request(targetUrl, {
       method,
       headers,
-      body: ['GET', 'HEAD'].includes(method) ? undefined : body,
+      body: body || undefined,
+      headersTimeout: 30000,
+      bodyTimeout: 30000,
+      maxRedirections: 0,
     });
 
-    res.status(upstreamResponse.status);
-    upstreamResponse.headers.forEach((value, key) => {
-      if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
-        res.setHeader(key, value);
-      }
-    });
+    res.statusCode = r.statusCode;
 
-    const responseBody = Buffer.from(await upstreamResponse.arrayBuffer());
-    res.send(responseBody);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown proxy error';
-    res.status(502).json({ error: 'Upstream request failed', message });
+    for (const [k, v] of Object.entries(r.headers)) {
+      if (v == null) continue;
+      const key = k.toLowerCase();
+      if (key === 'transfer-encoding') continue;
+      res.setHeader(k, v);
+    }
+
+    const buf = Buffer.from(await r.body.arrayBuffer());
+    res.end(buf);
+  } catch (err) {
+    console.error('[proxy-error]', err && (err.stack || err));
+    res.statusCode = 502;
+    res.setHeader('content-type', 'application/json');
+    res.end(
+      JSON.stringify({
+        detail: 'Frontend proxy failed',
+        message: String(err && err.message ? err.message : err),
+        name: String(err && err.name ? err.name : 'Error'),
+        target: targetUrl,
+      }),
+    );
   }
-}
-
-module.exports = { proxy };
+};

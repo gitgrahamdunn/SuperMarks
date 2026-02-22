@@ -204,11 +204,11 @@ export function ExamsPage() {
   const pingApi = async () => {
     setPinging(true);
     try {
-      const response = await fetch('/api/health');
-      const responseText = await response.text();
+      const response = await fetch('/api/proxy-health');
+      const responseJson = await response.json();
       setPingResult({
         status: response.status,
-        body: responseText,
+        body: JSON.stringify(responseJson),
       });
     } catch (error) {
       setPingResult({
@@ -705,7 +705,7 @@ export function ExamsPage() {
                   <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
                   <div className="actions-row">
                     <button type="button" onClick={() => void pingApi()} disabled={pinging || isRunning}>
-                      {pinging ? 'Testing…' : 'Ping /api/health'}
+                      {pinging ? 'Testing…' : 'Ping proxy'}
                     </button>
                     <button type="button" onClick={() => void testPostExam()} disabled={postTesting || isRunning}>
                       {postTesting ? 'Testing…' : 'Ping POST /api/exams'}
