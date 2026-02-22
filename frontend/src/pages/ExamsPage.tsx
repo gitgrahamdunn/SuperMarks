@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, ApiError, api, buildApiUrl, IS_PROD_ABSOLUTE_API_BASE_CONFIGURED } from '../api/client';
+import { API_BASE_URL, API_KEY, ApiError, api, buildApiUrl, IS_PROD_ABSOLUTE_API_BASE_CONFIGURED } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
 import type { ExamCostResponse, ExamRead } from '../types/api';
@@ -168,8 +168,6 @@ export function ExamsPage() {
   const [postTestResult, setPostTestResult] = useState<PostExamTestResult | null>(null);
   const [postTesting, setPostTesting] = useState(false);
 
-  const apiKey = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
-
   const endpointMap = {
     create: buildApiUrl('exams'),
     upload: createdExamId ? buildApiUrl(`exams/${createdExamId}/key/upload`) : buildApiUrl('exams/{exam_id}/key/upload'),
@@ -203,7 +201,7 @@ export function ExamsPage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+          ...(API_KEY ? { 'X-API-Key': API_KEY } : {}),
         },
         body: JSON.stringify({ name: `Ping ${Date.now()}` }),
       });
@@ -345,7 +343,7 @@ export function ExamsPage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+          ...(API_KEY ? { 'X-API-Key': API_KEY } : {}),
         },
         body: JSON.stringify({ name: createName }),
       });
@@ -663,6 +661,7 @@ export function ExamsPage() {
                 <div className="subtle-text stack">
                   <p><strong>window.location.origin:</strong> {window.location.origin}</p>
                   <p><strong>Computed API_BASE:</strong> {API_BASE_URL}</p>
+                  <p><strong>API key present:</strong> {Boolean(API_KEY) ? 'true' : 'false'}</p>
                   <p><strong>Create endpoint:</strong> {endpointMap.create}</p>
                   <p><strong>Upload endpoint:</strong> {endpointMap.upload}</p>
                   <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
