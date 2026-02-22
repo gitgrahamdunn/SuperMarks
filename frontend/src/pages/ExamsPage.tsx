@@ -266,9 +266,17 @@ export function ExamsPage() {
     try {
       const response = await fetch('/api/proxy-health');
       const responseText = await response.text();
+      let formattedBody = responseText;
+
+      try {
+        formattedBody = JSON.stringify(JSON.parse(responseText), null, 2);
+      } catch {
+        // Keep raw text when response is not valid JSON.
+      }
+
       setProxyPingResult({
         status: response.status,
-        bodySnippet: responseText.slice(0, 500),
+        bodySnippet: formattedBody.slice(0, 500),
       });
     } catch (error) {
       setProxyPingResult({
