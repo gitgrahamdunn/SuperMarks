@@ -33,6 +33,7 @@ from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data, save_upload_file, upload_dir
 
 router = APIRouter(prefix="/exams", tags=["exams"])
+public_router = APIRouter(prefix="/exams", tags=["exams-public"])
 logger = logging.getLogger(__name__)
 
 _ALLOWED_TYPES = {
@@ -517,12 +518,11 @@ def update_question(
     )
 
 
-@router.get("/{exam_id}/key/page/{page_number}")
-def get_key_page_image(
+def _resolve_key_page_or_404(
     exam_id: int,
     page_number: int,
     session: Session = Depends(get_session),
-) -> FileResponse:
+) -> tuple[Path, str]:
     exam = session.get(Exam, exam_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
@@ -541,10 +541,20 @@ def get_key_page_image(
     suffix = image_path.suffix.lower()
     if suffix in {".jpg", ".jpeg"}:
         media_type = "image/jpeg"
+    return image_path, media_type
+
+
+@public_router.get("/{exam_id}/key/page/{page_number}")
+def get_key_page_image(
+    exam_id: int,
+    page_number: int,
+    session: Session = Depends(get_session),
+) -> FileResponse:
+    image_path, media_type = _resolve_key_page_or_404(exam_id=exam_id, page_number=page_number, session=session)
     return FileResponse(path=image_path, media_type=media_type)
 
 
-@router.get("/{exam_id}/questions/{question_id}/key-visual")
+@public_router.get("/{exam_id}/questions/{question_id}/key-visual")
 def get_question_key_visual(
     exam_id: int,
     question_id: int,
@@ -569,8 +579,7 @@ def get_question_key_visual(
         raise HTTPException(status_code=404, detail="Key page image missing")
 
     media_type = "image/png"
-    suffix = image_path.suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
+    if image_path.suffix.lower() in {".jpg", ".jpeg"}:
         media_type = "image/jpeg"
     return FileResponse(path=image_path, media_type=media_type)
 
