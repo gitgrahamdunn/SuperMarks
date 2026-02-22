@@ -52,8 +52,9 @@ export function ExamReviewPage() {
         ]);
 
         const patchAvailable = paths.has('/questions/{question_id}')
-          || paths.has('/exams/{exam_id}/questions/{question_id}')
-          || paths.has('/exams/{exam_id}/wizard/questions/{question_id}');
+          || paths.has('/api/questions/{question_id}')
+          || paths.has('/api/exams/{exam_id}/questions/{question_id}')
+          || paths.has('/api/exams/{exam_id}/wizard/questions/{question_id}');
         setSaveAvailable(patchAvailable);
 
         const mapped = fetchedQuestions.map(mapQuestion);
@@ -143,11 +144,13 @@ export function ExamReviewPage() {
   };
 
   const saveQuestion = async (question: EditableQuestion) => {
-    await api.updateQuestion(examId, question.id, {
+    const updated = await api.updateQuestion(examId, question.id, {
       label: question.label,
       max_marks: question.max_marks,
       rubric_json: buildRubric(question),
     });
+    const mapped = mapQuestion(updated);
+    setQuestions((prev) => prev.map((item) => (item.id === mapped.id ? mapped : item)));
   };
 
   const onSave = async () => {
@@ -185,11 +188,13 @@ export function ExamReviewPage() {
         marks_source: suggestion.source,
         marks_confidence: suggestion.confidence,
       };
-      await api.updateQuestion(examId, currentQuestion.id, {
+      const updated = await api.updateQuestion(examId, currentQuestion.id, {
         max_marks: currentQuestion.max_marks,
         rubric_json: rubricWithMeta,
         label: currentQuestion.label,
       });
+      const mapped = mapQuestion(updated);
+      setQuestions((prev) => prev.map((item) => (item.id === mapped.id ? mapped : item)));
       showSuccess('Saved');
       setCurrentIndex((idx) => Math.min(questions.length - 1, idx + 1));
     } catch (error) {
@@ -233,9 +238,15 @@ export function ExamReviewPage() {
             imageUrl={api.getQuestionKeyVisualUrl(examId, currentQuestion.id)}
             evidence={currentQuestion.evidence || []}
             visible
+            onImageError={() => setPreviewError(true)}
           />
         ) : (
-          <p className="subtle-text">No preview available.</p>
+          <div className="stack" style={{ gap: 8 }}>
+            <p className="subtle-text">Image failed to load.</p>
+            <button type="button" onClick={() => window.open(`/api/exams/${examId}/key/page/1`, '_blank', 'noopener,noreferrer')}>
+              Open key page
+            </button>
+          </div>
         )}
       </div>
 

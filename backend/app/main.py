@@ -13,6 +13,7 @@ from sqlmodel import Session
 from app.auth import require_api_key
 from app import db
 from app.db import create_db_and_tables
+from app.routers.exams import public_router as public_exams_router
 from app.routers.exams import router as exams_router
 from app.routers.questions import router as questions_router
 from app.routers.submissions import router as submissions_router
@@ -37,6 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(public_exams_router, prefix="/api")
 app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(questions_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(submissions_router, prefix="/api", dependencies=[Depends(require_api_key)])

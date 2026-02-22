@@ -134,6 +134,67 @@ def test_upload_exam_key_files_stores_file_and_db_row(tmp_path) -> None:
         assert rows[0].stored_path == str(stored)
 
 
+def test_patch_question_updates_fields_and_list_reflects_changes(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Patch Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        question = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={"label": "Q1", "max_marks": 4, "rubric_json": {"key_page_number": 1, "criteria": []}},
+        )
+        assert question.status_code == 201
+        question_id = question.json()["id"]
+
+        patch = client.patch(
+            f"/api/exams/{exam_id}/questions/{question_id}",
+            json={"max_marks": 6, "rubric_json": {"key_page_number": 2, "criteria": [{"desc": "correct", "marks": 6}]}},
+        )
+        assert patch.status_code == 200
+        assert patch.json()["max_marks"] == 6
+        assert patch.json()["rubric_json"]["key_page_number"] == 2
+
+        listed = client.get(f"/api/exams/{exam_id}/questions")
+        assert listed.status_code == 200
+        assert listed.json()[0]["max_marks"] == 6
+        assert listed.json()[0]["rubric_json"]["key_page_number"] == 2
+
+
+def test_key_page_image_endpoint_returns_image_content_type_without_auth(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("BACKEND_API_KEY", "test-api-key")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Image Endpoint Exam"}, headers={"X-API-Key": "test-api-key"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+            headers={"X-API-Key": "test-api-key"},
+        )
+        assert upload.status_code == 200
+
+        build = client.post(f"/api/exams/{exam_id}/key/build-pages", headers={"X-API-Key": "test-api-key"})
+        assert build.status_code == 200
+
+        image_response = client.get(f"/api/exams/{exam_id}/key/page/1")
+        assert image_response.status_code == 200
+        assert image_response.headers["content-type"].startswith("image/")
+
+
 def test_parse_answer_key_without_uploaded_files_returns_actionable_400(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
