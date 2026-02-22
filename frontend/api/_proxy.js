@@ -1,3 +1,16 @@
+const HOP_BY_HOP_HEADERS = new Set([
+  'host',
+  'connection',
+  'content-length',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+]);
+
 async function readBodyBuffer(req) {
   const chunks = [];
   for await (const chunk of req) {
@@ -7,29 +20,41 @@ async function readBodyBuffer(req) {
   return chunks.length > 0 ? Buffer.concat(chunks) : undefined;
 }
 
-async function proxy(req, res, targetUrl) {
-  const headers = { ...req.headers };
-  delete headers.host;
-  delete headers.connection;
-  delete headers['content-length'];
-
-  const body = await readBodyBuffer(req);
-  const upstreamResponse = await fetch(targetUrl, {
-    method: req.method,
-    headers,
-    body: ['GET', 'HEAD'].includes(req.method || '') ? undefined : body,
-  });
-
-  res.status(upstreamResponse.status);
-  upstreamResponse.headers.forEach((value, key) => {
-    if (key.toLowerCase() === 'transfer-encoding') {
-      return;
+function filterHeaders(headers) {
+  const filtered = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+      filtered[key] = value;
     }
-    res.setHeader(key, value);
-  });
+  }
+  return filtered;
+}
 
-  const responseBody = Buffer.from(await upstreamResponse.arrayBuffer());
-  res.send(responseBody);
+async function proxy(req, res, targetUrl) {
+  try {
+    const headers = filterHeaders(req.headers);
+    const method = (req.method || 'GET').toUpperCase();
+    const body = await readBodyBuffer(req);
+
+    const upstreamResponse = await fetch(targetUrl, {
+      method,
+      headers,
+      body: ['GET', 'HEAD'].includes(method) ? undefined : body,
+    });
+
+    res.status(upstreamResponse.status);
+    upstreamResponse.headers.forEach((value, key) => {
+      if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
+        res.setHeader(key, value);
+      }
+    });
+
+    const responseBody = Buffer.from(await upstreamResponse.arrayBuffer());
+    res.send(responseBody);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown proxy error';
+    res.status(502).json({ error: 'Upstream request failed', message });
+  }
 }
 
 module.exports = { proxy };
