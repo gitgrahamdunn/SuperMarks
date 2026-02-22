@@ -28,7 +28,7 @@ from app.ai.openai_vision import (
 )
 from app.db import get_session
 from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamKeyParseRun, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionStatus, utcnow
-from app.schemas import ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, SubmissionFileRead, SubmissionRead
+from app.schemas import ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionMergeResponse, QuestionRead, QuestionSplitRequest, QuestionSplitResponse, QuestionUpdate, RegionRead, SubmissionFileRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data, save_upload_file, upload_dir
 
@@ -516,6 +516,122 @@ def update_question(
         rubric_json=rubric,
         regions=[RegionRead(id=r.id, page_number=r.page_number, x=r.x, y=r.y, w=r.w, h=r.h) for r in regions],
     )
+
+
+def _to_question_read(question: Question, session: Session) -> QuestionRead:
+    rubric = json.loads(question.rubric_json)
+    regions = session.exec(select(QuestionRegion).where(QuestionRegion.question_id == question.id)).all()
+    return QuestionRead(
+        id=question.id,
+        exam_id=question.exam_id,
+        label=question.label,
+        max_marks=question.max_marks,
+        rubric_json=rubric,
+        regions=[RegionRead(id=r.id, page_number=r.page_number, x=r.x, y=r.y, w=r.w, h=r.h) for r in regions],
+    )
+
+
+@router.post("/{exam_id}/questions/{question_id}/merge-next", response_model=QuestionMergeResponse)
+def merge_question_with_next(exam_id: int, question_id: int, session: Session = Depends(get_session)) -> QuestionMergeResponse:
+    questions = session.exec(select(Question).where(Question.exam_id == exam_id).order_by(Question.id)).all()
+    idx = next((i for i, q in enumerate(questions) if q.id == question_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    if idx >= len(questions) - 1:
+        raise HTTPException(status_code=400, detail="Cannot merge the last question")
+
+    current = questions[idx]
+    nxt = questions[idx + 1]
+    current_rubric = json.loads(current.rubric_json)
+    next_rubric = json.loads(nxt.rubric_json)
+
+    current_criteria = current_rubric.get("criteria") if isinstance(current_rubric.get("criteria"), list) else []
+    next_criteria = next_rubric.get("criteria") if isinstance(next_rubric.get("criteria"), list) else []
+
+    def _join_text(left: object, right: object, sep: str = "\n") -> str:
+        a = str(left or "").strip()
+        b = str(right or "").strip()
+        if a and b:
+            return f"{a}{sep}{b}"
+        return a or b
+
+    merged_warnings = current_rubric.get("warnings") if isinstance(current_rubric.get("warnings"), list) else []
+    merged_warnings = [*merged_warnings, {"merged_by_teacher": True}]
+
+    current.max_marks = max(0, int(current.max_marks or 0) + int(nxt.max_marks or 0))
+    current.rubric_json = json.dumps({
+        **current_rubric,
+        "criteria": [*current_criteria, *next_criteria],
+        "question_text": _join_text(current_rubric.get("question_text"), next_rubric.get("question_text")),
+        "answer_key": _join_text(current_rubric.get("answer_key"), next_rubric.get("answer_key"), "\n\n---\n\n"),
+        "model_solution": _join_text(current_rubric.get("model_solution"), next_rubric.get("model_solution"), "\n\n---\n\n"),
+        "warnings": merged_warnings,
+        "merged_from": [current.id, nxt.id],
+    })
+
+    session.delete(nxt)
+    session.add(current)
+    session.commit()
+    session.refresh(current)
+
+    count = len(session.exec(select(Question.id).where(Question.exam_id == exam_id)).all())
+    return QuestionMergeResponse(question=_to_question_read(current, session), questions_count=count)
+
+
+@router.post("/{exam_id}/questions/{question_id}/split", response_model=QuestionSplitResponse)
+def split_question(exam_id: int, question_id: int, payload: QuestionSplitRequest, session: Session = Depends(get_session)) -> QuestionSplitResponse:
+    if payload.mode != "criteria_index":
+        raise HTTPException(status_code=400, detail="Unsupported split mode")
+
+    question = _get_exam_question_or_404(exam_id, question_id, session)
+    rubric = json.loads(question.rubric_json)
+    criteria = rubric.get("criteria") if isinstance(rubric.get("criteria"), list) else []
+
+    if payload.criteria_split_index <= 0 or payload.criteria_split_index >= len(criteria):
+        raise HTTPException(status_code=400, detail="criteria_split_index must be between 1 and len(criteria)-1")
+
+    left_criteria = criteria[:payload.criteria_split_index]
+    right_criteria = criteria[payload.criteria_split_index:]
+
+    def _sum_marks(items: list[object]) -> int:
+        total = 0
+        for item in items:
+            if isinstance(item, dict):
+                total += int(item.get("marks") or 0)
+        return total
+
+    left_marks = _sum_marks(left_criteria)
+    right_marks = _sum_marks(right_criteria)
+
+    question.max_marks = left_marks if left_marks > 0 else max(0, question.max_marks // 2)
+    question.rubric_json = json.dumps({
+        **rubric,
+        "criteria": left_criteria,
+        "split_by_teacher": True,
+    })
+
+    label = str(question.label)
+    split_label = f"{label}b" if not label.endswith("b") else f"{label}_part2"
+    new_question = Question(
+        exam_id=exam_id,
+        label=split_label,
+        max_marks=right_marks if right_marks > 0 else max(0, int(rubric.get("max_marks") or question.max_marks)),
+        rubric_json=json.dumps({
+            **rubric,
+            "criteria": right_criteria,
+            "split_from": question.id,
+            "split_by_teacher": True,
+        }),
+    )
+
+    session.add(question)
+    session.add(new_question)
+    session.commit()
+    session.refresh(question)
+    session.refresh(new_question)
+
+    count = len(session.exec(select(Question.id).where(Question.exam_id == exam_id)).all())
+    return QuestionSplitResponse(original=_to_question_read(question, session), created=_to_question_read(new_question, session), questions_count=count)
 
 
 def _resolve_key_page_or_404(

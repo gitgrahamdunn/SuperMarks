@@ -80,6 +80,22 @@ class QuestionUpdate(BaseModel):
     rubric_json: dict[str, Any] | None = None
 
 
+class QuestionMergeResponse(BaseModel):
+    question: QuestionRead
+    questions_count: int
+
+
+class QuestionSplitRequest(BaseModel):
+    mode: str = Field(default="criteria_index")
+    criteria_split_index: int = Field(ge=1)
+
+
+class QuestionSplitResponse(BaseModel):
+    original: QuestionRead
+    created: QuestionRead
+    questions_count: int
+
+
 class TranscriptionRead(BaseModel):
     id: int
     submission_id: int
