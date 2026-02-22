@@ -1,4 +1,5 @@
 import type {
+  ExamCostResponse,
   ExamDetail,
   ExamRead,
   QuestionRead,
@@ -310,6 +311,7 @@ export const api = {
   listExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/pages`),
   getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),
   completeExamKeyReview: (examId: number) => request<{ exam_id: number; status: string; warnings: string[] }>(`exams/${examId}/key/review/complete`, { method: 'POST' }),
+  getExamCost: (examId: number) => request<ExamCostResponse>(`exams/${examId}/cost`),
   parseExamKey: (examId: number) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST' }),
   parseExamKeyRaw: async (examId: number) => {
     const path = `exams/${examId}/key/parse`;

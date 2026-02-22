@@ -91,6 +91,8 @@ def test_parse_answer_key_builds_pages_from_uploaded_images(tmp_path, monkeypatc
         assert payload["request_id"]
         assert payload["stage"] == "save_questions"
         assert isinstance(payload["timings"]["openai_ms"], int)
+        assert payload["usage"]["total_tokens"] >= 0
+        assert payload["cost"]["total_cost"] >= 0
         assert "No key page images found" not in response.text
 
         key_pages_dir = Path(settings.data_dir) / "exams" / str(exam_id) / "key_pages"
@@ -547,3 +549,34 @@ def test_split_question_by_criteria_creates_new_question(tmp_path) -> None:
         listed = client.get(f"/api/exams/{exam_id}/questions")
         assert listed.status_code == 200
         assert len(listed.json()) == 2
+
+
+def test_exam_cost_endpoint_returns_aggregated_cost(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Cost Endpoint"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        parse = client.post(f"/api/exams/{exam_id}/key/parse")
+        assert parse.status_code == 200
+
+        response = client.get(f"/api/exams/{exam_id}/cost")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total_cost"] >= 0
+        assert payload["total_tokens"] >= 0
+        assert "gpt-5-nano" in payload["model_breakdown"]
+        assert "gpt-5-mini" in payload["model_breakdown"]

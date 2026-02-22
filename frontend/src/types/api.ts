@@ -94,3 +94,29 @@ export interface QuestionSplitResponse {
   created: QuestionRead;
   questions_count: number;
 }
+
+
+export interface ParseUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
+export interface ParseCost {
+  input_cost: number;
+  output_cost: number;
+  total_cost: number;
+}
+
+export interface ExamCostBreakdown {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  total_cost: number;
+}
+
+export interface ExamCostResponse {
+  total_cost: number;
+  total_tokens: number;
+  model_breakdown: Record<string, ExamCostBreakdown>;
+}
