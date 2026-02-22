@@ -12,8 +12,9 @@ import type {
   SubmissionResults,
 } from '../types/api';
 
-const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 const API_BASE_URL = import.meta.env.PROD ? '/api' : (configuredApiBaseUrl || '/api');
+const IS_PROD_ABSOLUTE_API_BASE_CONFIGURED = import.meta.env.PROD && /^https?:\/\//i.test(configuredApiBaseUrl);
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
 class ApiError extends Error {
   constructor(
@@ -73,9 +74,18 @@ function stripSnippet(text: string): string {
 }
 
 function joinUrl(base: string, path: string): string {
-  const b = base.replace(/\/+$/, '');
-  const p = path.replace(/^\/+/, '');
-  return `${b}/${p}`;
+  const normalizedBase = base.trim().replace(/\/+$/, '');
+  const normalizedPath = path.trim().replace(/^\/+/, '');
+
+  if (!normalizedBase) {
+    return normalizedPath ? `/${normalizedPath}` : '/';
+  }
+
+  if (!normalizedPath) {
+    return normalizedBase;
+  }
+
+  return `${normalizedBase}/${normalizedPath}`;
 }
 
 function buildApiUrl(path: string): string {
@@ -392,4 +402,4 @@ export const api = {
   }),
 };
 
-export { API_BASE_URL, ApiError, buildApiUrl, checkBackendApiContract, getOpenApiPaths, joinUrl };
+export { API_BASE_URL, ApiError, buildApiUrl, checkBackendApiContract, getOpenApiPaths, IS_PROD_ABSOLUTE_API_BASE_CONFIGURED, joinUrl };
