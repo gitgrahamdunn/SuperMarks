@@ -128,6 +128,25 @@ function extractParsedQuestionCount(parseResult: unknown): number {
   return 0;
 }
 
+
+function normalizeExamListResponse(response: unknown): { exams: ExamRead[]; usedFallback: boolean } {
+  if (Array.isArray(response)) {
+    return { exams: response as ExamRead[], usedFallback: false };
+  }
+
+  if (response && typeof response === 'object') {
+    const shaped = response as { exams?: unknown; items?: unknown };
+    if (Array.isArray(shaped.exams)) {
+      return { exams: shaped.exams as ExamRead[], usedFallback: false };
+    }
+    if (Array.isArray(shaped.items)) {
+      return { exams: shaped.items as ExamRead[], usedFallback: false };
+    }
+  }
+
+  return { exams: [], usedFallback: true };
+}
+
 function isNetworkFetchError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -230,8 +249,16 @@ export function ExamsPage() {
     try {
       setLoading(true);
       const fetchedExams = await api.getExams();
-      setExams(fetchedExams);
-      const costEntries = await Promise.all(fetchedExams.map(async (exam) => {
+      const normalized = normalizeExamListResponse(fetchedExams);
+      setExams(normalized.exams);
+
+      if (normalized.usedFallback) {
+        const shapePreview = JSON.stringify(fetchedExams).slice(0, 200);
+        console.error('Unexpected exams response shape', fetchedExams);
+        showError(`Unexpected exams response shape. Showing empty list. ${shapePreview}`);
+      }
+
+      const costEntries = await Promise.all(normalized.exams.map(async (exam) => {
         try {
           return [exam.id, await api.getExamCost(exam.id)] as const;
         } catch {
@@ -715,14 +742,19 @@ export function ExamsPage() {
       <div className="card">
         <h2>Exam List</h2>
         {loading && <p>Loading...</p>}
-        {!loading && exams.length === 0 && <p>No exams yet.</p>}
+        {!loading && exams.length === 0 && (
+          <div className="empty-state stack">
+            <p>No exams yet.</p>
+            <button type="button" onClick={() => setIsModalOpen(true)} disabled={isRunning}>Create your first exam</button>
+          </div>
+        )}
         <ul>
-          {exams.map((exam) => (
+          {Array.isArray(exams) ? exams.map((exam) => (
             <li key={exam.id}>
               <Link to={`/exams/${exam.id}`}>{exam.name}</Link>
               {examCosts[exam.id] && <span className="subtle-text"> (${examCosts[exam.id].total_cost.toFixed(3)})</span>}
             </li>
-          ))}
+          )) : null}
         </ul>
       </div>
     </div>

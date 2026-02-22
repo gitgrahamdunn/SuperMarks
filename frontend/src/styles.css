@@ -234,3 +234,30 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
 .wizard-checklist-item.status-failed {
   color: #b91c1c;
 }
+
+.empty-state {
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  padding: .8rem;
+  background: #f9fafb;
+}
+
+.app-error-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.app-error-card {
+  width: min(560px, 100%);
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  background: #fff;
+  padding: 1.2rem;
+}
+
+.app-error-card h1 {
+  margin-top: 0;
+  color: #991b1b;
+}
