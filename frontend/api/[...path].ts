@@ -77,6 +77,11 @@ function filterForwardHeaders(headers: IncomingHttpHeaders): Record<string, stri
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   const method = req.method || 'GET';
+  const incomingUrl = new URL(req.url || '/', 'http://localhost');
+  const targetPath = getForwardPath(req);
+  const targetUrl = new URL(`${targetPath}${incomingUrl.search}`, BACKEND_ORIGIN);
+
+  console.log('[proxy]', { method, incomingUrl: incomingUrl.pathname + incomingUrl.search, targetUrl: targetUrl.toString() });
 
   let body = Buffer.alloc(0);
   if (method !== 'GET' && method !== 'HEAD') {
@@ -92,21 +97,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
   }
 
-  const incomingUrl = new URL(req.url || '/', 'http://localhost');
-  const targetPath = getForwardPath(req);
-  const targetUrl = new URL(`${targetPath}${incomingUrl.search}`, BACKEND_ORIGIN);
-
   const targetHeaders = filterForwardHeaders(req.headers);
-  if (!targetHeaders['content-type'] && req.headers['content-type']) {
-    targetHeaders['content-type'] = Array.isArray(req.headers['content-type'])
-      ? req.headers['content-type'].join(', ')
-      : req.headers['content-type'];
-  }
-  if (!targetHeaders['x-api-key'] && req.headers['x-api-key']) {
-    targetHeaders['x-api-key'] = Array.isArray(req.headers['x-api-key'])
-      ? req.headers['x-api-key'].join(', ')
-      : req.headers['x-api-key'];
-  }
   if (body.length > 0) {
     targetHeaders['content-length'] = String(body.length);
   }
@@ -127,7 +118,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         const responseChunks: Buffer[] = [];
 
         for (const [headerName, headerValue] of Object.entries(proxyRes.headers)) {
-          if (!headerValue || headerName.toLowerCase() === 'transfer-encoding') {
+          const lowerHeader = headerName.toLowerCase();
+          if (!headerValue || lowerHeader === 'transfer-encoding' || lowerHeader === 'set-cookie') {
             continue;
           }
 
@@ -136,14 +128,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
         proxyRes.on('data', (chunk: Buffer) => responseChunks.push(chunk));
         proxyRes.on('end', () => {
+          const statusCode = proxyRes.statusCode || 502;
+          console.log('[proxy]', { method, incomingUrl: incomingUrl.pathname + incomingUrl.search, targetUrl: targetUrl.toString(), statusCode });
           const responseBody = Buffer.concat(responseChunks);
-          res.status(proxyRes.statusCode || 502).end(responseBody);
+          res.status(statusCode).end(responseBody);
           resolve();
         });
       },
     );
 
-    proxyReq.on('error', () => {
+    proxyReq.on('error', (error) => {
+      console.log('[proxy]', { method, incomingUrl: incomingUrl.pathname + incomingUrl.search, targetUrl: targetUrl.toString(), statusCode: 502, error: String(error) });
       res.status(502).send('Upstream proxy request failed');
       resolve();
     });

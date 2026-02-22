@@ -27,6 +27,9 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(17, 24, 39, 0.45); display: grid; place-items: center; z-index: 15; }
 .modal { width: min(560px, calc(100vw - 2rem)); }
+.wizard-modal { max-height: 85vh; overflow-y: auto; }
+.wizard-modal-form { min-height: 0; }
+.wizard-modal-footer { position: sticky; bottom: 0; background: #fff; padding-top: .5rem; margin-top: .25rem; border-top: 1px solid #e5e7eb; }
 .subtle-text { color: #4b5563; margin: 0; font-size: .95rem; }
 .review-card { max-width: 760px; margin-inline: auto; }
 .criteria-block { border: 1px solid #e5e7eb; border-radius: 6px; padding: .75rem; }

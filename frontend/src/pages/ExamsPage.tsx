@@ -588,13 +588,13 @@ export function ExamsPage() {
 
       {isModalOpen && (
         <div className="modal-backdrop">
-          <div className="card modal stack">
+          <div className="card modal wizard-modal stack">
             <h2>Enter Exam Key</h2>
             <p className="subtle-text wizard-step-banner">Current step: {isRunning ? step : 'ready'}</p>
             {IS_PROD_ABSOLUTE_API_BASE_CONFIGURED && (
               <p className="warning-text">Warning: production API base should be relative (/api), not an absolute URL.</p>
             )}
-            <form onSubmit={onCreateAndUpload} className="stack" encType="multipart/form-data">
+            <form onSubmit={onCreateAndUpload} className="stack wizard-modal-form" encType="multipart/form-data">
               <label className="stack">
                 Exam name
                 <input
@@ -728,7 +728,7 @@ export function ExamsPage() {
                 </div>
               </details>
 
-              <div className="actions-row">
+              <div className="actions-row wizard-modal-footer">
                 <button type="submit" disabled={isRunning || (totalTooLarge && !allowLargeUpload)}>
                   {isRunning ? 'Working...' : 'Enter exam & parse'}
                 </button>
