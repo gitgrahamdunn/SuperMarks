@@ -1,6 +1,14 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, API_KEY, ApiError, api, buildApiUrl, IS_PROD_ABSOLUTE_API_BASE_CONFIGURED } from '../api/client';
+import {
+  API_BASE_URL,
+  API_KEY,
+  ApiError,
+  ApiInvalidJsonError,
+  api,
+  buildApiUrl,
+  IS_PROD_ABSOLUTE_API_BASE_CONFIGURED,
+} from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
 import type { ExamCostResponse, ExamRead } from '../types/api';
@@ -560,6 +568,27 @@ export function ExamsPage() {
           exceptionMessage: err.stack || err.message,
         });
         showError(`${stepName} failed (status ${err.status})`);
+      } else if (err instanceof ApiInvalidJsonError) {
+        setWizardError({
+          summary: `Step: ${stepName} | Status: invalid-json`,
+          details: {
+            step: stepName,
+            attemptedUrl: err.url,
+            errorName: err.name,
+            errorMessage: err.message,
+            responseContentType: err.contentType,
+            responseBodySnippet: err.responseBodySnippet || '<empty>',
+            note: 'JSON parse failed for /api/exams response. Check Content-Type and Vercel routing.',
+          },
+        });
+        logStep({
+          step: stepName,
+          endpointUrl: err.url,
+          status: 0,
+          responseSnippet: err.responseBodySnippet || '<empty>',
+          exceptionMessage: `${err.message} (Content-Type: ${err.contentType})`,
+        });
+        showError(`${stepName} failed due to invalid JSON response (Content-Type: ${err.contentType})`);
       } else {
         const details = err instanceof Error ? err.stack || err.message : 'Unknown error';
         setWizardError({
