@@ -26,6 +26,13 @@ type PingResult = {
   message?: string;
 };
 
+type PostExamTestResult = {
+  status: number | 'network-error';
+  bodySnippet: string;
+  message?: string;
+  loadFailedHint?: string;
+};
+
 type ParseErrorDetails = {
   stage?: string;
   page_index?: number;
@@ -158,6 +165,10 @@ export function ExamsPage() {
 
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
   const [pinging, setPinging] = useState(false);
+  const [postTestResult, setPostTestResult] = useState<PostExamTestResult | null>(null);
+  const [postTesting, setPostTesting] = useState(false);
+
+  const apiKey = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
 
   const endpointMap = {
     create: buildApiUrl('exams'),
@@ -182,6 +193,38 @@ export function ExamsPage() {
       });
     } finally {
       setPinging(false);
+    }
+  };
+
+  const testPostExam = async () => {
+    setPostTesting(true);
+    try {
+      const response = await fetch('/api/exams', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+        },
+        body: JSON.stringify({ name: `Ping ${Date.now()}` }),
+      });
+      const responseText = await response.text();
+      setPostTestResult({
+        status: response.status,
+        bodySnippet: responseText.slice(0, 200),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      const isLoadFailed = /load failed/i.test(message);
+      setPostTestResult({
+        status: 'network-error',
+        bodySnippet: '',
+        message,
+        loadFailedHint: isLoadFailed
+          ? 'This suggests Vercel rewrite/proxy is not handling POST or Safari is aborting the request body.'
+          : undefined,
+      });
+    } finally {
+      setPostTesting(false);
     }
   };
 
@@ -296,15 +339,34 @@ export function ExamsPage() {
 
       setStep('creating');
       markChecklist('creating_exam', 'active');
-      const createEndpoint = buildApiUrl('exams');
-      const exam = await api.createExam(modalName.trim());
+      const createEndpoint = '/api/exams';
+      const createName = modalName.trim() || `Untitled ${Date.now()}`;
+      const createResponse = await fetch(createEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { 'X-API-Key': apiKey } : {}),
+        },
+        body: JSON.stringify({ name: createName }),
+      });
+      const createText = await createResponse.text();
+      if (!createResponse.ok) {
+        throw new ApiError(
+          createResponse.status,
+          createEndpoint,
+          'POST',
+          createText.slice(0, 300),
+          `Request failed (${createResponse.status}) [${createResponse.status}] ${createEndpoint}`,
+        );
+      }
+      const exam = JSON.parse(createText) as ExamRead;
       examId = exam.id;
       setCreatedExamId(exam.id);
       logStep({
         step: 'creating',
         endpointUrl: createEndpoint,
         status: 200,
-        responseSnippet: JSON.stringify(exam).slice(0, 500),
+        responseSnippet: createText.slice(0, 500),
       });
       markChecklist('creating_exam', 'done');
       setParseProgress(14);
@@ -606,14 +668,25 @@ export function ExamsPage() {
                   <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
                   <div className="actions-row">
                     <button type="button" onClick={() => void pingApi()} disabled={pinging || isRunning}>
-                      {pinging ? 'Pinging…' : 'Ping API'}
+                      {pinging ? 'Testing…' : 'Test GET /api/health'}
+                    </button>
+                    <button type="button" onClick={() => void testPostExam()} disabled={postTesting || isRunning}>
+                      {postTesting ? 'Testing…' : 'Test POST /api/exams'}
                     </button>
                   </div>
                   {pingResult && (
                     <div className="wizard-detail-block">
-                      <p><strong>Ping status:</strong> {pingResult.status}</p>
-                      <p><strong>Ping response:</strong> {(pingResult.bodySnippet || '<empty>').slice(0, 200)}</p>
-                      {pingResult.message && <p><strong>Ping error:</strong> {pingResult.message}</p>}
+                      <p><strong>GET status:</strong> {pingResult.status}</p>
+                      <p><strong>GET response:</strong> {(pingResult.bodySnippet || '<empty>').slice(0, 200)}</p>
+                      {pingResult.message && <p><strong>GET error:</strong> {pingResult.message}</p>}
+                    </div>
+                  )}
+                  {postTestResult && (
+                    <div className="wizard-detail-block">
+                      <p><strong>POST status:</strong> {postTestResult.status}</p>
+                      <p><strong>POST response:</strong> {(postTestResult.bodySnippet || '<empty>').slice(0, 200)}</p>
+                      {postTestResult.message && <p><strong>POST error:</strong> {postTestResult.message}</p>}
+                      {postTestResult.loadFailedHint && <p><strong>Hint:</strong> {postTestResult.loadFailedHint}</p>}
                     </div>
                   )}
                   {stepLogs.length === 0 && <p>No step details yet.</p>}
