@@ -466,3 +466,84 @@ def test_parse_answer_key_returns_400_when_pdf_render_fails(tmp_path, monkeypatc
         assert payload["detail"] == "PDF render failed. Try uploading images."
         assert payload["stage"] == "build_key_pages"
         assert payload["request_id"]
+
+
+def test_merge_next_question_merges_payload_and_deletes_next(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Merge Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        first = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={"label": "Q1", "max_marks": 3, "rubric_json": {"question_text": "Part A", "criteria": [{"desc": "A", "marks": 3}], "answer_key": "ans a"}},
+        )
+        second = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={"label": "Q2", "max_marks": 2, "rubric_json": {"question_text": "Part B", "criteria": [{"desc": "B", "marks": 2}], "answer_key": "ans b"}},
+        )
+        assert first.status_code == 201
+        assert second.status_code == 201
+
+        merged = client.post(f"/api/exams/{exam_id}/questions/{first.json()['id']}/merge-next")
+        assert merged.status_code == 200
+        payload = merged.json()
+        assert payload["questions_count"] == 1
+        assert payload["question"]["max_marks"] == 5
+        assert len(payload["question"]["rubric_json"]["criteria"]) == 2
+        assert payload["question"]["rubric_json"]["merged_from"] == [first.json()["id"], second.json()["id"]]
+
+        listed = client.get(f"/api/exams/{exam_id}/questions")
+        assert listed.status_code == 200
+        assert len(listed.json()) == 1
+
+
+def test_split_question_by_criteria_creates_new_question(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Split Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        question = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={
+                "label": "Q4",
+                "max_marks": 10,
+                "rubric_json": {
+                    "criteria": [
+                        {"desc": "method", "marks": 4},
+                        {"desc": "answer", "marks": 6},
+                    ],
+                    "answer_key": "method + answer",
+                },
+            },
+        )
+        assert question.status_code == 201
+        question_id = question.json()["id"]
+
+        split = client.post(
+            f"/api/exams/{exam_id}/questions/{question_id}/split",
+            json={"mode": "criteria_index", "criteria_split_index": 1},
+        )
+        assert split.status_code == 200
+        payload = split.json()
+        assert payload["questions_count"] == 2
+        assert payload["original"]["max_marks"] == 4
+        assert payload["created"]["max_marks"] == 6
+        assert payload["created"]["label"] == "Q4b"
+
+        listed = client.get(f"/api/exams/{exam_id}/questions")
+        assert listed.status_code == 200
+        assert len(listed.json()) == 2

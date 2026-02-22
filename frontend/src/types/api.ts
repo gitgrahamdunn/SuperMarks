@@ -83,3 +83,14 @@ export interface ExamKeyPage {
   width: number;
   height: number;
 }
+
+export interface QuestionMergeResponse {
+  question: QuestionRead;
+  questions_count: number;
+}
+
+export interface QuestionSplitResponse {
+  original: QuestionRead;
+  created: QuestionRead;
+  questions_count: number;
+}

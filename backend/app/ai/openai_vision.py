@@ -232,6 +232,7 @@ class OpenAIAnswerKeyParser:
             "Identify marks using patterns like [3 marks], (5 marks), /5, out of 5, 5 pts. "
             "For each question extract: label, max_marks, marks_source, marks_confidence, marks_reason, question_text, answer_key, model_solution, criteria[] with desc + marks, warnings[], and evidence[] boxes using normalized coordinates 0..1 plus page_number and kind. "
             "If marks are not explicit, make a best guess for max_marks and include uncertainty notes inside question_text or model_solution while still conforming to the schema. "
+            "Do NOT split a single question into multiple questions just because the answer key has multiple answer lines/steps. Only split when there is a clear new question label/number (Q2, 2., Question 2) or a new part marker (a), (b) if teacher uses parts. "
             "IMPORTANT: If any problem text exists but reliable question splitting is not possible, return exactly one fallback question with label='Q1', max_marks=0, criteria=[{\"desc\":\"Needs teacher review\",\"marks\":0}]. "
             "Return ONLY JSON matching the provided schema."
         )

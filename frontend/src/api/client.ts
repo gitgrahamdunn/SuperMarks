@@ -2,6 +2,8 @@ import type {
   ExamDetail,
   ExamRead,
   QuestionRead,
+  QuestionMergeResponse,
+  QuestionSplitResponse,
   Region,
   ExamKeyPage,
   SubmissionPage,
@@ -379,6 +381,13 @@ export const api = {
 
     throw new ApiError(404, buildApiUrl(`questions/${questionId}`), 'PATCH', '', 'Save endpoint is not available. [404] dynamic endpoint discovery');
   },
+
+  mergeQuestionWithNext: (examId: number, questionId: number) => request<QuestionMergeResponse>(`exams/${examId}/questions/${questionId}/merge-next`, { method: 'POST' }),
+  splitQuestionByCriteria: (examId: number, questionId: number, criteriaSplitIndex: number) => request<QuestionSplitResponse>(`exams/${examId}/questions/${questionId}/split`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: 'criteria_index', criteria_split_index: criteriaSplitIndex }),
+  }),
 };
 
 export { API_BASE_URL, ApiError, buildApiUrl, checkBackendApiContract, getOpenApiPaths, joinUrl };

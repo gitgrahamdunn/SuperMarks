@@ -34,6 +34,22 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
 .criteria-header h3 { margin: 0; font-size: 1rem; }
 .criteria-row { display: grid; grid-template-columns: 1fr 120px auto; gap: .5rem; align-items: center; }
 
+.question-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: .5rem;
+}
+.question-list-item {
+  text-align: left;
+  background: #fff;
+  color: #111827;
+}
+.question-list-item.active {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 1px #2563eb;
+}
+
+
 @media (max-width: 640px) {
   .layout { padding: .75rem; }
   .wrap-mobile { flex-wrap: wrap; }
