@@ -141,3 +141,16 @@ class ExamKeyPageRead(BaseModel):
 
 class ExamKeyUploadResponse(BaseModel):
     uploaded: int
+
+
+class ExamCostModelBreakdown(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    total_cost: float = 0.0
+
+
+class ExamCostResponse(BaseModel):
+    total_cost: float = 0.0
+    total_tokens: int = 0
+    model_breakdown: dict[str, ExamCostModelBreakdown] = Field(default_factory=dict)

@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, getOpenApiPaths } from '../api/client';
 import { EvidenceOverlayCanvas, type EvidenceBox } from '../components/EvidenceOverlayCanvas';
 import { useToast } from '../components/ToastProvider';
-import type { QuestionRead } from '../types/api';
+import type { ParseCost, ParseUsage, QuestionRead } from '../types/api';
 
 interface Criterion {
   desc: string;
@@ -11,6 +11,14 @@ interface Criterion {
 }
 
 type MarksSource = 'explicit' | 'inferred' | 'unknown';
+
+
+
+interface ParseMeta {
+  model_used: string;
+  usage: ParseUsage;
+  cost: ParseCost;
+}
 
 interface EditableQuestion {
   needs_review: boolean;
@@ -35,6 +43,7 @@ export function ExamReviewPage() {
   const [previewError, setPreviewError] = useState(false);
   const [showSplitDialog, setShowSplitDialog] = useState(false);
   const [criteriaSplitIndex, setCriteriaSplitIndex] = useState(1);
+  const [parseMeta, setParseMeta] = useState<ParseMeta | null>(null);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
 
@@ -48,6 +57,18 @@ export function ExamReviewPage() {
 
       try {
         setLoading(true);
+        const storageKey = `supermarks:lastParse:${examId}`;
+        const storedParse = localStorage.getItem(storageKey);
+        if (storedParse) {
+          try {
+            const parsed = JSON.parse(storedParse) as Partial<ParseMeta>;
+            if (parsed?.model_used && parsed?.usage && parsed?.cost) {
+              setParseMeta(parsed as ParseMeta);
+            }
+          } catch {
+            setParseMeta(null);
+          }
+        }
         const [fetchedQuestions, paths] = await Promise.all([
           api.getExamQuestionsForReview(examId),
           getOpenApiPaths(),
@@ -263,6 +284,8 @@ export function ExamReviewPage() {
   );
   const marksSuggestion = useMemo(() => (currentQuestion ? getMarksSuggestion(currentQuestion) : null), [currentQuestion]);
 
+  const isHighUsage = (parseMeta?.cost.total_cost || 0) > 0.02;
+
   if (loading) {
     return <p>Loading review...</p>;
   }
@@ -281,6 +304,14 @@ export function ExamReviewPage() {
       <p><Link to={`/exams/${examId}`}>← Back to Exam</Link></p>
       <h1>Create Exam Wizard: Review Questions</h1>
       <p>Question {currentIndex + 1} of {questions.length}</p>
+      {parseMeta && (
+        <div className="subtle-text">
+          <p>Model used: {parseMeta.model_used}</p>
+          <p>Tokens: {parseMeta.usage.total_tokens.toLocaleString()}</p>
+          <p>Cost: ${parseMeta.cost.total_cost.toFixed(4)}</p>
+          {isHighUsage && <p className="warning-text">This key required higher model usage.</p>}
+        </div>
+      )}
 
       <div className="question-list">
         {questions.map((question, index) => (

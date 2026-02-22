@@ -19,16 +19,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from sqlmodel import Session, delete, select
 
 from app.ai.openai_vision import (
+    OPENAI_PRICING,
     AnswerKeyParser,
     OpenAIRequestError,
     ParseResult,
     SchemaBuildError,
     build_answer_key_response_schema,
+    compute_usage_cost,
     get_answer_key_parser,
 )
 from app.db import get_session
 from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamKeyParseRun, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionStatus, utcnow
-from app.schemas import ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionMergeResponse, QuestionRead, QuestionSplitRequest, QuestionSplitResponse, QuestionUpdate, RegionRead, SubmissionFileRead, SubmissionRead
+from app.schemas import ExamCostModelBreakdown, ExamCostResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionMergeResponse, QuestionRead, QuestionSplitRequest, QuestionSplitResponse, QuestionUpdate, RegionRead, SubmissionFileRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data, save_upload_file, upload_dir
 
@@ -249,6 +251,33 @@ def list_exams(session: Session = Depends(get_session)) -> list[Exam]:
     exams = session.exec(select(Exam).order_by(Exam.created_at.desc(), Exam.id.desc())).all()
     return list(exams)
 
+
+
+
+@router.get("/{exam_id}/cost", response_model=ExamCostResponse)
+def get_exam_cost(exam_id: int, session: Session = Depends(get_session)) -> ExamCostResponse:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    runs = session.exec(select(ExamKeyParseRun).where(ExamKeyParseRun.exam_id == exam_id, ExamKeyParseRun.status == "success")).all()
+    total_cost = float(sum(float(run.total_cost or 0.0) for run in runs))
+    total_tokens = int(sum(int(run.input_tokens or 0) + int(run.output_tokens or 0) for run in runs))
+
+    model_breakdown: dict[str, ExamCostModelBreakdown] = {}
+    for model in OPENAI_PRICING.keys():
+        model_runs = [run for run in runs if run.model_used == model]
+        model_input_tokens = int(sum(int(run.input_tokens or 0) for run in model_runs))
+        model_output_tokens = int(sum(int(run.output_tokens or 0) for run in model_runs))
+        model_total_cost = float(sum(float(run.total_cost or 0.0) for run in model_runs))
+        model_breakdown[model] = ExamCostModelBreakdown(
+            input_tokens=model_input_tokens,
+            output_tokens=model_output_tokens,
+            total_tokens=model_input_tokens + model_output_tokens,
+            total_cost=model_total_cost,
+        )
+
+    return ExamCostResponse(total_cost=total_cost, total_tokens=total_tokens, model_breakdown=model_breakdown)
 
 @router.get("/{exam_id}", response_model=ExamDetail)
 def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetail:
@@ -772,6 +801,11 @@ def parse_answer_key(
         merged_warnings: list[str] = []
         confidence_scores: list[float] = []
         result_model = nano_model
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_input_cost = 0.0
+        total_output_cost = 0.0
+        total_cost = 0.0
 
         for idx, page_path in enumerate(image_paths, start=1):
             page_index = idx
@@ -811,12 +845,24 @@ def parse_answer_key(
                     raise mini_exc
 
                 attempts.append({"model": mini_model, "openai_ms": int((time.perf_counter() - mini_started) * 1000), "page_index": idx, "confidence_score": mini_result.payload.get("confidence_score")})
+                total_input_tokens += mini_result.input_tokens
+                total_output_tokens += mini_result.output_tokens
+                mini_cost = compute_usage_cost(mini_result.model, mini_result.input_tokens, mini_result.output_tokens)
+                total_input_cost += float(mini_cost["input_cost"])
+                total_output_cost += float(mini_cost["output_cost"])
+                total_cost += mini_result.total_cost
                 result = mini_result
                 result_model = mini_result.model
             else:
                 nano_ms = int((time.perf_counter() - nano_started) * 1000)
                 timings["openai_ms"] += nano_ms
                 attempts.append({"model": nano_model, "openai_ms": nano_ms, "page_index": idx, "confidence_score": nano_result.payload.get("confidence_score")})
+                total_input_tokens += nano_result.input_tokens
+                total_output_tokens += nano_result.output_tokens
+                nano_cost = compute_usage_cost(nano_result.model, nano_result.input_tokens, nano_result.output_tokens)
+                total_input_cost += float(nano_cost["input_cost"])
+                total_output_cost += float(nano_cost["output_cost"])
+                total_cost += nano_result.total_cost
                 result = nano_result
 
             stage = "validate_output"
@@ -853,6 +899,12 @@ def parse_answer_key(
                 mini_ms = int((time.perf_counter() - mini_started) * 1000)
                 timings["openai_ms"] += mini_ms
                 attempts.append({"model": mini_model, "openai_ms": mini_ms, "page_index": idx, "confidence_score": mini_result.payload.get("confidence_score")})
+                total_input_tokens += mini_result.input_tokens
+                total_output_tokens += mini_result.output_tokens
+                mini_cost = compute_usage_cost(mini_result.model, mini_result.input_tokens, mini_result.output_tokens)
+                total_input_cost += float(mini_cost["input_cost"])
+                total_output_cost += float(mini_cost["output_cost"])
+                total_cost += mini_result.total_cost
                 try:
                     confidence, questions_payload, warnings = _validate_parse_payload(mini_result.payload)
                 except ValueError:
@@ -931,16 +983,28 @@ def parse_answer_key(
         timings["save_ms"] = int((time.perf_counter() - save_started) * 1000)
         run.model_used = result_model
         run.status = "success"
+        run.input_tokens = total_input_tokens
+        run.output_tokens = total_output_tokens
+        run.total_cost = total_cost
         run.finished_at = utcnow()
         run.timings_json = json.dumps(timings)
         session.add(run)
         session.commit()
+
+        usage = {
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "total_tokens": total_input_tokens + total_output_tokens,
+        }
+        cost_breakdown = {"input_cost": total_input_cost, "output_cost": total_output_cost, "total_cost": total_cost}
 
         return {
             "ok": True,
             "request_id": request_id,
             "stage": stage,
             "model_used": result_model,
+            "usage": usage,
+            "cost": cost_breakdown,
             "confidence_score": min(confidence_scores) if confidence_scores else 0.0,
             "questions": merged_questions_payload,
             "questions_count": len(merged_questions_payload),

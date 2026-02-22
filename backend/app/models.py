@@ -100,6 +100,9 @@ class ExamKeyParseRun(SQLModel, table=True):
     request_id: str = Field(index=True)
     model_used: str
     status: str
+    input_tokens: int = Field(default=0)
+    output_tokens: int = Field(default=0)
+    total_cost: float = Field(default=0.0)
     started_at: datetime = Field(default_factory=utcnow)
     finished_at: Optional[datetime] = None
     error_json: Optional[str] = None

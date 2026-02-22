@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE_URL, ApiError, api, buildApiUrl } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
-import type { ExamRead } from '../types/api';
+import type { ExamCostResponse, ExamRead } from '../types/api';
 
 type WizardStep = 'creating' | 'uploading' | 'building_pages' | 'parsing' | 'done';
 
@@ -132,6 +132,8 @@ export function ExamsPage() {
   const [isRunning, setIsRunning] = useState(false);
   const [step, setStep] = useState<WizardStep>('creating');
   const [wizardError, setWizardError] = useState<WizardError | null>(null);
+  const [examCosts, setExamCosts] = useState<Record<number, ExamCostResponse>>({});
+  const [parseSummaryMeta, setParseSummaryMeta] = useState<{ model: string; tokens: number; cost: number } | null>(null);
   const [createdExamId, setCreatedExamId] = useState<number | null>(null);
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
   const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
@@ -152,7 +154,16 @@ export function ExamsPage() {
   const loadExams = async () => {
     try {
       setLoading(true);
-      setExams(await api.getExams());
+      const fetchedExams = await api.getExams();
+      setExams(fetchedExams);
+      const costEntries = await Promise.all(fetchedExams.map(async (exam) => {
+        try {
+          return [exam.id, await api.getExamCost(exam.id)] as const;
+        } catch {
+          return [exam.id, { total_cost: 0, total_tokens: 0, model_breakdown: {} }] as const;
+        }
+      }));
+      setExamCosts(Object.fromEntries(costEntries));
     } catch (loadError) {
       console.error('Failed to load exams', loadError);
       showError(loadError instanceof Error ? loadError.message : 'Failed to load exams');
@@ -321,6 +332,12 @@ export function ExamsPage() {
       showSuccess('Parse step succeeded.');
       const questionCount = extractParsedQuestionCount(parseOutcome.data);
       setParsedQuestionCount(questionCount);
+      const parsed = parseOutcome.data as { model_used?: string; usage?: { total_tokens?: number }; cost?: { total_cost?: number } };
+      setParseSummaryMeta({
+        model: parsed.model_used || "unknown",
+        tokens: parsed.usage?.total_tokens || 0,
+        cost: parsed.cost?.total_cost || 0,
+      });
       setStep('done');
       localStorage.setItem(`supermarks:lastParse:${exam.id}`, JSON.stringify(parseOutcome.data));
 
@@ -502,6 +519,14 @@ export function ExamsPage() {
               </div>
 
               {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
+              {parseSummaryMeta && (
+                <div className="subtle-text">
+                  <p>Model used: {parseSummaryMeta.model}</p>
+                  <p>Tokens: {parseSummaryMeta.tokens.toLocaleString()}</p>
+                  <p>Cost: ${parseSummaryMeta.cost.toFixed(4)}</p>
+                  {parseSummaryMeta.cost > 0.02 && <p className="warning-text">This key required higher model usage.</p>}
+                </div>
+              )}
               {failedSummary && <p className="warning-text">{failedSummary}</p>}
               {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
 
@@ -542,6 +567,7 @@ export function ExamsPage() {
           {exams.map((exam) => (
             <li key={exam.id}>
               <Link to={`/exams/${exam.id}`}>{exam.name}</Link>
+              {examCosts[exam.id] && <span className="subtle-text"> (${examCosts[exam.id].total_cost.toFixed(3)})</span>}
             </li>
           ))}
         </ul>

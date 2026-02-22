@@ -6,6 +6,7 @@ from app.ai.openai_vision import (
     SchemaBuildError,
     build_answer_key_response_schema,
     build_key_parse_request,
+    compute_usage_cost,
     validate_schema_strictness,
 )
 
@@ -67,3 +68,11 @@ def test_schema_validation_rejects_non_strict_shape() -> None:
     invalid_schema = {"type": "object", "properties": {"x": {"type": "object", "properties": {"a": {"type": "string"}}}}}
     with pytest.raises(SchemaBuildError):
         validate_schema_strictness(invalid_schema)
+
+
+def test_compute_usage_cost_uses_model_pricing() -> None:
+    result = compute_usage_cost(model="gpt-5-nano", input_tokens=1000, output_tokens=500)
+
+    assert result["input_cost"] == pytest.approx(0.0005)
+    assert result["output_cost"] == pytest.approx(0.00075)
+    assert result["total_cost"] == pytest.approx(0.00125)
