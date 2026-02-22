@@ -30,13 +30,13 @@ type WizardError = {
 
 type PingResult = {
   status: number | 'network-error';
-  bodySnippet: string;
+  body: string;
   message?: string;
 };
 
 type PostExamTestResult = {
   status: number | 'network-error';
-  bodySnippet: string;
+  body: string;
   message?: string;
   loadFailedHint?: string;
 };
@@ -208,12 +208,12 @@ export function ExamsPage() {
       const responseText = await response.text();
       setPingResult({
         status: response.status,
-        bodySnippet: responseText.slice(0, 200),
+        body: responseText,
       });
     } catch (error) {
       setPingResult({
         status: 'network-error',
-        bodySnippet: '',
+        body: '',
         message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       });
     } finally {
@@ -235,14 +235,14 @@ export function ExamsPage() {
       const responseText = await response.text();
       setPostTestResult({
         status: response.status,
-        bodySnippet: responseText.slice(0, 200),
+        body: responseText,
       });
     } catch (error) {
       const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
       const isLoadFailed = /load failed/i.test(message);
       setPostTestResult({
         status: 'network-error',
-        bodySnippet: '',
+        body: '',
         message,
         loadFailedHint: isLoadFailed
           ? 'This suggests Vercel rewrite/proxy is not handling POST or Safari is aborting the request body.'
@@ -714,14 +714,14 @@ export function ExamsPage() {
                   {pingResult && (
                     <div className="wizard-detail-block">
                       <p><strong>GET status:</strong> {pingResult.status}</p>
-                      <p><strong>GET response:</strong> {(pingResult.bodySnippet || '<empty>').slice(0, 200)}</p>
+                      <p><strong>GET response:</strong> {pingResult.body || '<empty>'}</p>
                       {pingResult.message && <p><strong>GET error:</strong> {pingResult.message}</p>}
                     </div>
                   )}
                   {postTestResult && (
                     <div className="wizard-detail-block">
                       <p><strong>POST status:</strong> {postTestResult.status}</p>
-                      <p><strong>POST response:</strong> {(postTestResult.bodySnippet || '<empty>').slice(0, 200)}</p>
+                      <p><strong>POST response:</strong> {postTestResult.body || '<empty>'}</p>
                       {postTestResult.message && <p><strong>POST error:</strong> {postTestResult.message}</p>}
                       {postTestResult.loadFailedHint && <p><strong>Hint:</strong> {postTestResult.loadFailedHint}</p>}
                     </div>
