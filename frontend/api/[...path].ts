@@ -24,15 +24,11 @@ export const config = {
   },
 };
 
-function getForwardPath(req: VercelRequest): string {
-  const pathParam = req.query.path;
-  const joinedPath = Array.isArray(pathParam) ? pathParam.join('/') : (pathParam ?? '');
-
-  if (joinedPath === 'openapi.json') {
-    return '/openapi.json';
-  }
-
-  return `/api/${joinedPath}`.replace(/\/+/g, '/');
+function getPathParts(req: VercelRequest): string[] {
+  const pathValue = req.query.path;
+  if (Array.isArray(pathValue)) return pathValue;
+  if (typeof pathValue === 'string' && pathValue.length > 0) return [pathValue];
+  return [];
 }
 
 function collectBody(req: IncomingMessage): Promise<Buffer> {
@@ -50,10 +46,7 @@ function collectBody(req: IncomingMessage): Promise<Buffer> {
       chunks.push(chunk);
     });
 
-    req.on('end', () => {
-      resolve(Buffer.concat(chunks));
-    });
-
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
@@ -78,10 +71,20 @@ function filterForwardHeaders(headers: IncomingHttpHeaders): Record<string, stri
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   const method = req.method || 'GET';
   const incomingUrl = new URL(req.url || '/', 'http://localhost');
-  const targetPath = getForwardPath(req);
-  const targetUrl = new URL(`${targetPath}${incomingUrl.search}`, BACKEND_ORIGIN);
+  const pathParts = getPathParts(req);
+  const requestedPath = pathParts.join('/');
 
-  console.log('[proxy]', { method, incomingUrl: incomingUrl.pathname + incomingUrl.search, targetUrl: targetUrl.toString() });
+  if (requestedPath === 'proxy-health') {
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.status(200).send(JSON.stringify({ ok: true, backend: BACKEND_ORIGIN }));
+    return;
+  }
+
+  const querystring = incomingUrl.search;
+  const target = requestedPath === 'openapi.json'
+    ? `${BACKEND_ORIGIN}/openapi.json`
+    : `${BACKEND_ORIGIN}/api/${requestedPath}${querystring}`;
+  const targetUrl = new URL(target.replace(/([^:]\/)(\/+)/g, '$1$2'));
 
   let body = Buffer.alloc(0);
   if (method !== 'GET' && method !== 'HEAD') {
@@ -92,6 +95,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         res.status(413).send('Payload too large');
         return;
       }
+
       res.status(400).send('Invalid request body');
       return;
     }
@@ -116,30 +120,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       },
       (proxyRes) => {
         const responseChunks: Buffer[] = [];
+        let hasContentType = false;
 
         for (const [headerName, headerValue] of Object.entries(proxyRes.headers)) {
           const lowerHeader = headerName.toLowerCase();
-          if (!headerValue || lowerHeader === 'transfer-encoding' || lowerHeader === 'set-cookie') {
+          if (!headerValue || lowerHeader === 'transfer-encoding') {
             continue;
+          }
+
+          if (lowerHeader === 'content-type') {
+            hasContentType = true;
           }
 
           res.setHeader(headerName, Array.isArray(headerValue) ? headerValue : String(headerValue));
         }
 
+        if (!hasContentType) {
+          res.setHeader('content-type', 'application/octet-stream');
+        }
+
         proxyRes.on('data', (chunk: Buffer) => responseChunks.push(chunk));
         proxyRes.on('end', () => {
-          const statusCode = proxyRes.statusCode || 502;
-          console.log('[proxy]', { method, incomingUrl: incomingUrl.pathname + incomingUrl.search, targetUrl: targetUrl.toString(), statusCode });
-          const responseBody = Buffer.concat(responseChunks);
-          res.status(statusCode).end(responseBody);
+          res.status(proxyRes.statusCode || 502).end(Buffer.concat(responseChunks));
           resolve();
         });
       },
     );
 
-    proxyReq.on('error', (error) => {
-      console.log('[proxy]', { method, incomingUrl: incomingUrl.pathname + incomingUrl.search, targetUrl: targetUrl.toString(), statusCode: 502, error: String(error) });
-      res.status(502).send('Upstream proxy request failed');
+    proxyReq.on('error', () => {
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      res.status(502).send(JSON.stringify({ detail: 'Upstream proxy request failed' }));
       resolve();
     });
 
