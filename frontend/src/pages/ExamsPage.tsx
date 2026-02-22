@@ -34,12 +34,6 @@ type PingResult = {
   message?: string;
 };
 
-type ProxyPingResult = {
-  status: number | 'network-error';
-  bodySnippet: string;
-  message?: string;
-};
-
 type PostExamTestResult = {
   status: number | 'network-error';
   bodySnippet: string;
@@ -198,8 +192,6 @@ export function ExamsPage() {
 
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
   const [pinging, setPinging] = useState(false);
-  const [proxyPingResult, setProxyPingResult] = useState<ProxyPingResult | null>(null);
-  const [proxyPinging, setProxyPinging] = useState(false);
   const [postTestResult, setPostTestResult] = useState<PostExamTestResult | null>(null);
   const [postTesting, setPostTesting] = useState(false);
 
@@ -258,34 +250,6 @@ export function ExamsPage() {
       });
     } finally {
       setPostTesting(false);
-    }
-  };
-
-  const pingProxy = async () => {
-    setProxyPinging(true);
-    try {
-      const response = await fetch('/api/proxy-health');
-      const responseText = await response.text();
-      let formattedBody = responseText;
-
-      try {
-        formattedBody = JSON.stringify(JSON.parse(responseText), null, 2);
-      } catch {
-        // Keep raw text when response is not valid JSON.
-      }
-
-      setProxyPingResult({
-        status: response.status,
-        bodySnippet: formattedBody.slice(0, 500),
-      });
-    } catch (error) {
-      setProxyPingResult({
-        status: 'network-error',
-        bodySnippet: '',
-        message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      });
-    } finally {
-      setProxyPinging(false);
     }
   };
 
@@ -741,13 +705,10 @@ export function ExamsPage() {
                   <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
                   <div className="actions-row">
                     <button type="button" onClick={() => void pingApi()} disabled={pinging || isRunning}>
-                      {pinging ? 'Testing…' : 'Test GET /api/health'}
-                    </button>
-                    <button type="button" onClick={() => void pingProxy()} disabled={proxyPinging || isRunning}>
-                      {proxyPinging ? 'Testing…' : 'Ping proxy'}
+                      {pinging ? 'Testing…' : 'Ping /api/health'}
                     </button>
                     <button type="button" onClick={() => void testPostExam()} disabled={postTesting || isRunning}>
-                      {postTesting ? 'Testing…' : 'Test POST /api/exams'}
+                      {postTesting ? 'Testing…' : 'Ping POST /api/exams'}
                     </button>
                   </div>
                   {pingResult && (
@@ -755,13 +716,6 @@ export function ExamsPage() {
                       <p><strong>GET status:</strong> {pingResult.status}</p>
                       <p><strong>GET response:</strong> {(pingResult.bodySnippet || '<empty>').slice(0, 200)}</p>
                       {pingResult.message && <p><strong>GET error:</strong> {pingResult.message}</p>}
-                    </div>
-                  )}
-                  {proxyPingResult && (
-                    <div className="wizard-detail-block">
-                      <p><strong>Proxy status:</strong> {proxyPingResult.status}</p>
-                      <p><strong>Proxy response:</strong> {(proxyPingResult.bodySnippet || '<empty>').slice(0, 500)}</p>
-                      {proxyPingResult.message && <p><strong>Proxy error:</strong> {proxyPingResult.message}</p>}
                     </div>
                   )}
                   {postTestResult && (
