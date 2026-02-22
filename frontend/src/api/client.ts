@@ -30,6 +30,19 @@ class ApiError extends Error {
   }
 }
 
+class ApiInvalidJsonError extends Error {
+  constructor(
+    public url: string,
+    public method: string,
+    public contentType: string,
+    public responseBodySnippet: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ApiInvalidJsonError';
+  }
+}
+
 const REQUIRED_BACKEND_PATHS = [
   '/api/exams',
   '/api/exams/{exam_id}/key/upload',
@@ -125,7 +138,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   if (parsedJson === null) {
-    throw new Error(`Expected JSON response from ${method} ${url}, but received empty or invalid JSON.`);
+    const contentType = response.headers.get('content-type') || '<missing>';
+    const responseBodySnippet = responseText.slice(0, 300);
+    throw new ApiInvalidJsonError(
+      url,
+      method,
+      contentType,
+      responseBodySnippet,
+      `Expected JSON response from ${method} ${url}, but received empty or invalid JSON (Content-Type: ${contentType}).`,
+    );
   }
 
   return parsedJson as T;
@@ -429,4 +450,14 @@ export const api = {
   }),
 };
 
-export { API_BASE_URL, API_KEY, ApiError, buildApiUrl, checkBackendApiContract, getOpenApiPaths, IS_PROD_ABSOLUTE_API_BASE_CONFIGURED, joinUrl };
+export {
+  API_BASE_URL,
+  API_KEY,
+  ApiError,
+  ApiInvalidJsonError,
+  buildApiUrl,
+  checkBackendApiContract,
+  getOpenApiPaths,
+  IS_PROD_ABSOLUTE_API_BASE_CONFIGURED,
+  joinUrl,
+};
