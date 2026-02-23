@@ -168,12 +168,38 @@ async function createExamRequest(name: string): Promise<ExamRead> {
 
   try {
     const examName = name.trim() || `Exam ${Date.now()}`;
-    const encodedName = encodeURIComponent(examName);
-    return await request<ExamRead>(`exams-create?name=${encodedName}`, {
+    const url = `/api/exams-create?name=${encodeURIComponent(examName)}`;
+    const response = await fetch(url, {
       method: 'GET',
       headers: withAuthHeaders(),
       signal: controller.signal,
     });
+
+    const responseText = await response.text();
+    let parsedJson: unknown = null;
+
+    try {
+      parsedJson = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      parsedJson = null;
+    }
+
+    if (!response.ok) {
+      throw buildErrorDetailsFromResponse(url, 'GET', response.status, responseText);
+    }
+
+    if (parsedJson === null) {
+      const contentType = response.headers.get('content-type') || '<missing>';
+      throw new ApiInvalidJsonError(
+        url,
+        'GET',
+        contentType,
+        responseText.slice(0, 300),
+        `Expected JSON response from GET ${url}, but received empty or invalid JSON (Content-Type: ${contentType}).`,
+      );
+    }
+
+    return parsedJson as ExamRead;
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new Error('Create exam request timed out after 20 seconds. Please retry.');
