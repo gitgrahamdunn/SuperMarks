@@ -3,7 +3,7 @@ export default async function handler(req, res) {
     const backend = (process.env.BACKEND_ORIGIN || 'https://super-marks-2-backend.vercel.app').replace(/\/+$/, '');
     const url = new URL(req.url, 'https://proxy.local');
     const name = (url.searchParams.get('name') || '').trim() || `Exam ${Date.now()}`;
-    const apiKey = req.headers['x-api-key'] || req.headers['X-API-Key'] || null;
+    const apiKey = url.searchParams.get('key') || req.headers['x-api-key'] || req.headers['X-API-Key'] || null;
 
     const response = await fetch(`${backend}/api/exams`, {
       method: 'POST',

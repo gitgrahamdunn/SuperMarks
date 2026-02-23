@@ -172,10 +172,9 @@ async function createExamRequest(name: string): Promise<ExamRead> {
 
   try {
     const examName = name.trim() || `Exam ${Date.now()}`;
-    const url = `/api/exams-create?name=${encodeURIComponent(examName)}`;
+    const url = `/api/exams-create?name=${encodeURIComponent(examName)}&key=${encodeURIComponent(API_KEY)}`;
     const response = await fetch(url, {
       method: 'GET',
-      headers: withAuthHeaders(),
       signal: controller.signal,
     });
 

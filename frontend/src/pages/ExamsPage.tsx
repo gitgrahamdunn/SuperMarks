@@ -193,7 +193,7 @@ export function ExamsPage() {
   const [pinging, setPinging] = useState(false);
   const [createExamGetTestResult, setCreateExamGetTestResult] = useState<CreateExamGetTestResult | null>(null);
   const [createExamGetTesting, setCreateExamGetTesting] = useState(false);
-  const [hasApiKeyHeaderForCreateRequest, setHasApiKeyHeaderForCreateRequest] = useState<boolean>(Boolean(API_KEY));
+  const [hasApiKeyForCreateRequest, setHasApiKeyForCreateRequest] = useState<boolean>(Boolean(API_KEY));
 
   const endpointMap = {
     create: '/api/exams-create',
@@ -222,11 +222,19 @@ export function ExamsPage() {
   };
 
   const testCreateExamGet = async () => {
+    if (!API_KEY) {
+      setCreateExamGetTestResult({
+        status: 'network-error',
+        body: '',
+        message: 'Missing VITE_BACKEND_API_KEY',
+      });
+      return;
+    }
+
     setCreateExamGetTesting(true);
     try {
-      const response = await fetch(`/api/exams-create?name=${encodeURIComponent(`Ping ${Date.now()}`)}`, {
+      const response = await fetch(`/api/exams-create?name=${encodeURIComponent('Ping')}&key=${encodeURIComponent(API_KEY)}`, {
         method: 'GET',
-        headers: API_KEY ? { 'X-API-Key': API_KEY } : undefined,
       });
       const responseText = await response.text();
       setCreateExamGetTestResult({
@@ -304,7 +312,7 @@ export function ExamsPage() {
     setElapsedSeconds(0);
     setFailedSummary(null);
     setChecklistSteps(initChecklist());
-    setHasApiKeyHeaderForCreateRequest(Boolean(API_KEY));
+    setHasApiKeyForCreateRequest(Boolean(API_KEY));
   };
 
   const logStep = (entry: StepLog) => {
@@ -353,15 +361,15 @@ export function ExamsPage() {
       return;
     }
 
-    const hasApiKeyHeader = Boolean(API_KEY);
-    setHasApiKeyHeaderForCreateRequest(hasApiKeyHeader);
-    if (!hasApiKeyHeader) {
+    const hasApiKey = Boolean(API_KEY);
+    setHasApiKeyForCreateRequest(hasApiKey);
+    if (!hasApiKey) {
       setWizardError({
         summary: 'Step: creating | Status: missing-api-key',
         details: {
           step: 'creating',
           message: 'Missing VITE_BACKEND_API_KEY',
-          hasApiKeyHeader: false,
+          hasApiKey: false,
         },
       });
       showError('Missing VITE_BACKEND_API_KEY');
@@ -710,7 +718,7 @@ export function ExamsPage() {
                   <p><strong>Computed API_BASE:</strong> {API_BASE_URL}</p>
                   <p><strong>API key present:</strong> {Boolean(API_KEY) ? 'true' : 'false'}</p>
                   <p><strong>Create endpoint:</strong> {endpointMap.create}</p>
-                  <p><strong>hasApiKeyHeader:</strong> {hasApiKeyHeaderForCreateRequest ? 'true' : 'false'}</p>
+                  <p><strong>hasApiKey:</strong> {hasApiKeyForCreateRequest ? 'true' : 'false'}</p>
                   <p><strong>Upload endpoint:</strong> {endpointMap.upload}</p>
                   <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
                   <div className="actions-row">
@@ -718,7 +726,7 @@ export function ExamsPage() {
                       {pinging ? 'Testing…' : 'Ping API'}
                     </button>
                     <button type="button" onClick={() => void testCreateExamGet()} disabled={createExamGetTesting || isRunning}>
-                      {createExamGetTesting ? 'Testing…' : 'Test create exam (GET /exams-create)'}
+                      {createExamGetTesting ? 'Testing…' : 'Test create'}
                     </button>
                   </div>
                   {pingResult && (
