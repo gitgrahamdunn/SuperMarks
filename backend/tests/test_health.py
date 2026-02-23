@@ -38,3 +38,17 @@ def test_health_deep_returns_storage_and_db_diagnostics(monkeypatch) -> None:
     assert payload["storage_writable"] is True
     assert payload["db_ok"] is True
     assert payload["data_dir"] == str(settings.data_path)
+
+
+def test_health_cors_reports_origins_and_api_key_status(monkeypatch) -> None:
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://frontend.example.com,https://staging.example.com")
+    monkeypatch.setenv("BACKEND_API_KEY", "test-api-key")
+
+    with TestClient(app) as client:
+        response = client.get("/health/cors")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["origins"] == ["https://frontend.example.com", "https://staging.example.com"]
+    assert payload["has_api_key"] is True

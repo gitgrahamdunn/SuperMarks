@@ -23,9 +23,9 @@ from app.storage import ensure_dir
 
 def _resolve_cors_origins() -> list[str]:
     configured_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
-    if not configured_cors_origins:
-        return ["*"]
-    return [origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()]
+    if configured_cors_origins:
+        return [origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()]
+    return settings.cors_origin_list
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -67,6 +67,21 @@ def health() -> dict[str, bool]:
     return {"ok": True, "openai_configured": bool(openai_api_key.strip())}
 
 
+@app.get("/health/cors", tags=["meta"])
+def cors_health() -> dict[str, bool | list[str]]:
+    api_key = os.getenv("BACKEND_API_KEY", "")
+    return {
+        "ok": True,
+        "origins": _resolve_cors_origins(),
+        "has_api_key": bool(api_key.strip()),
+    }
+
+
+@app.get("/api/health", tags=["meta"], include_in_schema=False)
+def api_health() -> dict[str, bool]:
+    return health()
+
+
 @app.get("/health/deep", tags=["meta"])
 def deep_health() -> dict[str, bool | str]:
     openai_api_key = os.getenv("OPENAI_API_KEY", "")
@@ -101,5 +116,11 @@ def deep_health() -> dict[str, bool | str]:
 
 @app.options("/api/{path:path}", include_in_schema=False)
 async def api_preflight(path: str) -> Response:
+    del path
+    return Response(status_code=204)
+
+
+@app.options("/{path:path}", include_in_schema=False)
+async def preflight(path: str) -> Response:
     del path
     return Response(status_code=204)
