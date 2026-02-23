@@ -23,21 +23,6 @@ logger = logging.getLogger(__name__)
 class ParseResult:
     payload: dict[str, object]
     model: str
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_cost: float = 0.0
-
-
-OPENAI_PRICING: dict[str, dict[str, float]] = {
-    "gpt-5-nano": {
-        "input_per_token": 0.0000005,
-        "output_per_token": 0.0000015,
-    },
-    "gpt-5-mini": {
-        "input_per_token": 0.000002,
-        "output_per_token": 0.000006,
-    },
-}
 
 
 @dataclass
@@ -61,17 +46,6 @@ class SchemaBuildError(Exception):
 class AnswerKeyParser(Protocol):
     def parse(self, image_paths: list[Path], model: str, request_id: str) -> ParseResult:
         """Parse answer key images into structured data."""
-
-
-def compute_usage_cost(model: str, input_tokens: int, output_tokens: int) -> dict[str, float]:
-    rates = OPENAI_PRICING.get(model, {"input_per_token": 0.0, "output_per_token": 0.0})
-    input_cost = float(input_tokens) * float(rates["input_per_token"])
-    output_cost = float(output_tokens) * float(rates["output_per_token"])
-    return {
-        "input_cost": input_cost,
-        "output_cost": output_cost,
-        "total_cost": input_cost + output_cost,
-    }
 
 
 def _base_answer_key_schema() -> dict[str, Any]:
@@ -258,23 +232,18 @@ class OpenAIAnswerKeyParser:
             "Identify marks using patterns like [3 marks], (5 marks), /5, out of 5, 5 pts. "
             "For each question extract: label, max_marks, marks_source, marks_confidence, marks_reason, question_text, answer_key, model_solution, criteria[] with desc + marks, warnings[], and evidence[] boxes using normalized coordinates 0..1 plus page_number and kind. "
             "If marks are not explicit, make a best guess for max_marks and include uncertainty notes inside question_text or model_solution while still conforming to the schema. "
-            "Do NOT split a single question into multiple questions just because the answer key has multiple answer lines/steps. Only split when there is a clear new question label/number (Q2, 2., Question 2) or a new part marker (a), (b) if teacher uses parts. "
             "IMPORTANT: If any problem text exists but reliable question splitting is not possible, return exactly one fallback question with label='Q1', max_marks=0, criteria=[{\"desc\":\"Needs teacher review\",\"marks\":0}]. "
             "Return ONLY JSON matching the provided schema."
         )
 
-    def _call_openai_with_retry(self, request_payload: dict[str, object], model: str, request_id: str, batch_number: int) -> tuple[dict[str, object], int, int, float]:
+    def _call_openai_with_retry(self, request_payload: dict[str, object], model: str, request_id: str, batch_number: int) -> dict[str, object]:
         last_exc: OpenAIRequestError | None = None
         backoffs = self._mini_retry_backoffs_seconds if model.endswith("mini") else self._retry_backoffs_seconds
         attempts = len(backoffs) + 1
         for attempt in range(attempts):
             try:
                 response = self._client.responses.create(**request_payload)
-                usage = getattr(response, "usage", None)
-                input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-                output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-                costs = compute_usage_cost(model=model, input_tokens=input_tokens, output_tokens=output_tokens)
-                return json.loads(response.output_text), input_tokens, output_tokens, float(costs["total_cost"])
+                return json.loads(response.output_text)
             except Exception as exc:  # pragma: no cover
                 status_code = getattr(exc, "status_code", None)
                 if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
@@ -314,9 +283,6 @@ class OpenAIAnswerKeyParser:
         chunks = [indexed_paths[i : i + self._max_images_per_request] for i in range(0, len(indexed_paths), self._max_images_per_request)]
 
         payloads: list[dict[str, object]] = []
-        total_input_tokens = 0
-        total_output_tokens = 0
-        total_cost = 0.0
         for batch_number, chunk in enumerate(chunks, start=1):
             sub_batches: list[list[int]] = []
             current: list[int] = []
@@ -345,15 +311,7 @@ class OpenAIAnswerKeyParser:
                     schema=schema,
                 )
                 started = time.perf_counter()
-                response_payload, input_tokens, output_tokens, call_cost = self._call_openai_with_retry(
-                    request_payload,
-                    model=model,
-                    request_id=request_id,
-                    batch_number=batch_number,
-                )
-                total_input_tokens += input_tokens
-                total_output_tokens += output_tokens
-                total_cost += call_cost
+                response_payload = self._call_openai_with_retry(request_payload, model=model, request_id=request_id, batch_number=batch_number)
                 logger.info(
                     "key/parse openai page timing",
                     extra={
@@ -368,13 +326,7 @@ class OpenAIAnswerKeyParser:
                 payloads.append(response_payload)
 
         if len(payloads) == 1:
-            return ParseResult(
-                payload=payloads[0],
-                model=model,
-                input_tokens=total_input_tokens,
-                output_tokens=total_output_tokens,
-                total_cost=total_cost,
-            )
+            return ParseResult(payload=payloads[0], model=model)
 
         merged_questions: list[object] = []
         seen_labels: set[str] = set()
@@ -398,13 +350,7 @@ class OpenAIAnswerKeyParser:
             if isinstance(warnings, list):
                 merged_warnings.extend([str(item) for item in warnings])
         merged_confidence = min(confidence_scores) if confidence_scores else 0.0
-        return ParseResult(
-            payload={"confidence_score": merged_confidence, "questions": merged_questions, "warnings": merged_warnings},
-            model=model,
-            input_tokens=total_input_tokens,
-            output_tokens=total_output_tokens,
-            total_cost=total_cost,
-        )
+        return ParseResult(payload={"confidence_score": merged_confidence, "questions": merged_questions, "warnings": merged_warnings}, model=model)
 
     def parse(self, image_paths: list[Path], model: str, request_id: str) -> ParseResult:
         schema = build_answer_key_response_schema()

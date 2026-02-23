@@ -4,31 +4,20 @@ import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { ToastProvider } from './components/ToastProvider';
 import { checkBackendApiContract } from './api/client';
-import { ErrorBoundary } from './components/ErrorBoundary';
 import './styles.css';
 
-void checkBackendApiContract()
-  .then((result) => {
-    if (!result.ok) {
-      console.error('[SuperMarks] Backend contract check failed', {
-        message: result.message,
-        missingPaths: result.missingPaths,
-        diagnostics: result.diagnostics,
-      });
-    }
-  })
-  .catch((error) => {
-    console.error('[SuperMarks] Backend contract check crashed', error);
-  });
+void checkBackendApiContract().then((result) => {
+  if (!result.ok) {
+    console.warn('[SuperMarks] Non-blocking backend contract warning', result);
+  }
+});
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
-      <ErrorBoundary>
-        <ToastProvider>
-          <App />
-        </ToastProvider>
-      </ErrorBoundary>
+      <ToastProvider>
+        <App />
+      </ToastProvider>
     </BrowserRouter>
   </React.StrictMode>,
 );

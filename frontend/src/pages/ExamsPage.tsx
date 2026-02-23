@@ -1,16 +1,9 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import {
-  API_BASE_URL,
-  API_KEY,
-  ApiError,
-  ApiInvalidJsonError,
-  api,
-  buildApiUrl,
-} from '../api/client';
+import { API_BASE_URL, ApiError, api, buildApiUrl } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
-import type { ExamCostResponse, ExamRead } from '../types/api';
+import type { ExamRead } from '../types/api';
 
 type WizardStep = 'creating' | 'uploading' | 'building_pages' | 'parsing' | 'done';
 
@@ -27,32 +20,6 @@ type WizardError = {
   details: unknown;
 };
 
-type EndpointProbeResult = {
-  status: number | 'network-error';
-  proxyHeader: string | null;
-  body: string;
-  message?: string;
-};
-
-type CreateExamGetTestResult = {
-  status: number | 'network-error';
-  body: string;
-  message?: string;
-  loadFailedHint?: string;
-};
-
-type ProxySelfCheckResult = {
-  status: number | 'network-error';
-  headers: Record<string, string>;
-  body: string;
-  message?: string;
-};
-
-type PreflightTestResult = {
-  status: number | 'network-error';
-  proxyHeader: string | null;
-  message?: string;
-};
 
 type ParseErrorDetails = {
   stage?: string;
@@ -149,25 +116,6 @@ function extractParsedQuestionCount(parseResult: unknown): number {
   return 0;
 }
 
-
-function normalizeExamListResponse(response: unknown): { exams: ExamRead[]; usedFallback: boolean } {
-  if (Array.isArray(response)) {
-    return { exams: response as ExamRead[], usedFallback: false };
-  }
-
-  if (response && typeof response === 'object') {
-    const shaped = response as { exams?: unknown; items?: unknown };
-    if (Array.isArray(shaped.exams)) {
-      return { exams: shaped.exams as ExamRead[], usedFallback: false };
-    }
-    if (Array.isArray(shaped.items)) {
-      return { exams: shaped.items as ExamRead[], usedFallback: false };
-    }
-  }
-
-  return { exams: [], usedFallback: true };
-}
-
 function isNetworkFetchError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -184,8 +132,6 @@ export function ExamsPage() {
   const [isRunning, setIsRunning] = useState(false);
   const [step, setStep] = useState<WizardStep>('creating');
   const [wizardError, setWizardError] = useState<WizardError | null>(null);
-  const [examCosts, setExamCosts] = useState<Record<number, ExamCostResponse>>({});
-  const [parseSummaryMeta, setParseSummaryMeta] = useState<{ model: string; tokens: number; cost: number } | null>(null);
   const [createdExamId, setCreatedExamId] = useState<number | null>(null);
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
   const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
@@ -203,154 +149,10 @@ export function ExamsPage() {
   const hasSingleLargeFile = useMemo(() => modalFiles.some((file) => file.size > LARGE_FILE_BYTES), [modalFiles]);
   const totalTooLarge = totalFileBytes > LARGE_TOTAL_BYTES;
 
-  const [healthResult, setHealthResult] = useState<EndpointProbeResult | null>(null);
-  const [healthTesting, setHealthTesting] = useState(false);
-  const [openApiResult, setOpenApiResult] = useState<EndpointProbeResult | null>(null);
-  const [openApiTesting, setOpenApiTesting] = useState(false);
-  const [createExamGetTestResult, setCreateExamGetTestResult] = useState<CreateExamGetTestResult | null>(null);
-  const [createExamGetTesting, setCreateExamGetTesting] = useState(false);
-  const [hasApiKeyForCreateRequest, setHasApiKeyForCreateRequest] = useState<boolean>(Boolean(API_KEY));
-  const [proxySelfCheckResult, setProxySelfCheckResult] = useState<ProxySelfCheckResult | null>(null);
-  const [proxySelfCheckLoading, setProxySelfCheckLoading] = useState(false);
-  const [preflightTestResult, setPreflightTestResult] = useState<PreflightTestResult | null>(null);
-  const [preflightTesting, setPreflightTesting] = useState(false);
-
-  const endpointMap = {
-    create: '/api/exams-create',
-    upload: createdExamId ? `/api/exams/${createdExamId}/key/upload` : '/api/exams/{exam_id}/key/upload',
-    parse: createdExamId ? `/api/exams/${createdExamId}/key/parse` : '/api/exams/{exam_id}/key/parse',
-  };
-
-  const probeEndpoint = async (
-    endpoint: string,
-    setLoading: (loading: boolean) => void,
-    setResult: (result: EndpointProbeResult) => void,
-  ) => {
-    setLoading(true);
-    try {
-      const response = await fetch(endpoint);
-      const responseText = await response.text();
-      setResult({
-        status: response.status,
-        proxyHeader: response.headers.get('x-supermarks-proxy'),
-        body: responseText,
-      });
-    } catch (error) {
-      setResult({
-        status: 'network-error',
-        proxyHeader: null,
-        body: '',
-        message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const testHealth = async () => probeEndpoint('/api/health', setHealthTesting, setHealthResult);
-
-  const testOpenApi = async () => probeEndpoint('/api/openapi.json', setOpenApiTesting, setOpenApiResult);
-
-  const testCreateExamGet = async () => {
-    if (!API_KEY) {
-      setCreateExamGetTestResult({
-        status: 'network-error',
-        body: '',
-        message: 'Missing VITE_BACKEND_API_KEY',
-      });
-      return;
-    }
-
-    setCreateExamGetTesting(true);
-    try {
-      const response = await fetch(`/api/exams-create?name=${encodeURIComponent('Ping')}&key=${encodeURIComponent(API_KEY)}`, {
-        method: 'GET',
-      });
-      const responseText = await response.text();
-      setCreateExamGetTestResult({
-        status: response.status,
-        body: responseText,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-      const isLoadFailed = /load failed/i.test(message);
-      setCreateExamGetTestResult({
-        status: 'network-error',
-        body: '',
-        message,
-        loadFailedHint: isLoadFailed
-          ? 'This suggests the frontend function route is unavailable or blocked before reaching Vercel serverless runtime.'
-          : undefined,
-      });
-    } finally {
-      setCreateExamGetTesting(false);
-    }
-  };
-
-
-  const runProxySelfCheck = async () => {
-    setProxySelfCheckLoading(true);
-    try {
-      const response = await fetch('/api/whoami');
-      const responseText = await response.text();
-      const headers = Object.fromEntries(response.headers.entries());
-      setProxySelfCheckResult({
-        status: response.status,
-        headers,
-        body: responseText,
-      });
-    } catch (error) {
-      setProxySelfCheckResult({
-        status: 'network-error',
-        headers: {},
-        body: '',
-        message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      });
-    } finally {
-      setProxySelfCheckLoading(false);
-    }
-  };
-
-  const runPreflightTest = async () => {
-    setPreflightTesting(true);
-    try {
-      const response = await fetch('/api/exams', { method: 'OPTIONS' });
-      setPreflightTestResult({
-        status: response.status,
-        proxyHeader: response.headers.get('x-supermarks-proxy'),
-      });
-    } catch (error) {
-      setPreflightTestResult({
-        status: 'network-error',
-        proxyHeader: null,
-        message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      });
-    } finally {
-      setPreflightTesting(false);
-    }
-  };
-
   const loadExams = async () => {
     try {
       setLoading(true);
-      const fetchedExams = await api.getExams();
-      const normalized = normalizeExamListResponse(fetchedExams);
-      setExams(normalized.exams);
-
-      if (normalized.usedFallback) {
-        const shapePreview = JSON.stringify(fetchedExams).slice(0, 200);
-        console.error('Unexpected exams response shape', fetchedExams);
-        showError(`Unexpected exams response shape. Showing empty list. ${shapePreview}`);
-      }
-
-      const costEntries = await Promise.all(normalized.exams.map(async (exam) => {
-        try {
-          return [exam.id, await api.getExamCost(exam.id)] as const;
-        } catch {
-          return [exam.id, { total_cost: 0, total_tokens: 0, model_breakdown: {} }] as const;
-        }
-      }));
-      setExamCosts(Object.fromEntries(costEntries));
+      setExams(await api.getExams());
     } catch (loadError) {
       console.error('Failed to load exams', loadError);
       showError(loadError instanceof Error ? loadError.message : 'Failed to load exams');
@@ -362,13 +164,6 @@ export function ExamsPage() {
   useEffect(() => {
     void loadExams();
   }, []);
-
-  useEffect(() => {
-    if (!isModalOpen) return;
-    void testHealth();
-    void testOpenApi();
-    void runProxySelfCheck();
-  }, [isModalOpen]);
 
   const closeModal = () => {
     if (isRunning) {
@@ -387,9 +182,6 @@ export function ExamsPage() {
     setElapsedSeconds(0);
     setFailedSummary(null);
     setChecklistSteps(initChecklist());
-    setHasApiKeyForCreateRequest(Boolean(API_KEY));
-    setProxySelfCheckResult(null);
-    setPreflightTestResult(null);
   };
 
   const logStep = (entry: StepLog) => {
@@ -438,21 +230,6 @@ export function ExamsPage() {
       return;
     }
 
-    const hasApiKey = Boolean(API_KEY);
-    setHasApiKeyForCreateRequest(hasApiKey);
-    if (!hasApiKey) {
-      setWizardError({
-        summary: 'Step: creating | Status: missing-api-key',
-        details: {
-          step: 'creating',
-          message: 'Missing VITE_BACKEND_API_KEY',
-          hasApiKey: false,
-        },
-      });
-      showError('Missing VITE_BACKEND_API_KEY');
-      return;
-    }
-
     setWizardError(null);
     setParsedQuestionCount(null);
     setCreatedExamId(null);
@@ -469,9 +246,8 @@ export function ExamsPage() {
 
       setStep('creating');
       markChecklist('creating_exam', 'active');
-      const createEndpoint = '/api/exams-create';
-      const createName = modalName.trim() || `Untitled ${Date.now()}`;
-      const exam = await api.createExam(createName);
+      const createEndpoint = buildApiUrl('exams');
+      const exam = await api.createExam(modalName.trim());
       examId = exam.id;
       setCreatedExamId(exam.id);
       logStep({
@@ -545,12 +321,6 @@ export function ExamsPage() {
       showSuccess('Parse step succeeded.');
       const questionCount = extractParsedQuestionCount(parseOutcome.data);
       setParsedQuestionCount(questionCount);
-      const parsed = parseOutcome.data as { model_used?: string; usage?: { total_tokens?: number }; cost?: { total_cost?: number } };
-      setParseSummaryMeta({
-        model: parsed.model_used || "unknown",
-        tokens: parsed.usage?.total_tokens || 0,
-        cost: parsed.cost?.total_cost || 0,
-      });
       setStep('done');
       localStorage.setItem(`supermarks:lastParse:${exam.id}`, JSON.stringify(parseOutcome.data));
 
@@ -569,27 +339,18 @@ export function ExamsPage() {
       const stepName = step;
       const stepEndpoint =
         stepName === 'creating'
-          ? '/api/exams-create'
+          ? buildApiUrl('exams')
           : stepName === 'uploading' && examId
             ? buildApiUrl(`exams/${examId}/key/upload`)
-            : stepName === 'building_pages' && examId
-              ? buildApiUrl(`exams/${examId}/key/build-pages`)
-              : stepName === 'parsing' && examId
-                ? buildApiUrl(`exams/${examId}/key/parse`)
-                : buildApiUrl('unknown');
+            : stepName === 'parsing' && examId
+              ? buildApiUrl(`exams/${examId}/key/parse`)
+              : buildApiUrl('unknown');
 
       if (isNetworkFetchError(err)) {
-        const note = 'No backend logs implies request never sent (bad URL or browser abort)';
         const networkMessage = `Network request failed (browser blocked/aborted). Step: ${stepName}. URL: ${stepEndpoint}`;
         setWizardError({
           summary: `Step: ${stepName} | Status: network-error`,
-          details: {
-            step: stepName,
-            attemptedUrl: stepEndpoint,
-            errorName: err instanceof Error ? err.name : 'UnknownError',
-            errorMessage: err instanceof Error ? err.message : String(err),
-            note,
-          },
+          details: err instanceof Error ? err.stack || err.message : String(err),
         });
         logStep({
           step: stepName,
@@ -619,15 +380,7 @@ export function ExamsPage() {
         }
         setWizardError({
           summary: `Step: ${stepName} | Status: ${err.status}`,
-          details: {
-            step: stepName,
-            attemptedUrl: err.url,
-            errorName: err.name,
-            errorMessage: err.message,
-            responseStatus: err.status,
-            responseBodySnippet: details,
-            note: 'No backend logs implies request never sent (bad URL or browser abort)',
-          },
+          details,
         });
         logStep({
           step: stepName,
@@ -637,39 +390,11 @@ export function ExamsPage() {
           exceptionMessage: err.stack || err.message,
         });
         showError(`${stepName} failed (status ${err.status})`);
-      } else if (err instanceof ApiInvalidJsonError) {
-        setWizardError({
-          summary: `Step: ${stepName} | Status: invalid-json`,
-          details: {
-            step: stepName,
-            attemptedUrl: err.url,
-            errorName: err.name,
-            errorMessage: err.message,
-            responseContentType: err.contentType,
-            responseBodySnippet: err.responseBodySnippet || '<empty>',
-            note: 'JSON parse failed for create-exam response. Check backend response Content-Type and API base URL.',
-          },
-        });
-        logStep({
-          step: stepName,
-          endpointUrl: err.url,
-          status: 0,
-          responseSnippet: err.responseBodySnippet || '<empty>',
-          exceptionMessage: `${err.message} (Content-Type: ${err.contentType})`,
-        });
-        showError(`${stepName} failed due to invalid JSON response (Content-Type: ${err.contentType})`);
       } else {
         const details = err instanceof Error ? err.stack || err.message : 'Unknown error';
         setWizardError({
           summary: `Step: ${stepName} | Status: unknown`,
-          details: {
-            step: stepName,
-            attemptedUrl: stepEndpoint,
-            errorName: err instanceof Error ? err.name : 'UnknownError',
-            errorMessage: err instanceof Error ? err.message : String(err),
-            stackOrDetails: details,
-            note: 'No backend logs implies request never sent (bad URL or browser abort)',
-          },
+          details,
         });
         logStep({
           step: stepName,
@@ -696,10 +421,10 @@ export function ExamsPage() {
 
       {isModalOpen && (
         <div className="modal-backdrop">
-          <div className="card modal wizard-modal stack">
+          <div className="card modal stack">
             <h2>Enter Exam Key</h2>
             <p className="subtle-text wizard-step-banner">Current step: {isRunning ? step : 'ready'}</p>
-            <form onSubmit={onCreateAndUpload} className="stack wizard-modal-form" encType="multipart/form-data">
+            <form onSubmit={onCreateAndUpload} className="stack" encType="multipart/form-data">
               <label className="stack">
                 Exam name
                 <input
@@ -777,89 +502,14 @@ export function ExamsPage() {
               </div>
 
               {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
-              {parseSummaryMeta && (
-                <div className="subtle-text">
-                  <p>Model used: {parseSummaryMeta.model}</p>
-                  <p>Tokens: {parseSummaryMeta.tokens.toLocaleString()}</p>
-                  <p>Cost: ${parseSummaryMeta.cost.toFixed(4)}</p>
-                  {parseSummaryMeta.cost > 0.02 && <p className="warning-text">This key required higher model usage.</p>}
-                </div>
-              )}
               {failedSummary && <p className="warning-text">{failedSummary}</p>}
               {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
 
               <details>
-                <summary>Network diagnostics</summary>
+                <summary>Show details</summary>
                 <div className="subtle-text stack">
-                  <p><strong>window.location.origin:</strong> {window.location.origin}</p>
-                  <p><strong>Computed API_BASE:</strong> {API_BASE_URL}</p>
-                  <p><strong>API key present:</strong> {Boolean(API_KEY) ? 'true' : 'false'}</p>
-                  <p><strong>Create endpoint:</strong> {endpointMap.create}</p>
-                  <p><strong>hasApiKey:</strong> {hasApiKeyForCreateRequest ? 'true' : 'false'}</p>
-                  <p><strong>Upload endpoint:</strong> {endpointMap.upload}</p>
-                  <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
-                  <div className="actions-row">
-                    <button type="button" onClick={() => void testHealth()} disabled={healthTesting || isRunning}>
-                      {healthTesting ? 'Testing…' : 'GET /api/health'}
-                    </button>
-                    <button type="button" onClick={() => void testOpenApi()} disabled={openApiTesting || isRunning}>
-                      {openApiTesting ? 'Testing…' : 'GET /api/openapi.json'}
-                    </button>
-                    <button type="button" onClick={() => void testCreateExamGet()} disabled={createExamGetTesting || isRunning}>
-                      {createExamGetTesting ? 'Testing…' : 'Test create'}
-                    </button>
-                  </div>
-                  <div className="proxy-self-check stack">
-                    <h4>Proxy self-check</h4>
-                    <div className="actions-row">
-                      <button type="button" onClick={() => void runProxySelfCheck()} disabled={proxySelfCheckLoading || isRunning}>
-                        {proxySelfCheckLoading ? 'Checking…' : 'GET /api/whoami'}
-                      </button>
-                      <button type="button" onClick={() => void runPreflightTest()} disabled={preflightTesting || isRunning}>
-                        {preflightTesting ? 'Testing…' : 'Preflight test (OPTIONS /api/exams)'}
-                      </button>
-                    </div>
-                    {proxySelfCheckResult && (
-                      <div className="wizard-detail-block">
-                        <p><strong>whoami status:</strong> {proxySelfCheckResult.status}</p>
-                        <p><strong>whoami x-supermarks-proxy:</strong> {proxySelfCheckResult.headers['x-supermarks-proxy'] || '<missing>'}</p>
-                        <p><strong>whoami headers:</strong> {JSON.stringify(proxySelfCheckResult.headers)}</p>
-                        <p><strong>whoami body:</strong> {proxySelfCheckResult.body || '<empty>'}</p>
-                        {proxySelfCheckResult.message && <p><strong>whoami error:</strong> {proxySelfCheckResult.message}</p>}
-                      </div>
-                    )}
-                    {preflightTestResult && (
-                      <div className="wizard-detail-block">
-                        <p><strong>preflight status:</strong> {preflightTestResult.status}</p>
-                        <p><strong>preflight x-supermarks-proxy:</strong> {preflightTestResult.proxyHeader || '<missing>'}</p>
-                        {preflightTestResult.message && <p><strong>preflight error:</strong> {preflightTestResult.message}</p>}
-                      </div>
-                    )}
-                  </div>
-                  {healthResult && (
-                    <div className="wizard-detail-block">
-                      <p><strong>/api/health status:</strong> {healthResult.status}</p>
-                      <p><strong>/api/health x-supermarks-proxy:</strong> {healthResult.proxyHeader || '<missing>'}</p>
-                      <p><strong>/api/health body:</strong> {healthResult.body || '<empty>'}</p>
-                      {healthResult.message && <p><strong>/api/health error:</strong> {healthResult.message}</p>}
-                    </div>
-                  )}
-                  {openApiResult && (
-                    <div className="wizard-detail-block">
-                      <p><strong>/api/openapi.json status:</strong> {openApiResult.status}</p>
-                      <p><strong>/api/openapi.json x-supermarks-proxy:</strong> {openApiResult.proxyHeader || '<missing>'}</p>
-                      <p><strong>/api/openapi.json body:</strong> {(openApiResult.body || '<empty>').slice(0, 500)}</p>
-                      {openApiResult.message && <p><strong>/api/openapi.json error:</strong> {openApiResult.message}</p>}
-                    </div>
-                  )}
-                  {createExamGetTestResult && (
-                    <div className="wizard-detail-block">
-                      <p><strong>GET create status:</strong> {createExamGetTestResult.status}</p>
-                      <p><strong>GET create response:</strong> {createExamGetTestResult.body || '<empty>'}</p>
-                      {createExamGetTestResult.message && <p><strong>GET create error:</strong> {createExamGetTestResult.message}</p>}
-                      {createExamGetTestResult.loadFailedHint && <p><strong>Hint:</strong> {createExamGetTestResult.loadFailedHint}</p>}
-                    </div>
-                  )}
+                  <p>API base URL: {API_BASE_URL}</p>
+                  <p>Computed create endpoint: {buildApiUrl('exams')}</p>
                   {stepLogs.length === 0 && <p>No step details yet.</p>}
                   {stepLogs.map((entry, index) => (
                     <div key={`${entry.step}-${index}`} className="wizard-detail-block">
@@ -873,7 +523,7 @@ export function ExamsPage() {
                 </div>
               </details>
 
-              <div className="actions-row wizard-modal-footer">
+              <div className="actions-row">
                 <button type="submit" disabled={isRunning || (totalTooLarge && !allowLargeUpload)}>
                   {isRunning ? 'Working...' : 'Enter exam & parse'}
                 </button>
@@ -887,19 +537,13 @@ export function ExamsPage() {
       <div className="card">
         <h2>Exam List</h2>
         {loading && <p>Loading...</p>}
-        {!loading && exams.length === 0 && (
-          <div className="empty-state stack">
-            <p>No exams yet.</p>
-            <button type="button" onClick={() => setIsModalOpen(true)} disabled={isRunning}>Create your first exam</button>
-          </div>
-        )}
+        {!loading && exams.length === 0 && <p>No exams yet.</p>}
         <ul>
-          {Array.isArray(exams) ? exams.map((exam) => (
+          {exams.map((exam) => (
             <li key={exam.id}>
               <Link to={`/exams/${exam.id}`}>{exam.name}</Link>
-              {examCosts[exam.id] && <span className="subtle-text"> (${examCosts[exam.id].total_cost.toFixed(3)})</span>}
             </li>
-          )) : null}
+          ))}
         </ul>
       </div>
     </div>
