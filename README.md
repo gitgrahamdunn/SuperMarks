@@ -5,24 +5,27 @@ SuperMarks is organized as a two-project monorepo for Vercel:
 - `backend/`: FastAPI + SQLModel API deployed as a Python serverless project.
 - `frontend/`: Vite + React SPA deployed as a static frontend project.
 
-## Repository layout
+## Strategy Lock
 
-```text
-.
-├── backend/
-│   ├── app/
-│   ├── api/index.py
-│   ├── pyproject.toml
-│   ├── vercel.json
-│   └── README.md
-├── frontend/
-│   ├── src/
-│   ├── .env.production
-│   ├── vercel.json
-│   └── README.md
-├── .gitignore
-└── README.md
-```
+This repository is locked to **Strategy B: direct backend API calls only**.
+
+- Frontend must call backend using `VITE_API_BASE_URL=https://<backend>/api`.
+- No frontend `/api` proxy functions.
+- Do not add frontend `/api` rewrites.
+
+See `docs/ARCHITECTURE.md` for guardrails.
+
+## Required Environment Variables
+
+### Frontend
+
+- `VITE_API_BASE_URL=https://<backend-domain>/api`
+- `VITE_BACKEND_API_KEY=<backend-api-key>` (optional if backend auth is disabled)
+
+### Backend
+
+- `BACKEND_API_KEY=<backend-api-key>`
+- `CORS_ALLOW_ORIGINS=https://<frontend-domain>`
 
 ## Local development
 
@@ -45,7 +48,12 @@ npm install
 npm run dev
 ```
 
-The frontend API client defaults to same-origin `/api` (so production traffic stays on the frontend domain). For local development, set `VITE_API_BASE_URL` explicitly (for example `http://localhost:8000/api`).
+Set frontend `.env` with backend values:
+
+```bash
+VITE_API_BASE_URL=http://localhost:8000/api
+VITE_BACKEND_API_KEY=<your-local-key>
+```
 
 ## Vercel deployment (two projects)
 
@@ -60,9 +68,7 @@ The frontend API client defaults to same-origin `/api` (so production traffic st
 - Create a separate Vercel project with **Root Directory** = `frontend`
 - Build command: `npm run build`
 - Output directory: `dist`
-- SPA routing fallback is handled in `frontend/vercel.json`
-
-Do not set `VITE_API_BASE_URL` in frontend production env vars (or set it to an empty value) so production uses `/api` and the Vercel rewrite proxy.
+- SPA fallback routing is handled in `frontend/vercel.json`
 
 ## Deployment policy note
 

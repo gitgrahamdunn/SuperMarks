@@ -9,9 +9,27 @@ import type {
   SubmissionResults,
 } from '../types/api';
 
-const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
-const API_BASE_URL = import.meta.env.PROD ? '/api' : (configuredApiBaseUrl || '/api');
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
+const API_BASE_URL = configuredApiBaseUrl;
+const DEFAULT_TIMEOUT_MS = 20_000;
+const PARSE_TIMEOUT_MS = 60_000;
+
+function validateApiBaseUrl(baseUrl: string): string | null {
+  if (!baseUrl) {
+    return 'Missing VITE_API_BASE_URL (must be https://.../api).';
+  }
+  if (!/^https?:\/\//i.test(baseUrl)) {
+    return `Invalid VITE_API_BASE_URL: "${baseUrl}" must be an absolute http(s) URL ending in /api.`;
+  }
+  if (!/\/api\/?$/i.test(baseUrl)) {
+    return `Invalid VITE_API_BASE_URL: "${baseUrl}" must end with /api.`;
+  }
+  return null;
+}
+
+const API_CONFIG_ERROR = validateApiBaseUrl(API_BASE_URL);
+
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -62,7 +80,10 @@ function withApiKeyHeader(options: RequestInit = {}): RequestInit {
 }
 
 function getOpenApiSchemaUrl(): string {
-  return '/api/openapi.json';
+  if (API_CONFIG_ERROR) {
+    throw new Error(API_CONFIG_ERROR);
+  }
+  return `${API_BASE_URL.replace(/\/?api\/?$/i, '')}/openapi.json`;
 }
 
 function stripSnippet(text: string): string {
@@ -76,10 +97,42 @@ function joinUrl(base: string, path: string): string {
 }
 
 function buildApiUrl(path: string): string {
+  if (API_CONFIG_ERROR) {
+    throw new Error(API_CONFIG_ERROR);
+  }
   return joinUrl(API_BASE_URL, path);
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+function withTimeout(options: RequestInit, timeoutMs: number): RequestInit {
+  const controller = new AbortController();
+  const timeoutHandle = window.setTimeout(() => controller.abort(), timeoutMs);
+  const signal = options.signal;
+
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+
+  return {
+    ...options,
+    signal: controller.signal,
+    headers: options.headers,
+    // @ts-expect-error internal metadata
+    __timeoutHandle: timeoutHandle,
+  };
+}
+
+function clearTimeoutFromOptions(options: RequestInit): void {
+  const timeoutHandle = (options as RequestInit & { __timeoutHandle?: number }).__timeoutHandle;
+  if (timeoutHandle) {
+    window.clearTimeout(timeoutHandle);
+  }
+}
+
+async function request<T>(path: string, options: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+  if (API_CONFIG_ERROR) {
+    throw new Error(API_CONFIG_ERROR);
+  }
+
   const normalizedPath = path.replace(/^\/+/, '');
   if (!normalizedPath) {
     throw new Error(`Invalid API path: "${path}"`);
@@ -87,27 +140,28 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   const url = buildApiUrl(normalizedPath);
   const method = (options.method || 'GET').toUpperCase();
-  const response = await fetch(url, withApiKeyHeader(options));
-  if (!response.ok) {
-    const responseText = await response.text();
-    const responseBodySnippet = responseText.slice(0, 300);
-    let message = response.status === 401 ? 'Unauthorized (check API key config)' : `Request failed (${response.status})`;
-    try {
-      const body = JSON.parse(responseText) as { detail?: string };
-      if (body?.detail) {
-        message = body.detail;
-      }
-    } catch {
-      // ignore parse error
-    }
-    throw new ApiError(response.status, url, method, responseBodySnippet, `${message} [${response.status}] ${url}`);
-  }
+  const timedOptions = withTimeout(withApiKeyHeader(options), timeoutMs);
 
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    return (await response.json()) as T;
+  try {
+    const response = await fetch(url, timedOptions);
+    if (!response.ok) {
+      const responseText = await response.text();
+      throw buildErrorDetailsFromResponse(url, method, response.status, responseText);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      return (await response.json()) as T;
+    }
+    return {} as T;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(`Request timed out after ${Math.floor(timeoutMs / 1000)}s: ${method} ${url}`);
+    }
+    throw error;
+  } finally {
+    clearTimeoutFromOptions(timedOptions);
   }
-  return {} as T;
 }
 
 function buildErrorDetailsFromResponse(url: string, method: string, status: number, responseText: string): ApiError {
@@ -162,7 +216,6 @@ async function getOpenApiPaths(): Promise<Set<string>> {
     normalizedPathsFound: [],
     normalizedRequiredPaths: NORMALIZED_REQUIRED_BACKEND_PATHS,
   });
-  console.log(`[SuperMarks] Fetching backend OpenAPI schema from ${openApiUrl}`);
 
   try {
     const response = await fetch(openApiUrl, withApiKeyHeader());
@@ -175,22 +228,9 @@ async function getOpenApiPaths(): Promise<Set<string>> {
       normalizedPathsFound: [],
       normalizedRequiredPaths: NORMALIZED_REQUIRED_BACKEND_PATHS,
     });
-    console.log('[SuperMarks] OpenAPI fetch diagnostics', {
-      openApiUrl,
-      statusCode: response.status,
-      responseSnippet,
-    });
 
     if (!response.ok) {
       throw new Error(`Could not fetch backend OpenAPI at ${openApiUrl} (HTTP ${response.status})`);
-    }
-
-    const snippetLower = responseSnippet.toLowerCase();
-    if (snippetLower.startsWith('<!doctype') || snippetLower.startsWith('<html')) {
-      openApiFetchErrorMessage = 'Proxy rewrite likely not working: /api/openapi.json returned HTML';
-      console.error(`[SuperMarks] ${openApiFetchErrorMessage}`);
-      openApiPathCache = new Set<string>();
-      return openApiPathCache;
     }
 
     const data = JSON.parse(responseText) as { paths?: Record<string, unknown> };
@@ -206,9 +246,7 @@ async function getOpenApiPaths(): Promise<Set<string>> {
     });
     openApiFetchErrorMessage = null;
   } catch (error) {
-    if (!openApiFetchErrorMessage) {
-      openApiFetchErrorMessage = `Could not fetch backend OpenAPI at ${openApiUrl}`;
-    }
+    openApiFetchErrorMessage = `Could not fetch backend OpenAPI at ${openApiUrl}`;
     console.error(`[SuperMarks] ${openApiFetchErrorMessage}`, error);
     openApiPathCache = new Set<string>();
   }
@@ -235,11 +273,6 @@ async function checkBackendApiContract(): Promise<ApiContractCheckResult> {
     return { ok: true };
   }
 
-  console.error('[SuperMarks] Backend API contract mismatches detected', {
-    missingPaths,
-    availablePaths: [...paths].sort(),
-  });
-
   const firstMissing = missingPaths[0];
   return {
     ok: false,
@@ -247,6 +280,35 @@ async function checkBackendApiContract(): Promise<ApiContractCheckResult> {
     message: `Backend API contract mismatch: missing endpoint ${firstMissing}. Please sync backend and frontend.`,
     diagnostics: openApiFetchDiagnostics,
   };
+}
+
+export function maskApiBaseUrl(baseUrl: string): string {
+  if (!baseUrl) return '<missing>';
+  try {
+    const url = new URL(baseUrl);
+    const host = url.host.replace(/(^.).*?(\..*$)/, '$1***$2');
+    return `${url.protocol}//${host}${url.pathname}`;
+  } catch {
+    return '<invalid>';
+  }
+}
+
+export function getHealthPingUrl(): string {
+  if (API_CONFIG_ERROR) {
+    throw new Error(API_CONFIG_ERROR);
+  }
+  return `${API_BASE_URL.replace(/\/?api\/?$/i, '')}/health`;
+}
+
+export async function pingApiHealth(): Promise<{ status: number; body: string }> {
+  const url = getHealthPingUrl();
+  const response = await fetch(url, withApiKeyHeader(withTimeout({}, DEFAULT_TIMEOUT_MS)));
+  const body = await response.text();
+  return { status: response.status, body: body.slice(0, 300) };
+}
+
+export function getApiConfigError(): string | null {
+  return API_CONFIG_ERROR;
 }
 
 export function resetApiContractCheckCache(): void {
@@ -267,7 +329,7 @@ export const api = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
-  }),
+  }, DEFAULT_TIMEOUT_MS),
   getExamDetail: (examId: number) => request<ExamDetail>(`exams/${examId}`),
   addQuestion: (examId: number, label: string, max_marks: number) => request<QuestionRead>(`exams/${examId}/questions`, {
     method: 'POST',
@@ -279,19 +341,12 @@ export const api = {
     const formData = new FormData();
     formData.append('student_name', studentName);
     files.forEach((file) => formData.append('files', file));
-    return request<SubmissionRead>(`exams/${examId}/submissions`, {
-      method: 'POST',
-      body: formData,
-    });
+    return request<SubmissionRead>(`exams/${examId}/submissions`, { method: 'POST', body: formData }, DEFAULT_TIMEOUT_MS);
   },
   uploadExamKey: async (examId: number, files: File[]) => {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
-
-    return request<Record<string, unknown>>(`exams/${examId}/key/upload`, {
-      method: 'POST',
-      body: formData,
-    });
+    return request<Record<string, unknown>>(`exams/${examId}/key/upload`, { method: 'POST', body: formData }, DEFAULT_TIMEOUT_MS);
   },
   getExamQuestionsForReview: async (examId: number) => {
     const paths = await getOpenApiPaths();
@@ -304,37 +359,42 @@ export const api = {
     return examDetail.questions || [];
   },
 
-  buildExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST' }),
+  buildExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST' }, DEFAULT_TIMEOUT_MS),
   listExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/pages`),
   getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),
   completeExamKeyReview: (examId: number) => request<{ exam_id: number; status: string; warnings: string[] }>(`exams/${examId}/key/review/complete`, { method: 'POST' }),
-  parseExamKey: (examId: number) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST' }),
+  parseExamKey: (examId: number) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST' }, PARSE_TIMEOUT_MS),
   parseExamKeyRaw: async (examId: number) => {
     const path = `exams/${examId}/key/parse`;
     const url = buildApiUrl(path);
     const method = 'POST';
-    const response = await fetch(url, withApiKeyHeader({ method }));
-    const responseText = await response.text();
-
-    if (!response.ok) {
-      throw buildErrorDetailsFromResponse(url, method, response.status, responseText);
-    }
-
+    const timedOptions = withTimeout(withApiKeyHeader({ method }), PARSE_TIMEOUT_MS);
     try {
-      const data = JSON.parse(responseText) as unknown;
-      return {
-        data,
-        responseText,
-        status: response.status,
-        url,
-      };
-    } catch {
-      return {
-        data: null,
-        responseText,
-        status: response.status,
-        url,
-      };
+      const response = await fetch(url, timedOptions);
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        throw buildErrorDetailsFromResponse(url, method, response.status, responseText);
+      }
+
+      try {
+        const data = JSON.parse(responseText) as unknown;
+        return {
+          data,
+          responseText,
+          status: response.status,
+          url,
+        };
+      } catch {
+        return {
+          data: null,
+          responseText,
+          status: response.status,
+          url,
+        };
+      }
+    } finally {
+      clearTimeoutFromOptions(timedOptions);
     }
   },
   getSubmission: (submissionId: number) => request<SubmissionRead>(`submissions/${submissionId}`),

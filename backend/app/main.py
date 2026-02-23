@@ -6,6 +6,8 @@ from uuid import uuid4
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import Headers
+from starlette.responses import PlainTextResponse
 from fastapi.responses import Response
 from sqlalchemy import text
 from sqlmodel import Session
@@ -28,10 +30,16 @@ def _resolve_cors_origins() -> list[str]:
     return [origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()]
 
 
+class StrategyBCORSMiddleware(CORSMiddleware):
+    def preflight_response(self, request_headers: Headers) -> Response:
+        response = super().preflight_response(request_headers)
+        return PlainTextResponse("OK", status_code=204, headers=dict(response.headers))
+
+
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
 app.add_middleware(
-    CORSMiddleware,
+    StrategyBCORSMiddleware,
     allow_origins=_resolve_cors_origins(),
     allow_credentials=False,
     allow_methods=["*"],

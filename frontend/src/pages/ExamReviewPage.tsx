@@ -243,7 +243,7 @@ export function ExamReviewPage() {
         ) : (
           <div className="stack" style={{ gap: 8 }}>
             <p className="subtle-text">Image failed to load.</p>
-            <button type="button" onClick={() => window.open(`/api/exams/${examId}/key/page/1`, '_blank', 'noopener,noreferrer')}>
+            <button type="button" onClick={() => window.open(api.getExamKeyPageUrl(examId, 1), '_blank', 'noopener,noreferrer')}>
               Open key page
             </button>
           </div>
