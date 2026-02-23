@@ -4,6 +4,7 @@ export default async function handler(req, res) {
   // Handle OPTIONS locally (DO NOT FORWARD)
   if (req.method === "OPTIONS") {
     res.statusCode = 204;
+    res.setHeader("x-supermarks-proxy", "catchall-options");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization");
@@ -39,6 +40,8 @@ export default async function handler(req, res) {
     bodyBuf = chunks.length ? Buffer.concat(chunks) : null;
   }
 
+  res.setHeader("x-supermarks-proxy", "catchall");
+
   try {
     const resp = await fetch(target, {
       method: req.method,
@@ -52,7 +55,6 @@ export default async function handler(req, res) {
       if (key.toLowerCase() === "transfer-encoding") return;
       res.setHeader(key, value);
     });
-    res.setHeader("x-supermarks-proxy", "frontend-function");
 
     const buf = Buffer.from(await resp.arrayBuffer());
     res.end(buf);

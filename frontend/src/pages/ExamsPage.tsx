@@ -40,6 +40,19 @@ type CreateExamGetTestResult = {
   loadFailedHint?: string;
 };
 
+type ProxySelfCheckResult = {
+  status: number | 'network-error';
+  headers: Record<string, string>;
+  body: string;
+  message?: string;
+};
+
+type PreflightTestResult = {
+  status: number | 'network-error';
+  proxyHeader: string | null;
+  message?: string;
+};
+
 type ParseErrorDetails = {
   stage?: string;
   page_index?: number;
@@ -194,6 +207,10 @@ export function ExamsPage() {
   const [createExamGetTestResult, setCreateExamGetTestResult] = useState<CreateExamGetTestResult | null>(null);
   const [createExamGetTesting, setCreateExamGetTesting] = useState(false);
   const [hasApiKeyForCreateRequest, setHasApiKeyForCreateRequest] = useState<boolean>(Boolean(API_KEY));
+  const [proxySelfCheckResult, setProxySelfCheckResult] = useState<ProxySelfCheckResult | null>(null);
+  const [proxySelfCheckLoading, setProxySelfCheckLoading] = useState(false);
+  const [preflightTestResult, setPreflightTestResult] = useState<PreflightTestResult | null>(null);
+  const [preflightTesting, setPreflightTesting] = useState(false);
 
   const endpointMap = {
     create: '/api/exams-create',
@@ -257,6 +274,49 @@ export function ExamsPage() {
     }
   };
 
+
+  const runProxySelfCheck = async () => {
+    setProxySelfCheckLoading(true);
+    try {
+      const response = await fetch('/api/whoami');
+      const responseText = await response.text();
+      const headers = Object.fromEntries(response.headers.entries());
+      setProxySelfCheckResult({
+        status: response.status,
+        headers,
+        body: responseText,
+      });
+    } catch (error) {
+      setProxySelfCheckResult({
+        status: 'network-error',
+        headers: {},
+        body: '',
+        message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
+    } finally {
+      setProxySelfCheckLoading(false);
+    }
+  };
+
+  const runPreflightTest = async () => {
+    setPreflightTesting(true);
+    try {
+      const response = await fetch('/api/exams', { method: 'OPTIONS' });
+      setPreflightTestResult({
+        status: response.status,
+        proxyHeader: response.headers.get('x-supermarks-proxy'),
+      });
+    } catch (error) {
+      setPreflightTestResult({
+        status: 'network-error',
+        proxyHeader: null,
+        message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
+    } finally {
+      setPreflightTesting(false);
+    }
+  };
+
   const loadExams = async () => {
     try {
       setLoading(true);
@@ -293,6 +353,7 @@ export function ExamsPage() {
   useEffect(() => {
     if (!isModalOpen) return;
     void pingApi();
+    void runProxySelfCheck();
   }, [isModalOpen]);
 
   const closeModal = () => {
@@ -313,6 +374,8 @@ export function ExamsPage() {
     setFailedSummary(null);
     setChecklistSteps(initChecklist());
     setHasApiKeyForCreateRequest(Boolean(API_KEY));
+    setProxySelfCheckResult(null);
+    setPreflightTestResult(null);
   };
 
   const logStep = (entry: StepLog) => {
@@ -728,6 +791,33 @@ export function ExamsPage() {
                     <button type="button" onClick={() => void testCreateExamGet()} disabled={createExamGetTesting || isRunning}>
                       {createExamGetTesting ? 'Testing…' : 'Test create'}
                     </button>
+                  </div>
+                  <div className="proxy-self-check stack">
+                    <h4>Proxy self-check</h4>
+                    <div className="actions-row">
+                      <button type="button" onClick={() => void runProxySelfCheck()} disabled={proxySelfCheckLoading || isRunning}>
+                        {proxySelfCheckLoading ? 'Checking…' : 'GET /api/whoami'}
+                      </button>
+                      <button type="button" onClick={() => void runPreflightTest()} disabled={preflightTesting || isRunning}>
+                        {preflightTesting ? 'Testing…' : 'Preflight test (OPTIONS /api/exams)'}
+                      </button>
+                    </div>
+                    {proxySelfCheckResult && (
+                      <div className="wizard-detail-block">
+                        <p><strong>whoami status:</strong> {proxySelfCheckResult.status}</p>
+                        <p><strong>whoami x-supermarks-proxy:</strong> {proxySelfCheckResult.headers['x-supermarks-proxy'] || '<missing>'}</p>
+                        <p><strong>whoami headers:</strong> {JSON.stringify(proxySelfCheckResult.headers)}</p>
+                        <p><strong>whoami body:</strong> {proxySelfCheckResult.body || '<empty>'}</p>
+                        {proxySelfCheckResult.message && <p><strong>whoami error:</strong> {proxySelfCheckResult.message}</p>}
+                      </div>
+                    )}
+                    {preflightTestResult && (
+                      <div className="wizard-detail-block">
+                        <p><strong>preflight status:</strong> {preflightTestResult.status}</p>
+                        <p><strong>preflight x-supermarks-proxy:</strong> {preflightTestResult.proxyHeader || '<missing>'}</p>
+                        {preflightTestResult.message && <p><strong>preflight error:</strong> {preflightTestResult.message}</p>}
+                      </div>
+                    )}
                   </div>
                   {pingResult && (
                     <div className="wizard-detail-block">
