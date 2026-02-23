@@ -195,9 +195,9 @@ export function ExamsPage() {
   const [createExamGetTesting, setCreateExamGetTesting] = useState(false);
 
   const endpointMap = {
-    create: buildApiUrl('exams-create'),
-    upload: createdExamId ? buildApiUrl(`exams/${createdExamId}/key/upload`) : buildApiUrl('exams/{exam_id}/key/upload'),
-    parse: createdExamId ? buildApiUrl(`exams/${createdExamId}/key/parse`) : buildApiUrl('exams/{exam_id}/key/parse'),
+    create: '/api/exams-create',
+    upload: createdExamId ? `/api/exams/${createdExamId}/key/upload` : '/api/exams/{exam_id}/key/upload',
+    parse: createdExamId ? `/api/exams/${createdExamId}/key/parse` : '/api/exams/{exam_id}/key/parse',
   };
 
   const pingApi = async () => {
@@ -223,7 +223,7 @@ export function ExamsPage() {
   const testCreateExamGet = async () => {
     setCreateExamGetTesting(true);
     try {
-      const response = await fetch(buildApiUrl(`exams-create?name=${encodeURIComponent(`Ping ${Date.now()}`)}`), {
+      const response = await fetch(`/api/exams-create?name=${encodeURIComponent(`Ping ${Date.now()}`)}`, {
         method: 'GET',
         headers: API_KEY ? { 'X-API-Key': API_KEY } : undefined,
       });
@@ -367,7 +367,7 @@ export function ExamsPage() {
 
       setStep('creating');
       markChecklist('creating_exam', 'active');
-      const createEndpoint = buildApiUrl('exams-create');
+      const createEndpoint = '/api/exams-create';
       const createName = modalName.trim() || `Untitled ${Date.now()}`;
       const exam = await api.createExam(createName);
       examId = exam.id;
@@ -467,7 +467,7 @@ export function ExamsPage() {
       const stepName = step;
       const stepEndpoint =
         stepName === 'creating'
-          ? buildApiUrl('exams-create')
+          ? '/api/exams-create'
           : stepName === 'uploading' && examId
             ? buildApiUrl(`exams/${examId}/key/upload`)
             : stepName === 'building_pages' && examId
