@@ -46,9 +46,15 @@ function resolveTargetUrl(req, backendOrigin) {
     return null;
   }
 
-  const baseUrl = subPath === 'openapi.json'
-    ? `${backendOrigin}/openapi.json`
-    : `${backendOrigin}/api/${subPath}`;
+  if (subPath === 'health') {
+    return `${backendOrigin}/health${requestUrl.search || ''}`;
+  }
+
+  if (subPath === 'openapi.json') {
+    return `${backendOrigin}/openapi.json${requestUrl.search || ''}`;
+  }
+
+  const baseUrl = `${backendOrigin}/api/${subPath}`;
 
   return `${baseUrl}${requestUrl.search || ''}`;
 }
@@ -56,6 +62,27 @@ function resolveTargetUrl(req, backendOrigin) {
 export default async function handler(req, res) {
   try {
     const backendOrigin = (process.env.BACKEND_ORIGIN || 'https://super-marks-2-backend.vercel.app').replace(/\/+$/, '');
+    const pathParam = req.query?.path;
+    const pathSegments = Array.isArray(pathParam) ? pathParam : [pathParam].filter(Boolean);
+    const subPath = pathSegments.join('/');
+
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204;
+      res.setHeader('access-control-allow-origin', '*');
+      res.setHeader('access-control-allow-methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      res.setHeader('access-control-allow-headers', 'Content-Type, X-API-Key, Authorization');
+      res.end();
+      return;
+    }
+
+    if (subPath === 'proxy-health') {
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.setHeader('x-supermarks-proxy', 'repo-root-function');
+      res.end(JSON.stringify({ ok: true, backend: backendOrigin }));
+      return;
+    }
+
     const targetUrl = resolveTargetUrl(req, backendOrigin);
 
     if (!targetUrl) {
