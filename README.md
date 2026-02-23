@@ -47,13 +47,6 @@ npm run dev
 
 The frontend API client defaults to same-origin `/api` (so production traffic stays on the frontend domain). For local development, set `VITE_API_BASE_URL` explicitly (for example `http://localhost:8000/api`).
 
-### API Routing (Important)
-
-This project uses Strategy A: frontend serverless proxy.
-See `docs/ARCHITECTURE.md`.
-
-Do not modify `/api` routing without reading that document.
-
 ## Vercel deployment (two projects)
 
 ### 1) Backend project
@@ -69,18 +62,9 @@ Do not modify `/api` routing without reading that document.
 - Output directory: `dist`
 - SPA routing fallback is handled in `frontend/vercel.json`
 
-Do not set `VITE_API_BASE_URL` in frontend production env vars (or set it to an empty value) so production uses same-origin `/api` via frontend serverless proxy functions.
+Do not set `VITE_API_BASE_URL` in frontend production env vars (or set it to an empty value) so production uses `/api` and the Vercel rewrite proxy.
 
 ## Deployment policy note
 
 Git-based automatic deployments are disabled for both Vercel projects to avoid Hobby plan deployment-cap limits.
 When you are ready to ship, deploy manually from the Vercel UI using **Redeploy**.
-
-## API proxy routing
-
-Repo-root Vercel functions in `api/*.js` own all `/api/*` routes for the frontend domain.
-This keeps `/api` traffic out of SPA fallback routing and ensures frontend requests always reach serverless proxy functions.
-
-- `GET /api/proxy-health` -> health response from repo-root function
-- `GET /api/exams-create` -> POST passthrough helper to backend `/api/exams`
-- `GET/POST/... /api/*` -> catch-all proxy to backend (`/api/openapi.json` maps to backend `/openapi.json`)

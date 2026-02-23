@@ -27,31 +27,12 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(17, 24, 39, 0.45); display: grid; place-items: center; z-index: 15; }
 .modal { width: min(560px, calc(100vw - 2rem)); }
-.wizard-modal { max-height: 85vh; overflow-y: auto; }
-.wizard-modal-form { min-height: 0; }
-.wizard-modal-footer { position: sticky; bottom: 0; background: #fff; padding-top: .5rem; margin-top: .25rem; border-top: 1px solid #e5e7eb; }
 .subtle-text { color: #4b5563; margin: 0; font-size: .95rem; }
 .review-card { max-width: 760px; margin-inline: auto; }
 .criteria-block { border: 1px solid #e5e7eb; border-radius: 6px; padding: .75rem; }
 .criteria-header { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
 .criteria-header h3 { margin: 0; font-size: 1rem; }
 .criteria-row { display: grid; grid-template-columns: 1fr 120px auto; gap: .5rem; align-items: center; }
-
-.question-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: .5rem;
-}
-.question-list-item {
-  text-align: left;
-  background: #fff;
-  color: #111827;
-}
-.question-list-item.active {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 1px #2563eb;
-}
-
 
 @media (max-width: 640px) {
   .layout { padding: .75rem; }
@@ -236,31 +217,4 @@ pre { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; paddin
 
 .wizard-checklist-item.status-failed {
   color: #b91c1c;
-}
-
-.empty-state {
-  border: 1px dashed #d1d5db;
-  border-radius: 8px;
-  padding: .8rem;
-  background: #f9fafb;
-}
-
-.app-error-screen {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 1rem;
-}
-
-.app-error-card {
-  width: min(560px, 100%);
-  border: 1px solid #fecaca;
-  border-radius: 10px;
-  background: #fff;
-  padding: 1.2rem;
-}
-
-.app-error-card h1 {
-  margin-top: 0;
-  color: #991b1b;
 }

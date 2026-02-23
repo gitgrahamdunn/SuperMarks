@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, getOpenApiPaths } from '../api/client';
 import { EvidenceOverlayCanvas, type EvidenceBox } from '../components/EvidenceOverlayCanvas';
 import { useToast } from '../components/ToastProvider';
-import type { ParseCost, ParseUsage, QuestionRead } from '../types/api';
+import type { QuestionRead } from '../types/api';
 
 interface Criterion {
   desc: string;
@@ -11,14 +11,6 @@ interface Criterion {
 }
 
 type MarksSource = 'explicit' | 'inferred' | 'unknown';
-
-
-
-interface ParseMeta {
-  model_used: string;
-  usage: ParseUsage;
-  cost: ParseCost;
-}
 
 interface EditableQuestion {
   needs_review: boolean;
@@ -41,9 +33,6 @@ export function ExamReviewPage() {
   const [saving, setSaving] = useState(false);
   const [saveAvailable, setSaveAvailable] = useState(true);
   const [previewError, setPreviewError] = useState(false);
-  const [showSplitDialog, setShowSplitDialog] = useState(false);
-  const [criteriaSplitIndex, setCriteriaSplitIndex] = useState(1);
-  const [parseMeta, setParseMeta] = useState<ParseMeta | null>(null);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
 
@@ -57,18 +46,6 @@ export function ExamReviewPage() {
 
       try {
         setLoading(true);
-        const storageKey = `supermarks:lastParse:${examId}`;
-        const storedParse = localStorage.getItem(storageKey);
-        if (storedParse) {
-          try {
-            const parsed = JSON.parse(storedParse) as Partial<ParseMeta>;
-            if (parsed?.model_used && parsed?.usage && parsed?.cost) {
-              setParseMeta(parsed as ParseMeta);
-            }
-          } catch {
-            setParseMeta(null);
-          }
-        }
         const [fetchedQuestions, paths] = await Promise.all([
           api.getExamQuestionsForReview(examId),
           getOpenApiPaths(),
@@ -112,8 +89,6 @@ export function ExamReviewPage() {
 
   useEffect(() => {
     setPreviewError(false);
-    setShowSplitDialog(false);
-    setCriteriaSplitIndex(1);
   }, [currentIndex]);
 
   const currentQuestion = questions[currentIndex];
@@ -229,53 +204,6 @@ export function ExamReviewPage() {
     }
   };
 
-  const refreshQuestions = async (focusQuestionId?: number) => {
-    const fetchedQuestions = await api.getExamQuestionsForReview(examId);
-    const mapped = fetchedQuestions.map(mapQuestion);
-    setQuestions(mapped);
-    if (mapped.length === 0) {
-      setCurrentIndex(0);
-      return;
-    }
-    if (focusQuestionId) {
-      const foundIndex = mapped.findIndex((item) => item.id === focusQuestionId);
-      if (foundIndex >= 0) {
-        setCurrentIndex(foundIndex);
-        return;
-      }
-    }
-    setCurrentIndex((prev) => Math.min(prev, mapped.length - 1));
-  };
-
-  const onMergeWithNext = async () => {
-    if (!currentQuestion || currentIndex >= questions.length - 1) return;
-    try {
-      setSaving(true);
-      const result = await api.mergeQuestionWithNext(examId, currentQuestion.id);
-      await refreshQuestions(result.question.id);
-      showSuccess('Merged with next question.');
-    } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to merge question');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const onSplitByCriteria = async () => {
-    if (!currentQuestion) return;
-    try {
-      setSaving(true);
-      const result = await api.splitQuestionByCriteria(examId, currentQuestion.id, criteriaSplitIndex);
-      await refreshQuestions(result.original.id);
-      setShowSplitDialog(false);
-      showSuccess('Question split into two.');
-    } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to split question');
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const canGoBack = currentIndex > 0;
   const canGoNext = currentIndex < questions.length - 1;
   const criteriaTotalMarks = useMemo(
@@ -283,8 +211,6 @@ export function ExamReviewPage() {
     [currentQuestion],
   );
   const marksSuggestion = useMemo(() => (currentQuestion ? getMarksSuggestion(currentQuestion) : null), [currentQuestion]);
-
-  const isHighUsage = (parseMeta?.cost.total_cost || 0) > 0.02;
 
   if (loading) {
     return <p>Loading review...</p>;
@@ -304,55 +230,6 @@ export function ExamReviewPage() {
       <p><Link to={`/exams/${examId}`}>← Back to Exam</Link></p>
       <h1>Create Exam Wizard: Review Questions</h1>
       <p>Question {currentIndex + 1} of {questions.length}</p>
-      {parseMeta && (
-        <div className="subtle-text">
-          <p>Model used: {parseMeta.model_used}</p>
-          <p>Tokens: {parseMeta.usage.total_tokens.toLocaleString()}</p>
-          <p>Cost: ${parseMeta.cost.total_cost.toFixed(4)}</p>
-          {isHighUsage && <p className="warning-text">This key required higher model usage.</p>}
-        </div>
-      )}
-
-      <div className="question-list">
-        {questions.map((question, index) => (
-          <button
-            key={question.id}
-            type="button"
-            className={`question-list-item ${index === currentIndex ? 'active' : ''}`}
-            onClick={() => setCurrentIndex(index)}
-          >
-            <strong>{question.label || `Q${index + 1}`}</strong> · {question.max_marks} marks
-            <div className="subtle-text">{String(question.rubric_json.question_text || '').slice(0, 72) || 'No text preview'}</div>
-          </button>
-        ))}
-      </div>
-
-      <div className="stack criteria-block">
-        <div className="criteria-header">
-          <h3>Question tools</h3>
-        </div>
-        <div className="actions-row">
-          {currentIndex < questions.length - 1 && (
-            <button type="button" onClick={onMergeWithNext} disabled={saving}>Merge with next</button>
-          )}
-          <button type="button" onClick={() => setShowSplitDialog((v) => !v)} disabled={saving || currentQuestion.criteria.length < 2}>Split into two</button>
-        </div>
-        {showSplitDialog && (
-          <div className="stack">
-            <label className="stack">
-              Split mode
-              <select value="criteria_index" disabled>
-                <option value="criteria_index">Split criteria list at item #N</option>
-              </select>
-            </label>
-            <label className="stack">
-              Split index (first N criteria stay in current question)
-              <input type="number" min={1} max={Math.max(1, currentQuestion.criteria.length - 1)} value={criteriaSplitIndex} onChange={(e) => setCriteriaSplitIndex(Number(e.target.value))} />
-            </label>
-            <button type="button" onClick={onSplitByCriteria} disabled={criteriaSplitIndex < 1 || criteriaSplitIndex >= currentQuestion.criteria.length || saving}>Confirm split</button>
-          </div>
-        )}
-      </div>
 
       <div className="stack" style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: 10, background: '#f8fafc' }}>
         <label><input type="checkbox" checked={!previewError && (currentQuestion.evidence?.length ?? 0) > 0} readOnly /> Evidence loaded</label>
@@ -397,7 +274,7 @@ export function ExamReviewPage() {
 
       <div className="stack criteria-block">
         <div className="criteria-header">
-          <h3>Scoring criteria</h3>
+          <h3>Criteria</h3>
           <button type="button" onClick={onAddCriterion}>+ Add criterion</button>
         </div>
         {currentQuestion.criteria.length === 0 && <p className="subtle-text">No criteria yet.</p>}
