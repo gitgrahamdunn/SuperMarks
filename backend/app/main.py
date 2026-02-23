@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi import Depends
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from sqlalchemy import text
@@ -19,24 +20,29 @@ from app.routers.questions import router as questions_router
 from app.routers.submissions import router as submissions_router
 from app.settings import settings
 from app.storage import ensure_dir
-
-
-def _resolve_cors_origins() -> list[str]:
-    configured_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
-    if configured_cors_origins:
-        return [origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()]
-    return settings.cors_origin_list
-
-
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_resolve_cors_origins(),
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+
+@app.middleware("http")
+async def force_api_options_204(request: Request, call_next):
+    if request.method == "OPTIONS" and request.url.path.startswith("/api/"):
+        origin = request.headers.get("origin", "*") or "*"
+        requested_headers = request.headers.get("access-control-request-headers", "*") or "*"
+        response = Response(status_code=204)
+        response.headers["Access-Control-Allow-Origin"] = "*" if origin == "*" else origin
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = requested_headers
+        return response
+    return await call_next(request)
 
 app.include_router(public_exams_router, prefix="/api")
 app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_api_key)])
@@ -72,7 +78,7 @@ def cors_health() -> dict[str, bool | list[str]]:
     api_key = os.getenv("BACKEND_API_KEY", "")
     return {
         "ok": True,
-        "origins": _resolve_cors_origins(),
+        "origins": ["*"],
         "has_api_key": bool(api_key.strip()),
     }
 
@@ -112,6 +118,12 @@ def deep_health() -> dict[str, bool | str]:
         "data_dir": str(data_dir),
         "db_ok": db_ok,
     }
+
+
+@app.options("/api/exams/{exam_id}/key/upload", include_in_schema=False)
+async def upload_preflight(exam_id: int) -> Response:
+    del exam_id
+    return Response(status_code=204)
 
 
 @app.options("/api/{path:path}", include_in_schema=False)
