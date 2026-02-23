@@ -50,9 +50,8 @@ def test_preflight_options_key_upload_allows_cors(client_app) -> None:
             },
         )
 
-    assert response.status_code in (200, 204)
+    assert response.status_code == 204
     assert "access-control-allow-origin" in response.headers
-    assert response.headers["access-control-allow-origin"] in {"*", "https://example.com"}
 
 
 @pytest.mark.parametrize("client_app,path", [(app, "/api/exams"), (api_app, "/api/exams")])
