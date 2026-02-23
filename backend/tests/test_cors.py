@@ -38,6 +38,23 @@ def test_preflight_options_exams_allows_cors(client_app, path: str) -> None:
     assert "access-control-allow-headers" in response.headers
 
 
+@pytest.mark.parametrize("client_app", [app, api_app])
+def test_preflight_options_key_upload_allows_cors(client_app) -> None:
+    with TestClient(client_app) as client:
+        response = client.options(
+            "/api/exams/1/key/upload",
+            headers={
+                "Origin": "https://example.com",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-api-key",
+            },
+        )
+
+    assert response.status_code in (200, 204)
+    assert "access-control-allow-origin" in response.headers
+    assert response.headers["access-control-allow-origin"] in {"*", "https://example.com"}
+
+
 @pytest.mark.parametrize("client_app,path", [(app, "/api/exams"), (api_app, "/api/exams")])
 def test_post_exams_still_available_after_preflight(client_app, path: str) -> None:
     with TestClient(client_app) as client:
