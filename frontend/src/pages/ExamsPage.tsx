@@ -27,8 +27,9 @@ type WizardError = {
   details: unknown;
 };
 
-type PingResult = {
+type EndpointProbeResult = {
   status: number | 'network-error';
+  proxyHeader: string | null;
   body: string;
   message?: string;
 };
@@ -202,8 +203,10 @@ export function ExamsPage() {
   const hasSingleLargeFile = useMemo(() => modalFiles.some((file) => file.size > LARGE_FILE_BYTES), [modalFiles]);
   const totalTooLarge = totalFileBytes > LARGE_TOTAL_BYTES;
 
-  const [pingResult, setPingResult] = useState<PingResult | null>(null);
-  const [pinging, setPinging] = useState(false);
+  const [healthResult, setHealthResult] = useState<EndpointProbeResult | null>(null);
+  const [healthTesting, setHealthTesting] = useState(false);
+  const [openApiResult, setOpenApiResult] = useState<EndpointProbeResult | null>(null);
+  const [openApiTesting, setOpenApiTesting] = useState(false);
   const [createExamGetTestResult, setCreateExamGetTestResult] = useState<CreateExamGetTestResult | null>(null);
   const [createExamGetTesting, setCreateExamGetTesting] = useState(false);
   const [hasApiKeyForCreateRequest, setHasApiKeyForCreateRequest] = useState<boolean>(Boolean(API_KEY));
@@ -218,25 +221,35 @@ export function ExamsPage() {
     parse: createdExamId ? `/api/exams/${createdExamId}/key/parse` : '/api/exams/{exam_id}/key/parse',
   };
 
-  const pingApi = async () => {
-    setPinging(true);
+  const probeEndpoint = async (
+    endpoint: string,
+    setLoading: (loading: boolean) => void,
+    setResult: (result: EndpointProbeResult) => void,
+  ) => {
+    setLoading(true);
     try {
-      const response = await fetch(buildApiUrl('health'));
-      const responseJson = await response.json();
-      setPingResult({
+      const response = await fetch(endpoint);
+      const responseText = await response.text();
+      setResult({
         status: response.status,
-        body: JSON.stringify(responseJson),
+        proxyHeader: response.headers.get('x-supermarks-proxy'),
+        body: responseText,
       });
     } catch (error) {
-      setPingResult({
+      setResult({
         status: 'network-error',
+        proxyHeader: null,
         body: '',
         message: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       });
     } finally {
-      setPinging(false);
+      setLoading(false);
     }
   };
+
+  const testHealth = async () => probeEndpoint('/api/health', setHealthTesting, setHealthResult);
+
+  const testOpenApi = async () => probeEndpoint('/api/openapi.json', setOpenApiTesting, setOpenApiResult);
 
   const testCreateExamGet = async () => {
     if (!API_KEY) {
@@ -352,7 +365,8 @@ export function ExamsPage() {
 
   useEffect(() => {
     if (!isModalOpen) return;
-    void pingApi();
+    void testHealth();
+    void testOpenApi();
     void runProxySelfCheck();
   }, [isModalOpen]);
 
@@ -785,8 +799,11 @@ export function ExamsPage() {
                   <p><strong>Upload endpoint:</strong> {endpointMap.upload}</p>
                   <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
                   <div className="actions-row">
-                    <button type="button" onClick={() => void pingApi()} disabled={pinging || isRunning}>
-                      {pinging ? 'Testing…' : 'Ping API'}
+                    <button type="button" onClick={() => void testHealth()} disabled={healthTesting || isRunning}>
+                      {healthTesting ? 'Testing…' : 'GET /api/health'}
+                    </button>
+                    <button type="button" onClick={() => void testOpenApi()} disabled={openApiTesting || isRunning}>
+                      {openApiTesting ? 'Testing…' : 'GET /api/openapi.json'}
                     </button>
                     <button type="button" onClick={() => void testCreateExamGet()} disabled={createExamGetTesting || isRunning}>
                       {createExamGetTesting ? 'Testing…' : 'Test create'}
@@ -819,11 +836,20 @@ export function ExamsPage() {
                       </div>
                     )}
                   </div>
-                  {pingResult && (
+                  {healthResult && (
                     <div className="wizard-detail-block">
-                      <p><strong>GET status:</strong> {pingResult.status}</p>
-                      <p><strong>GET response:</strong> {pingResult.body || '<empty>'}</p>
-                      {pingResult.message && <p><strong>GET error:</strong> {pingResult.message}</p>}
+                      <p><strong>/api/health status:</strong> {healthResult.status}</p>
+                      <p><strong>/api/health x-supermarks-proxy:</strong> {healthResult.proxyHeader || '<missing>'}</p>
+                      <p><strong>/api/health body:</strong> {healthResult.body || '<empty>'}</p>
+                      {healthResult.message && <p><strong>/api/health error:</strong> {healthResult.message}</p>}
+                    </div>
+                  )}
+                  {openApiResult && (
+                    <div className="wizard-detail-block">
+                      <p><strong>/api/openapi.json status:</strong> {openApiResult.status}</p>
+                      <p><strong>/api/openapi.json x-supermarks-proxy:</strong> {openApiResult.proxyHeader || '<missing>'}</p>
+                      <p><strong>/api/openapi.json body:</strong> {(openApiResult.body || '<empty>').slice(0, 500)}</p>
+                      {openApiResult.message && <p><strong>/api/openapi.json error:</strong> {openApiResult.message}</p>}
                     </div>
                   )}
                   {createExamGetTestResult && (
