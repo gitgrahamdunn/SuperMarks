@@ -163,6 +163,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 
 async function createExamRequest(name: string): Promise<ExamRead> {
+  if (!API_KEY) {
+    throw new Error('Missing VITE_BACKEND_API_KEY');
+  }
+
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 20_000);
 

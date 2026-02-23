@@ -15,6 +15,14 @@ export default async function handler(req, res) {
     });
 
     const body = await response.text();
+
+    if (response.status === 401) {
+      res.statusCode = 401;
+      res.setHeader('content-type', response.headers.get('content-type') || 'application/json');
+      res.end(body);
+      return;
+    }
+
     res.statusCode = response.status;
     res.setHeader('content-type', response.headers.get('content-type') || 'application/json');
     res.end(body);
