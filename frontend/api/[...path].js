@@ -1,11 +1,13 @@
 export default async function handler(req, res) {
   const backend = (process.env.BACKEND_ORIGIN || "https://super-marks-2-backend.vercel.app").replace(/\/+$/, "");
+  const origin = req.headers?.origin || "*";
 
-  // Handle OPTIONS locally (DO NOT FORWARD)
+  // 1) Handle preflight locally (do NOT forward)
   if (req.method === "OPTIONS") {
     res.statusCode = 204;
     res.setHeader("x-supermarks-proxy", "catchall-options");
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization");
     res.end();
@@ -16,7 +18,7 @@ export default async function handler(req, res) {
   const parts = Array.isArray(req.query.path) ? req.query.path : [req.query.path].filter(Boolean);
   const subPath = parts.join("/");
 
-  // Map special paths to backend root endpoints
+  // 2) Special-case mappings
   let targetBase;
   if (subPath === "health") targetBase = `${backend}/health`;
   else if (subPath === "openapi.json") targetBase = `${backend}/openapi.json`;
@@ -24,7 +26,7 @@ export default async function handler(req, res) {
 
   const target = `${targetBase}${url.search || ""}`;
 
-  // forward headers
+  // 3) Forward headers
   const headers = {};
   for (const [k, v] of Object.entries(req.headers || {})) {
     const key = k.toLowerCase();
@@ -32,15 +34,13 @@ export default async function handler(req, res) {
     headers[k] = v;
   }
 
-  // read body for non-GET/HEAD
+  // 4) Forward body (multipart + json)
   let bodyBuf = null;
-  if (!["GET","HEAD"].includes(req.method || "GET")) {
+  if (!["GET", "HEAD"].includes(req.method || "GET")) {
     const chunks = [];
     for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     bodyBuf = chunks.length ? Buffer.concat(chunks) : null;
   }
-
-  res.setHeader("x-supermarks-proxy", "catchall");
 
   try {
     const resp = await fetch(target, {
@@ -55,12 +55,14 @@ export default async function handler(req, res) {
       if (key.toLowerCase() === "transfer-encoding") return;
       res.setHeader(key, value);
     });
+    res.setHeader("x-supermarks-proxy", "catchall");
 
     const buf = Buffer.from(await resp.arrayBuffer());
     res.end(buf);
   } catch (err) {
     res.statusCode = 502;
     res.setHeader("content-type", "application/json");
+    res.setHeader("x-supermarks-proxy", "catchall-error");
     res.end(JSON.stringify({
       detail: "proxy fetch failed",
       message: String(err?.message || err),
