@@ -1,3 +1,10 @@
+/*
+IMPORTANT:
+This file implements Strategy A API routing.
+Do not add Vercel rewrites for /api.
+See docs/ARCHITECTURE.md.
+*/
+
 export default async function handler(req, res) {
   try {
     const backend = (process.env.BACKEND_ORIGIN || 'https://super-marks-2-backend.vercel.app').replace(/\/+$/, '');

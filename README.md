@@ -47,6 +47,13 @@ npm run dev
 
 The frontend API client defaults to same-origin `/api` (so production traffic stays on the frontend domain). For local development, set `VITE_API_BASE_URL` explicitly (for example `http://localhost:8000/api`).
 
+### API Routing (Important)
+
+This project uses Strategy A: frontend serverless proxy.
+See `docs/ARCHITECTURE.md`.
+
+Do not modify `/api` routing without reading that document.
+
 ## Vercel deployment (two projects)
 
 ### 1) Backend project
@@ -62,7 +69,7 @@ The frontend API client defaults to same-origin `/api` (so production traffic st
 - Output directory: `dist`
 - SPA routing fallback is handled in `frontend/vercel.json`
 
-Do not set `VITE_API_BASE_URL` in frontend production env vars (or set it to an empty value) so production uses `/api` and the Vercel rewrite proxy.
+Do not set `VITE_API_BASE_URL` in frontend production env vars (or set it to an empty value) so production uses same-origin `/api` via frontend serverless proxy functions.
 
 ## Deployment policy note
 

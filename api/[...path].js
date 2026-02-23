@@ -1,3 +1,10 @@
+/*
+IMPORTANT:
+This file implements Strategy A API routing.
+Do not add Vercel rewrites for /api.
+See docs/ARCHITECTURE.md.
+*/
+
 function sanitizeHeaders(headers) {
   const forwarded = {};
 
