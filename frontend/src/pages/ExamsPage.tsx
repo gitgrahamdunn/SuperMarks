@@ -34,7 +34,7 @@ type PingResult = {
   message?: string;
 };
 
-type PostExamTestResult = {
+type CreateExamGetTestResult = {
   status: number | 'network-error';
   body: string;
   message?: string;
@@ -192,11 +192,11 @@ export function ExamsPage() {
 
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
   const [pinging, setPinging] = useState(false);
-  const [postTestResult, setPostTestResult] = useState<PostExamTestResult | null>(null);
-  const [postTesting, setPostTesting] = useState(false);
+  const [createExamGetTestResult, setCreateExamGetTestResult] = useState<CreateExamGetTestResult | null>(null);
+  const [createExamGetTesting, setCreateExamGetTesting] = useState(false);
 
   const endpointMap = {
-    create: buildApiUrl('exams'),
+    create: buildApiUrl('exams-create'),
     upload: createdExamId ? buildApiUrl(`exams/${createdExamId}/key/upload`) : buildApiUrl('exams/{exam_id}/key/upload'),
     parse: createdExamId ? buildApiUrl(`exams/${createdExamId}/key/parse`) : buildApiUrl('exams/{exam_id}/key/parse'),
   };
@@ -221,35 +221,31 @@ export function ExamsPage() {
     }
   };
 
-  const testPostExam = async () => {
-    setPostTesting(true);
+  const testCreateExamGet = async () => {
+    setCreateExamGetTesting(true);
     try {
-      const response = await fetch('/api/exams', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(API_KEY ? { 'X-API-Key': API_KEY } : {}),
-        },
-        body: JSON.stringify({ name: `Ping ${Date.now()}` }),
+      const response = await fetch(`/api/exams-create?name=${encodeURIComponent(`Ping ${Date.now()}`)}`, {
+        method: 'GET',
+        headers: API_KEY ? { 'X-API-Key': API_KEY } : undefined,
       });
       const responseText = await response.text();
-      setPostTestResult({
+      setCreateExamGetTestResult({
         status: response.status,
         body: responseText,
       });
     } catch (error) {
       const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
       const isLoadFailed = /load failed/i.test(message);
-      setPostTestResult({
+      setCreateExamGetTestResult({
         status: 'network-error',
         body: '',
         message,
         loadFailedHint: isLoadFailed
-          ? 'This suggests Vercel rewrite/proxy is not handling POST or Safari is aborting the request body.'
+          ? 'This suggests the frontend function route is unavailable or blocked before reaching Vercel serverless runtime.'
           : undefined,
       });
     } finally {
-      setPostTesting(false);
+      setCreateExamGetTesting(false);
     }
   };
 
@@ -372,7 +368,7 @@ export function ExamsPage() {
 
       setStep('creating');
       markChecklist('creating_exam', 'active');
-      const createEndpoint = buildApiUrl('exams');
+      const createEndpoint = buildApiUrl('exams-create');
       const createName = modalName.trim() || `Untitled ${Date.now()}`;
       const exam = await api.createExam(createName);
       examId = exam.id;
@@ -472,7 +468,7 @@ export function ExamsPage() {
       const stepName = step;
       const stepEndpoint =
         stepName === 'creating'
-          ? buildApiUrl('exams')
+          ? buildApiUrl('exams-create')
           : stepName === 'uploading' && examId
             ? buildApiUrl(`exams/${examId}/key/upload`)
             : stepName === 'building_pages' && examId
@@ -550,7 +546,7 @@ export function ExamsPage() {
             errorMessage: err.message,
             responseContentType: err.contentType,
             responseBodySnippet: err.responseBodySnippet || '<empty>',
-            note: 'JSON parse failed for /api/exams response. Check Content-Type and Vercel routing.',
+            note: 'JSON parse failed for /api/exams-create response. Check Content-Type and Vercel routing.',
           },
         });
         logStep({
@@ -707,8 +703,8 @@ export function ExamsPage() {
                     <button type="button" onClick={() => void pingApi()} disabled={pinging || isRunning}>
                       {pinging ? 'Testing…' : 'Ping proxy'}
                     </button>
-                    <button type="button" onClick={() => void testPostExam()} disabled={postTesting || isRunning}>
-                      {postTesting ? 'Testing…' : 'Ping POST /api/exams'}
+                    <button type="button" onClick={() => void testCreateExamGet()} disabled={createExamGetTesting || isRunning}>
+                      {createExamGetTesting ? 'Testing…' : 'Test create exam (GET /api/exams-create)'}
                     </button>
                   </div>
                   {pingResult && (
@@ -718,12 +714,12 @@ export function ExamsPage() {
                       {pingResult.message && <p><strong>GET error:</strong> {pingResult.message}</p>}
                     </div>
                   )}
-                  {postTestResult && (
+                  {createExamGetTestResult && (
                     <div className="wizard-detail-block">
-                      <p><strong>POST status:</strong> {postTestResult.status}</p>
-                      <p><strong>POST response:</strong> {postTestResult.body || '<empty>'}</p>
-                      {postTestResult.message && <p><strong>POST error:</strong> {postTestResult.message}</p>}
-                      {postTestResult.loadFailedHint && <p><strong>Hint:</strong> {postTestResult.loadFailedHint}</p>}
+                      <p><strong>GET create status:</strong> {createExamGetTestResult.status}</p>
+                      <p><strong>GET create response:</strong> {createExamGetTestResult.body || '<empty>'}</p>
+                      {createExamGetTestResult.message && <p><strong>GET create error:</strong> {createExamGetTestResult.message}</p>}
+                      {createExamGetTestResult.loadFailedHint && <p><strong>Hint:</strong> {createExamGetTestResult.loadFailedHint}</p>}
                     </div>
                   )}
                   {stepLogs.length === 0 && <p>No step details yet.</p>}
