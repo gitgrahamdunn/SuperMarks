@@ -193,6 +193,7 @@ export function ExamsPage() {
   const [pinging, setPinging] = useState(false);
   const [createExamGetTestResult, setCreateExamGetTestResult] = useState<CreateExamGetTestResult | null>(null);
   const [createExamGetTesting, setCreateExamGetTesting] = useState(false);
+  const [hasApiKeyHeaderForCreateRequest, setHasApiKeyHeaderForCreateRequest] = useState<boolean>(Boolean(API_KEY));
 
   const endpointMap = {
     create: '/api/exams-create',
@@ -303,6 +304,7 @@ export function ExamsPage() {
     setElapsedSeconds(0);
     setFailedSummary(null);
     setChecklistSteps(initChecklist());
+    setHasApiKeyHeaderForCreateRequest(Boolean(API_KEY));
   };
 
   const logStep = (entry: StepLog) => {
@@ -348,6 +350,21 @@ export function ExamsPage() {
 
     if (totalTooLarge && !allowLargeUpload) {
       showWarning('Total files exceed 12 MB. Confirm to continue with upload.');
+      return;
+    }
+
+    const hasApiKeyHeader = Boolean(API_KEY);
+    setHasApiKeyHeaderForCreateRequest(hasApiKeyHeader);
+    if (!hasApiKeyHeader) {
+      setWizardError({
+        summary: 'Step: creating | Status: missing-api-key',
+        details: {
+          step: 'creating',
+          message: 'Missing VITE_BACKEND_API_KEY',
+          hasApiKeyHeader: false,
+        },
+      });
+      showError('Missing VITE_BACKEND_API_KEY');
       return;
     }
 
@@ -693,6 +710,7 @@ export function ExamsPage() {
                   <p><strong>Computed API_BASE:</strong> {API_BASE_URL}</p>
                   <p><strong>API key present:</strong> {Boolean(API_KEY) ? 'true' : 'false'}</p>
                   <p><strong>Create endpoint:</strong> {endpointMap.create}</p>
+                  <p><strong>hasApiKeyHeader:</strong> {hasApiKeyHeaderForCreateRequest ? 'true' : 'false'}</p>
                   <p><strong>Upload endpoint:</strong> {endpointMap.upload}</p>
                   <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
                   <div className="actions-row">
