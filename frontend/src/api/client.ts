@@ -158,10 +158,11 @@ async function createExamRequest(name: string): Promise<ExamRead> {
   const timeoutId = window.setTimeout(() => controller.abort(), 20_000);
 
   try {
-    return await request<ExamRead>('exams', {
-      method: 'POST',
-      headers: withAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ name }),
+    const examName = name.trim() || `Exam ${Date.now()}`;
+    const encodedName = encodeURIComponent(examName);
+    return await request<ExamRead>(`exams-create?name=${encodedName}`, {
+      method: 'GET',
+      headers: withAuthHeaders(),
       signal: controller.signal,
     });
   } catch (error) {
