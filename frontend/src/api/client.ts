@@ -13,10 +13,19 @@ import type {
 } from '../types/api';
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
-const API_BASE_URL = import.meta.env.PROD ? '/api' : (configuredApiBaseUrl || '/api');
-const BASE = (API_BASE_URL || '/api').replace(/\/+$/, '');
-const IS_PROD_ABSOLUTE_API_BASE_CONFIGURED = import.meta.env.PROD && /^https?:\/\//i.test(configuredApiBaseUrl);
+const API_BASE_URL = configuredApiBaseUrl.replace(/\/+$/, '');
+const IS_PROD_ABSOLUTE_API_BASE_CONFIGURED = /^https?:\/\//i.test(API_BASE_URL);
 const API_KEY = import.meta.env.VITE_BACKEND_API_KEY;
+
+if (!API_BASE_URL) {
+  throw new Error('Missing VITE_API_BASE_URL. Set it to your backend API base (for example, https://your-backend.example.com/api).');
+}
+
+if (import.meta.env.PROD && !IS_PROD_ABSOLUTE_API_BASE_CONFIGURED) {
+  throw new Error(`Invalid VITE_API_BASE_URL for production: "${API_BASE_URL}". Use an absolute URL that already includes /api.`);
+}
+
+const BASE = API_BASE_URL;
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -79,7 +88,7 @@ function withAuthHeaders(headers?: HeadersInit): HeadersInit {
 }
 
 function getOpenApiSchemaUrl(): string {
-  return '/api/openapi.json';
+  return joinUrl(BASE, '/openapi.json');
 }
 
 function stripSnippet(text: string): string {
@@ -112,7 +121,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   const requestPath = `/${normalizedPath}`;
-  const url = `${BASE}${requestPath}`;
+  const url = joinUrl(BASE, requestPath);
   const method = (options.method || 'GET').toUpperCase();
   options.headers = withAuthHeaders(options.headers);
   const response = await fetch(url, options);
@@ -253,7 +262,7 @@ async function getOpenApiPaths(): Promise<Set<string>> {
 
     const snippetLower = responseSnippet.toLowerCase();
     if (snippetLower.startsWith('<!doctype') || snippetLower.startsWith('<html')) {
-      openApiFetchErrorMessage = 'Proxy rewrite likely not working: /api/openapi.json returned HTML';
+      openApiFetchErrorMessage = `Backend OpenAPI endpoint returned HTML: ${openApiUrl}`;
       console.error(`[SuperMarks] ${openApiFetchErrorMessage}`);
       openApiPathCache = new Set<string>();
       return openApiPathCache;
@@ -459,6 +468,5 @@ export {
   buildApiUrl,
   checkBackendApiContract,
   getOpenApiPaths,
-  IS_PROD_ABSOLUTE_API_BASE_CONFIGURED,
   joinUrl,
 };

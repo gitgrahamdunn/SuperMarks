@@ -7,7 +7,6 @@ import {
   ApiInvalidJsonError,
   api,
   buildApiUrl,
-  IS_PROD_ABSOLUTE_API_BASE_CONFIGURED,
 } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
@@ -204,7 +203,7 @@ export function ExamsPage() {
   const pingApi = async () => {
     setPinging(true);
     try {
-      const response = await fetch('/api/proxy-health');
+      const response = await fetch(buildApiUrl('health'));
       const responseJson = await response.json();
       setPingResult({
         status: response.status,
@@ -224,7 +223,7 @@ export function ExamsPage() {
   const testCreateExamGet = async () => {
     setCreateExamGetTesting(true);
     try {
-      const response = await fetch(`/api/exams-create?name=${encodeURIComponent(`Ping ${Date.now()}`)}`, {
+      const response = await fetch(buildApiUrl(`exams-create?name=${encodeURIComponent(`Ping ${Date.now()}`)}`), {
         method: 'GET',
         headers: API_KEY ? { 'X-API-Key': API_KEY } : undefined,
       });
@@ -546,7 +545,7 @@ export function ExamsPage() {
             errorMessage: err.message,
             responseContentType: err.contentType,
             responseBodySnippet: err.responseBodySnippet || '<empty>',
-            note: 'JSON parse failed for /api/exams-create response. Check Content-Type and Vercel routing.',
+            note: 'JSON parse failed for create-exam response. Check backend response Content-Type and API base URL.',
           },
         });
         logStep({
@@ -598,9 +597,6 @@ export function ExamsPage() {
           <div className="card modal wizard-modal stack">
             <h2>Enter Exam Key</h2>
             <p className="subtle-text wizard-step-banner">Current step: {isRunning ? step : 'ready'}</p>
-            {IS_PROD_ABSOLUTE_API_BASE_CONFIGURED && (
-              <p className="warning-text">Warning: production API base should be relative (/api), not an absolute URL.</p>
-            )}
             <form onSubmit={onCreateAndUpload} className="stack wizard-modal-form" encType="multipart/form-data">
               <label className="stack">
                 Exam name
@@ -701,10 +697,10 @@ export function ExamsPage() {
                   <p><strong>Parse endpoint:</strong> {endpointMap.parse}</p>
                   <div className="actions-row">
                     <button type="button" onClick={() => void pingApi()} disabled={pinging || isRunning}>
-                      {pinging ? 'Testing…' : 'Ping proxy'}
+                      {pinging ? 'Testing…' : 'Ping API'}
                     </button>
                     <button type="button" onClick={() => void testCreateExamGet()} disabled={createExamGetTesting || isRunning}>
-                      {createExamGetTesting ? 'Testing…' : 'Test create exam (GET /api/exams-create)'}
+                      {createExamGetTesting ? 'Testing…' : 'Test create exam (GET /exams-create)'}
                     </button>
                   </div>
                   {pingResult && (
