@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, ApiError, api, buildApiUrl } from '../api/client';
+import { API_BASE_URL, ApiError, api, buildApiUrl, maskApiBaseUrl, pingApiHealth } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
@@ -135,6 +135,8 @@ export function ExamsPage() {
   const [createdExamId, setCreatedExamId] = useState<number | null>(null);
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
   const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
+  const [pingResult, setPingResult] = useState<string>('');
+  const [isPingingApi, setIsPingingApi] = useState(false);
   const [allowLargeUpload, setAllowLargeUpload] = useState(false);
   const [parseProgress, setParseProgress] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -412,11 +414,37 @@ export function ExamsPage() {
   };
 
 
+  const onPingApi = async () => {
+    try {
+      setIsPingingApi(true);
+      setPingResult('');
+      const result = await pingApiHealth();
+      setPingResult(`status=${result.status} body=${result.body || '<empty>'}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPingResult(`error=${message}`);
+    } finally {
+      setIsPingingApi(false);
+    }
+  };
+
+
   return (
     <div>
       <h1>Exams</h1>
       <div className="card actions-row">
         <button type="button" onClick={() => setIsModalOpen(true)} disabled={isRunning}>Enter Exam Key</button>
+      </div>
+
+      <div className="card">
+        <h2>API Diagnostics</h2>
+        <p className="subtle-text">Configured API base: {maskApiBaseUrl(API_BASE_URL)}</p>
+        <div className="actions-row">
+          <button type="button" onClick={onPingApi} disabled={isPingingApi}>
+            {isPingingApi ? 'Pinging...' : 'Ping API'}
+          </button>
+        </div>
+        {pingResult && <p className="subtle-text">{pingResult}</p>}
       </div>
 
       {isModalOpen && (

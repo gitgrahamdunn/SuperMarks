@@ -1,23 +1,36 @@
 # Architecture
 
-## API Routing Strategy (Locked)
+## Strategy B (Locked): Direct Backend API
 
-### We use:
-- Frontend serverless proxy (Strategy A)
-- No `/api` rewrites in `vercel.json`
-- SPA fallback only for non-api routes
+SuperMarks is locked to **Strategy B**:
 
-### We do NOT:
-- Mix rewrites and proxy functions
-- Call backend directly from browser (unless explicitly documented)
-- Create specific `api/*.js` files that shadow catch-all unintentionally
+- The browser calls the backend directly via `VITE_API_BASE_URL`.
+- `VITE_API_BASE_URL` must be an absolute URL and must end with `/api`.
+- There are **no frontend `/api` proxy functions** for application logic.
+- Frontend deploy config is SPA-only; do not add `/api` rewrites.
 
-### Known failure modes:
-- If `GET /api/exams` returns `text/html` → routing broken
-- If `POST /api/exams` returns `405` empty → route shadowing
-- If no backend logs → request never left frontend
+## Rules and Guardrails
 
-### Smoke tests:
-- `GET /api/proxy-health` must return JSON
-- `GET /api/exams` must return JSON (`401` acceptable in browser)
-- `POST /api/exams` must reach backend logs
+1. Do not add `frontend/api/*` proxy handlers.
+2. Do not add root `api/*` proxy handlers for frontend routing.
+3. Do not rely on same-origin `/api` for browser requests.
+4. Keep backend CORS configured for frontend origins via `CORS_ALLOW_ORIGINS`.
+5. Ensure OPTIONS preflight remains unauthenticated.
+
+## Required Environment Variables
+
+### Frontend
+
+- `VITE_API_BASE_URL=https://<backend-domain>/api`
+- `VITE_BACKEND_API_KEY=<backend-api-key>` (optional if backend auth disabled)
+
+### Backend
+
+- `BACKEND_API_KEY=<backend-api-key>`
+- `CORS_ALLOW_ORIGINS=https://<frontend-domain>`
+
+## Smoke Checks
+
+- Frontend API base validation blocks production boot when invalid.
+- Frontend diagnostics card can ping backend health endpoint.
+- Backend tests validate preflight behavior and API-key-protected exam creation.

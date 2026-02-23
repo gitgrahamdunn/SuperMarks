@@ -55,3 +55,41 @@ def test_post_exams_still_available_after_preflight(client_app, path: str) -> No
     assert created.status_code == 201
     payload = created.json()
     assert payload["name"] == "Preflight Regression Exam"
+
+
+def test_preflight_upload_endpoint_returns_204_and_cors_headers() -> None:
+    with TestClient(app) as client:
+        response = client.options(
+            "/api/exams/1/key/upload",
+            headers={
+                "Origin": "https://frontend.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "x-api-key,content-type",
+            },
+        )
+
+    assert response.status_code == 204
+    assert "access-control-allow-origin" in response.headers
+
+
+def test_post_exams_with_api_key_returns_201(tmp_path, monkeypatch) -> None:
+    from sqlmodel import SQLModel, create_engine
+
+    from app import db
+    from app.settings import settings
+
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("BACKEND_API_KEY", "test-api-key")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/exams",
+            json={"name": "Locked Strategy B Exam"},
+            headers={"X-API-Key": "test-api-key"},
+        )
+
+    assert response.status_code == 201
