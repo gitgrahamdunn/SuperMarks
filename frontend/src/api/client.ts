@@ -13,7 +13,11 @@ const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
 const API_BASE_URL = configuredApiBaseUrl;
 const DEFAULT_TIMEOUT_MS = 20_000;
-const PARSE_TIMEOUT_MS = 60_000;
+const EXAM_READ_TIMEOUT_MS = 15_000;
+const EXAM_CREATE_TIMEOUT_MS = 20_000;
+const KEY_UPLOAD_TIMEOUT_MS = 0;
+const KEY_PARSE_TIMEOUT_MS = 120_000;
+const BUILD_PAGES_TIMEOUT_MS = 60_000;
 
 function validateApiBaseUrl(baseUrl: string): string | null {
   if (!baseUrl) {
@@ -103,29 +107,43 @@ function buildApiUrl(path: string): string {
   return joinUrl(API_BASE_URL, path);
 }
 
-function withTimeout(options: RequestInit, timeoutMs: number): RequestInit {
-  const controller = new AbortController();
-  const timeoutHandle = window.setTimeout(() => controller.abort(), timeoutMs);
-  const signal = options.signal;
+type FetchWithTimeoutResult = {
+  response: Response;
+  clear: () => void;
+};
 
-  if (signal) {
-    signal.addEventListener('abort', () => controller.abort(), { once: true });
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<FetchWithTimeoutResult> {
+  const inputSignal = options.signal;
+  const timeoutController = timeoutMs > 0 ? new AbortController() : null;
+  const requestController = timeoutController || inputSignal ? new AbortController() : null;
+  let timeoutHandle: number | null = null;
+
+  if (requestController && inputSignal) {
+    if (inputSignal.aborted) {
+      requestController.abort();
+    } else {
+      inputSignal.addEventListener('abort', () => requestController.abort(), { once: true });
+    }
   }
 
+  if (requestController && timeoutController) {
+    timeoutHandle = window.setTimeout(() => timeoutController.abort(), timeoutMs);
+    timeoutController.signal.addEventListener('abort', () => requestController.abort(), { once: true });
+  }
+
+  const fetchOptions: RequestInit = requestController
+    ? { ...options, signal: requestController.signal }
+    : options;
+
+  const response = await fetch(url, fetchOptions);
   return {
-    ...options,
-    signal: controller.signal,
-    headers: options.headers,
-    // @ts-expect-error internal metadata
-    __timeoutHandle: timeoutHandle,
+    response,
+    clear: () => {
+      if (timeoutHandle !== null) {
+        window.clearTimeout(timeoutHandle);
+      }
+    },
   };
-}
-
-function clearTimeoutFromOptions(options: RequestInit): void {
-  const timeoutHandle = (options as RequestInit & { __timeoutHandle?: number }).__timeoutHandle;
-  if (timeoutHandle) {
-    window.clearTimeout(timeoutHandle);
-  }
 }
 
 async function request<T>(path: string, options: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
@@ -140,10 +158,10 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = D
 
   const url = buildApiUrl(normalizedPath);
   const method = (options.method || 'GET').toUpperCase();
-  const timedOptions = withTimeout(withApiKeyHeader(options), timeoutMs);
+  const requestOptions = withApiKeyHeader(options);
+  const { response, clear } = await fetchWithTimeout(url, requestOptions, timeoutMs);
 
   try {
-    const response = await fetch(url, timedOptions);
     if (!response.ok) {
       const responseText = await response.text();
       throw buildErrorDetailsFromResponse(url, method, response.status, responseText);
@@ -155,12 +173,9 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = D
     }
     return {} as T;
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error(`Request timed out after ${Math.floor(timeoutMs / 1000)}s: ${method} ${url}`);
-    }
     throw error;
   } finally {
-    clearTimeoutFromOptions(timedOptions);
+    clear();
   }
 }
 
@@ -302,9 +317,13 @@ export function getHealthPingUrl(): string {
 
 export async function pingApiHealth(): Promise<{ status: number; body: string }> {
   const url = getHealthPingUrl();
-  const response = await fetch(url, withApiKeyHeader(withTimeout({}, DEFAULT_TIMEOUT_MS)));
-  const body = await response.text();
-  return { status: response.status, body: body.slice(0, 300) };
+  const { response, clear } = await fetchWithTimeout(url, withApiKeyHeader(), DEFAULT_TIMEOUT_MS);
+  try {
+    const body = await response.text();
+    return { status: response.status, body: body.slice(0, 300) };
+  } finally {
+    clear();
+  }
 }
 
 export function getApiConfigError(): string | null {
@@ -324,13 +343,14 @@ export function resetApiContractCheckCache(): void {
 }
 
 export const api = {
-  getExams: () => request<ExamRead[]>('exams'),
-  createExam: (name: string) => request<ExamRead>('exams', {
+  getExams: (options?: RequestInit) => request<ExamRead[]>('exams', options, EXAM_READ_TIMEOUT_MS),
+  createExam: (name: string, options?: RequestInit) => request<ExamRead>('exams', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
-  }, DEFAULT_TIMEOUT_MS),
-  getExamDetail: (examId: number) => request<ExamDetail>(`exams/${examId}`),
+    ...options,
+  }, EXAM_CREATE_TIMEOUT_MS),
+  getExamDetail: (examId: number, options?: RequestInit) => request<ExamDetail>(`exams/${examId}`, options, EXAM_READ_TIMEOUT_MS),
   addQuestion: (examId: number, label: string, max_marks: number) => request<QuestionRead>(`exams/${examId}/questions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -343,10 +363,10 @@ export const api = {
     files.forEach((file) => formData.append('files', file));
     return request<SubmissionRead>(`exams/${examId}/submissions`, { method: 'POST', body: formData }, DEFAULT_TIMEOUT_MS);
   },
-  uploadExamKey: async (examId: number, files: File[]) => {
+  uploadExamKey: async (examId: number, files: File[], options?: RequestInit) => {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
-    return request<Record<string, unknown>>(`exams/${examId}/key/upload`, { method: 'POST', body: formData }, DEFAULT_TIMEOUT_MS);
+    return request<Record<string, unknown>>(`exams/${examId}/key/upload`, { method: 'POST', body: formData, ...options }, KEY_UPLOAD_TIMEOUT_MS);
   },
   getExamQuestionsForReview: async (examId: number) => {
     const paths = await getOpenApiPaths();
@@ -359,18 +379,18 @@ export const api = {
     return examDetail.questions || [];
   },
 
-  buildExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST' }, DEFAULT_TIMEOUT_MS),
+  buildExamKeyPages: (examId: number, options?: RequestInit) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST', ...options }, BUILD_PAGES_TIMEOUT_MS),
   listExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/pages`),
   getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),
   completeExamKeyReview: (examId: number) => request<{ exam_id: number; status: string; warnings: string[] }>(`exams/${examId}/key/review/complete`, { method: 'POST' }),
-  parseExamKey: (examId: number) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST' }, PARSE_TIMEOUT_MS),
-  parseExamKeyRaw: async (examId: number) => {
+  parseExamKey: (examId: number, options?: RequestInit) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
+  parseExamKeyRaw: async (examId: number, options?: RequestInit) => {
     const path = `exams/${examId}/key/parse`;
     const url = buildApiUrl(path);
     const method = 'POST';
-    const timedOptions = withTimeout(withApiKeyHeader({ method }), PARSE_TIMEOUT_MS);
+    const requestOptions = withApiKeyHeader({ method, ...options });
+    const { response, clear } = await fetchWithTimeout(url, requestOptions, KEY_PARSE_TIMEOUT_MS);
     try {
-      const response = await fetch(url, timedOptions);
       const responseText = await response.text();
 
       if (!response.ok) {
@@ -394,11 +414,11 @@ export const api = {
         };
       }
     } finally {
-      clearTimeoutFromOptions(timedOptions);
+      clear();
     }
   },
   getSubmission: (submissionId: number) => request<SubmissionRead>(`submissions/${submissionId}`),
-  buildPages: (submissionId: number) => request<SubmissionPage[]>(`submissions/${submissionId}/build-pages`, { method: 'POST' }),
+  buildPages: (submissionId: number) => request<SubmissionPage[]>(`submissions/${submissionId}/build-pages`, { method: 'POST' }, BUILD_PAGES_TIMEOUT_MS),
   buildCrops: (submissionId: number) => request<{ message: string }>(`submissions/${submissionId}/build-crops`, { method: 'POST' }),
   transcribe: (submissionId: number) => request<{ message: string }>(`submissions/${submissionId}/transcribe?provider=stub`, { method: 'POST' }),
   grade: (submissionId: number) => request<{ message: string }>(`submissions/${submissionId}/grade?grader=rule_based`, { method: 'POST' }),
@@ -418,7 +438,7 @@ export const api = {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-      });
+      }, EXAM_READ_TIMEOUT_MS);
     }
 
     if (paths.has('/api/exams/{exam_id}/questions/{question_id}')) {
@@ -426,7 +446,7 @@ export const api = {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-      });
+      }, EXAM_READ_TIMEOUT_MS);
     }
 
     if (paths.has('/api/exams/{exam_id}/wizard/questions/{question_id}')) {
@@ -434,7 +454,7 @@ export const api = {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-      });
+      }, EXAM_READ_TIMEOUT_MS);
     }
 
     throw new ApiError(404, buildApiUrl(`questions/${questionId}`), 'PATCH', '', 'Save endpoint is not available. [404] dynamic endpoint discovery');
