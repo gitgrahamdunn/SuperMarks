@@ -8,6 +8,9 @@ import './styles.css';
 
 const apiConfigError = getApiConfigError();
 
+console.log('[SuperMarks] API_BASE=', import.meta.env.VITE_API_BASE_URL || '<missing>');
+console.log('[SuperMarks] HAS_API_KEY=', Boolean(import.meta.env.VITE_BACKEND_API_KEY));
+
 if (!apiConfigError) {
   void checkBackendApiContract().then((result) => {
     if (!result.ok) {

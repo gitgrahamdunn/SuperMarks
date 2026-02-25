@@ -612,6 +612,7 @@ def parse_answer_key(
             "openai_error": openai_error,
             "page_index": error_page_index if error_page_index is not None else page_index,
             "page_count": page_count,
+            "key_pages": key_pages_meta,
         }
         return JSONResponse(status_code=status_code, content=payload)
 
@@ -638,6 +639,12 @@ def parse_answer_key(
         else:
             page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
             image_paths = [Path(r.image_path) for r in page_rows if Path(r.image_path).exists()]
+
+        key_page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
+        key_pages_meta = [
+            {"page_number": row.page_number, "width": row.width, "height": row.height}
+            for row in key_page_rows
+        ]
         exam.status = ExamStatus.KEY_PAGES_READY
         session.add(exam)
         session.commit()
@@ -744,6 +751,26 @@ def parse_answer_key(
                 result_model = mini_result.model
 
             timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
+
+            for question_payload in questions_payload:
+                evidence_payload = question_payload.get("evidence") if isinstance(question_payload, dict) else None
+                if not isinstance(evidence_payload, list):
+                    continue
+                normalized_evidence: list[dict[str, object]] = []
+                for evidence_item in evidence_payload:
+                    if not isinstance(evidence_item, dict):
+                        continue
+                    normalized_evidence.append({
+                        "page_number": int(evidence_item.get("page_number") or idx),
+                        "x": float(evidence_item.get("x") or 0),
+                        "y": float(evidence_item.get("y") or 0),
+                        "w": float(evidence_item.get("w") or 0.1),
+                        "h": float(evidence_item.get("h") or 0.1),
+                        "kind": str(evidence_item.get("kind") or "question_box"),
+                        "confidence": float(evidence_item.get("confidence") or 0),
+                    })
+                question_payload["evidence"] = normalized_evidence
+
             confidence_scores.append(confidence)
             merged_questions_payload.extend(questions_payload)
             merged_warnings.extend(warnings)
@@ -833,6 +860,7 @@ def parse_answer_key(
             "attempts": attempts,
             "page_index": page_count,
             "page_count": page_count,
+            "key_pages": key_pages_meta,
         }
     except HTTPException as exc:
         run.status = "failed"
@@ -850,6 +878,7 @@ def parse_answer_key(
             "openai_status": exc.status_code,
             "page_index": page_index,
             "page_count": page_count,
+            "key_pages": key_pages_meta,
         })
         session.add(run)
         session.commit()

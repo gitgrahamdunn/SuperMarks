@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, ApiError, api, buildApiUrl, maskApiBaseUrl, pingApiHealth } from '../api/client';
+import { API_BASE_URL, ApiError, api, buildApiUrl, getClientDiagnostics, maskApiBaseUrl, pingApiHealth } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
@@ -27,6 +27,14 @@ type ParseErrorDetails = {
   page_index?: number;
   page_count?: number;
   detail?: string;
+};
+
+type ParseTimings = Record<string, number>;
+
+type ParseOutcomeData = {
+  timings?: ParseTimings;
+  page_count?: number;
+  page_index?: number;
 };
 
 type ParseChecklistStepId =
@@ -152,6 +160,8 @@ export function ExamsPage() {
   const [parseProgress, setParseProgress] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [failedSummary, setFailedSummary] = useState<string | null>(null);
+  const [parsePageCount, setParsePageCount] = useState(0);
+  const [parseTimings, setParseTimings] = useState<ParseTimings | null>(null);
   const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
   const parseProgressIntervalRef = useRef<number | null>(null);
   const elapsedIntervalRef = useRef<number | null>(null);
@@ -162,6 +172,9 @@ export function ExamsPage() {
   const totalFileBytes = useMemo(() => modalFiles.reduce((sum, file) => sum + file.size, 0), [modalFiles]);
   const hasSingleLargeFile = useMemo(() => modalFiles.some((file) => file.size > LARGE_FILE_BYTES), [modalFiles]);
   const totalTooLarge = totalFileBytes > LARGE_TOTAL_BYTES;
+
+  const diagnostics = getClientDiagnostics();
+  const estimatedParsingPage = parsePageCount > 0 ? Math.min(parsePageCount, Math.max(1, Math.floor(elapsedSeconds / 3) + 1)) : 0;
 
   const loadExams = async () => {
     try {
@@ -195,6 +208,8 @@ export function ExamsPage() {
     setParseProgress(0);
     setElapsedSeconds(0);
     setFailedSummary(null);
+    setParsePageCount(0);
+    setParseTimings(null);
     setChecklistSteps(initChecklist());
   };
 
@@ -226,8 +241,8 @@ export function ExamsPage() {
     }, 1000);
 
     parseProgressIntervalRef.current = window.setInterval(() => {
-      setParseProgress((prev) => (prev < 92 ? prev + 2 : prev));
-    }, 2000);
+      setParseProgress((prev) => (prev < 95 ? prev + 1 : prev));
+    }, 700);
   };
 
   useEffect(() => () => clearIntervals(), []);
@@ -250,6 +265,8 @@ export function ExamsPage() {
     setParseProgress(0);
     setElapsedSeconds(0);
     setFailedSummary(null);
+    setParsePageCount(0);
+    setParseTimings(null);
     setChecklistSteps(initChecklist());
 
     let examId: number | null = null;
@@ -302,6 +319,7 @@ export function ExamsPage() {
       });
       markChecklist('building_key_pages', 'done');
       setParseProgress(42);
+      setParsePageCount(buildPages.length);
       showSuccess('Pages preview is ready.');
 
       setStep('parsing');
@@ -326,6 +344,14 @@ export function ExamsPage() {
         });
         showError(`parsing failed (status ${parseOutcome.status})`);
         return;
+      }
+
+      const parseData = parseOutcome.data as ParseOutcomeData;
+      if (typeof parseData.page_count === 'number' && parseData.page_count > 0) {
+        setParsePageCount(parseData.page_count);
+      }
+      if (parseData.timings && typeof parseData.timings === 'object') {
+        setParseTimings(parseData.timings);
       }
 
       clearIntervals();
@@ -558,6 +584,11 @@ export function ExamsPage() {
                   <span>Progress: {parseProgress}%</span>
                   <span>Elapsed: {formatElapsed(elapsedSeconds)}</span>
                 </div>
+                {step === 'parsing' && parsePageCount > 0 && (
+                  <p className="subtle-text" style={{ margin: '4px 0 8px 0' }}>
+                    Parsing page {estimatedParsingPage}/{parsePageCount}…
+                  </p>
+                )}
                 <div className="wizard-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={parseProgress}>
                   <div className="wizard-progress-fill" style={{ width: `${parseProgress}%` }} />
                 </div>
@@ -575,6 +606,11 @@ export function ExamsPage() {
 
               {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
               {failedSummary && <p className="warning-text">{failedSummary}</p>}
+              {parseTimings && (
+                <p className="subtle-text">
+                  Timings: {Object.entries(parseTimings).map(([k, v]) => `${k}: ${v}ms`).join(' | ')}
+                </p>
+              )}
               {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
               {wizardError?.isAbort && (
                 <button type="button" onClick={() => void runCreateAndUpload()} disabled={isRunning}>
@@ -585,7 +621,9 @@ export function ExamsPage() {
               <details>
                 <summary>Show details</summary>
                 <div className="subtle-text stack">
-                  <p>API base URL: {API_BASE_URL}</p>
+                  <p>API base URL: {diagnostics.apiBaseUrl}</p>
+                  <p>hasApiKey: {String(diagnostics.hasApiKey)}</p>
+                  <p>buildId: {diagnostics.buildId}</p>
                   <p>Computed create endpoint: {buildApiUrl('exams')}</p>
                   {stepLogs.length === 0 && <p>No step details yet.</p>}
                   {stepLogs.map((entry, index) => (
