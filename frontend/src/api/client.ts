@@ -11,6 +11,7 @@ import type {
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
+const APP_BUILD_ID = import.meta.env.VITE_BUILD_ID?.trim() || String(__APP_BUILD_TS__);
 const API_BASE_URL = configuredApiBaseUrl;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const PARSE_TIMEOUT_MS = 60_000;
@@ -309,6 +310,14 @@ export async function pingApiHealth(): Promise<{ status: number; body: string }>
 
 export function getApiConfigError(): string | null {
   return API_CONFIG_ERROR;
+}
+
+export function getClientDiagnostics(): { apiBaseUrl: string; hasApiKey: boolean; buildId: string } {
+  return {
+    apiBaseUrl: API_BASE_URL || '<missing>',
+    hasApiKey: Boolean(BACKEND_API_KEY),
+    buildId: APP_BUILD_ID,
+  };
 }
 
 export function resetApiContractCheckCache(): void {

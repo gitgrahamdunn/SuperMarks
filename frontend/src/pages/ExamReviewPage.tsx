@@ -33,6 +33,7 @@ export function ExamReviewPage() {
   const [saving, setSaving] = useState(false);
   const [saveAvailable, setSaveAvailable] = useState(true);
   const [previewError, setPreviewError] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(true);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
 
@@ -92,6 +93,7 @@ export function ExamReviewPage() {
   }, [currentIndex]);
 
   const currentQuestion = questions[currentIndex];
+  const currentPageNumber = Math.max(1, Number((currentQuestion?.rubric_json?.key_page_number as number) || currentQuestion?.evidence?.[0]?.page_number || 1));
 
   const updateCurrentQuestion = (updater: (question: EditableQuestion) => EditableQuestion) => {
     setQuestions((prev) => prev.map((question, index) => (index === currentIndex ? updater(question) : question)));
@@ -233,17 +235,19 @@ export function ExamReviewPage() {
 
       <div className="stack" style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: 10, background: '#f8fafc' }}>
         <label><input type="checkbox" checked={!previewError && (currentQuestion.evidence?.length ?? 0) > 0} readOnly /> Evidence loaded</label>
+        <label><input type="checkbox" checked={showOverlay} onChange={(e) => setShowOverlay(e.target.checked)} /> Show overlay</label>
         {!previewError ? (
           <EvidenceOverlayCanvas
-            imageUrl={api.getQuestionKeyVisualUrl(examId, currentQuestion.id)}
+            imageUrl={`${api.getQuestionKeyVisualUrl(examId, currentQuestion.id)}?v=${currentQuestion.id}-${currentPageNumber}`}
             evidence={currentQuestion.evidence || []}
-            visible
+            visible={showOverlay}
+            pageNumber={currentPageNumber}
             onImageError={() => setPreviewError(true)}
           />
         ) : (
           <div className="stack" style={{ gap: 8 }}>
             <p className="subtle-text">Image failed to load.</p>
-            <button type="button" onClick={() => window.open(api.getExamKeyPageUrl(examId, 1), '_blank', 'noopener,noreferrer')}>
+            <button type="button" onClick={() => window.open(api.getExamKeyPageUrl(examId, currentPageNumber), '_blank', 'noopener,noreferrer')}>
               Open key page
             </button>
           </div>
