@@ -18,6 +18,7 @@ type StepLog = {
 type WizardError = {
   summary: string;
   details: unknown;
+  isAbort?: boolean;
 };
 
 
@@ -123,6 +124,16 @@ function isNetworkFetchError(error: unknown): boolean {
   return error instanceof TypeError || /load failed|failed to fetch|network/i.test(error.message);
 }
 
+function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === 'AbortError') {
+    return true;
+  }
+  if (error instanceof Error) {
+    return error.name === 'AbortError' || /aborted/i.test(error.message);
+  }
+  return false;
+}
+
 export function ExamsPage() {
   const [exams, setExams] = useState<ExamRead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -144,6 +155,7 @@ export function ExamsPage() {
   const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
   const parseProgressIntervalRef = useRef<number | null>(null);
   const elapsedIntervalRef = useRef<number | null>(null);
+  const requestControllerRef = useRef<AbortController | null>(null);
   const { showError, showSuccess, showWarning } = useToast();
   const navigate = useNavigate();
 
@@ -220,8 +232,7 @@ export function ExamsPage() {
 
   useEffect(() => () => clearIntervals(), []);
 
-  const onCreateAndUpload = async (event: FormEvent) => {
-    event.preventDefault();
+  const runCreateAndUpload = async () => {
     if (!modalName.trim() || modalFiles.length === 0) {
       showError('Exam name and at least one key file are required.');
       return;
@@ -242,6 +253,9 @@ export function ExamsPage() {
     setChecklistSteps(initChecklist());
 
     let examId: number | null = null;
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
+    const requestOptions = { signal: controller.signal };
 
     try {
       setIsRunning(true);
@@ -249,7 +263,7 @@ export function ExamsPage() {
       setStep('creating');
       markChecklist('creating_exam', 'active');
       const createEndpoint = buildApiUrl('exams');
-      const exam = await api.createExam(modalName.trim());
+      const exam = await api.createExam(modalName.trim(), requestOptions);
       examId = exam.id;
       setCreatedExamId(exam.id);
       logStep({
@@ -265,7 +279,7 @@ export function ExamsPage() {
       setStep('uploading');
       markChecklist('uploading_key', 'active');
       const uploadEndpoint = buildApiUrl(`exams/${exam.id}/key/upload`);
-      const uploadResult = await api.uploadExamKey(exam.id, modalFiles);
+      const uploadResult = await api.uploadExamKey(exam.id, modalFiles, requestOptions);
       logStep({
         step: 'uploading',
         endpointUrl: uploadEndpoint,
@@ -279,7 +293,7 @@ export function ExamsPage() {
       setStep('building_pages');
       markChecklist('building_key_pages', 'active');
       const buildEndpoint = buildApiUrl(`exams/${exam.id}/key/build-pages`);
-      const buildPages = await api.buildExamKeyPages(exam.id);
+      const buildPages = await api.buildExamKeyPages(exam.id, requestOptions);
       logStep({
         step: 'building_pages',
         endpointUrl: buildEndpoint,
@@ -294,7 +308,7 @@ export function ExamsPage() {
       markChecklist('reading_questions', 'active');
       setParseProgress(50);
       startParseProgress();
-      const parseOutcome = await api.parseExamKeyRaw(exam.id);
+      const parseOutcome = await api.parseExamKeyRaw(exam.id, requestOptions);
       const parseSnippet = (parseOutcome.responseText || JSON.stringify(parseOutcome.data)).slice(0, 500);
       logStep({
         step: 'parsing',
@@ -362,6 +376,22 @@ export function ExamsPage() {
           exceptionMessage: err instanceof Error ? err.stack || err.message : String(err),
         });
         showError(networkMessage);
+      } else if (isAbortError(err)) {
+        const cancelMessage = `Request cancelled or timed out. You can retry. Step: ${stepName}. Endpoint: ${stepEndpoint}`;
+        const details = err instanceof Error ? err.stack || err.message : String(err);
+        setWizardError({
+          summary: `Step: ${stepName} | Status: aborted`,
+          details,
+          isAbort: true,
+        });
+        logStep({
+          step: stepName,
+          endpointUrl: stepEndpoint,
+          status: 'network-error',
+          responseSnippet: '',
+          exceptionMessage: details,
+        });
+        showError(cancelMessage);
       } else if (err instanceof ApiError) {
         const details = err.responseBodySnippet || '<empty>';
         let parseDetails: ParseErrorDetails | null = null;
@@ -410,7 +440,21 @@ export function ExamsPage() {
     } finally {
       clearIntervals();
       setIsRunning(false);
+      requestControllerRef.current = null;
     }
+  };
+
+  const onCreateAndUpload = async (event: FormEvent) => {
+    event.preventDefault();
+    await runCreateAndUpload();
+  };
+
+  const onCancelClick = () => {
+    if (isRunning) {
+      requestControllerRef.current?.abort();
+      return;
+    }
+    closeModal();
   };
 
 
@@ -532,6 +576,11 @@ export function ExamsPage() {
               {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
               {failedSummary && <p className="warning-text">{failedSummary}</p>}
               {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
+              {wizardError?.isAbort && (
+                <button type="button" onClick={() => void runCreateAndUpload()} disabled={isRunning}>
+                  Retry
+                </button>
+              )}
 
               <details>
                 <summary>Show details</summary>
@@ -555,7 +604,7 @@ export function ExamsPage() {
                 <button type="submit" disabled={isRunning || (totalTooLarge && !allowLargeUpload)}>
                   {isRunning ? 'Working...' : 'Enter exam & parse'}
                 </button>
-                <button type="button" onClick={closeModal} disabled={isRunning}>Cancel</button>
+                <button type="button" onClick={onCancelClick}>Cancel</button>
               </div>
             </form>
           </div>
