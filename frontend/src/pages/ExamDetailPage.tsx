@@ -70,20 +70,27 @@ export function ExamDetailPage() {
             ))}
           </ul>
           <form onSubmit={onAddQuestion} className="stack">
-            <input
-              value={questionLabel}
-              onChange={(e) => setQuestionLabel(e.target.value)}
-              placeholder="Question label"
-              required
-            />
-            <input
-              type="number"
-              value={maxMarks}
-              min={0}
-              onChange={(e) => setMaxMarks(Number(e.target.value))}
-              required
-            />
-            <button type="submit">Add Question</button>
+            <label htmlFor="question-label" className="stack">
+              <span>Question label</span>
+              <input
+                id="question-label"
+                value={questionLabel}
+                onChange={(e) => setQuestionLabel(e.target.value)}
+                required
+              />
+            </label>
+            <label htmlFor="question-max-marks" className="stack">
+              <span>Maximum marks</span>
+              <input
+                id="question-max-marks"
+                type="number"
+                value={maxMarks}
+                min={0}
+                onChange={(e) => setMaxMarks(Number(e.target.value))}
+                required
+              />
+            </label>
+            <button type="submit" className="button-primary">Add Question</button>
           </form>
         </section>
 
@@ -98,19 +105,26 @@ export function ExamDetailPage() {
           </ul>
 
           <form onSubmit={onUploadSubmission} className="stack" encType="multipart/form-data">
-            <input
-              value={studentName}
-              onChange={(e) => setStudentName(e.target.value)}
-              placeholder="Student name"
-              required
-            />
-            <input
-              type="file"
-              onChange={(e) => setFiles(Array.from(e.target.files || []))}
-              multiple
-              required
-            />
-            <button type="submit">Upload Submission</button>
+            <label htmlFor="student-name" className="stack">
+              <span>Student name</span>
+              <input
+                id="student-name"
+                value={studentName}
+                onChange={(e) => setStudentName(e.target.value)}
+                required
+              />
+            </label>
+            <label htmlFor="submission-files" className="stack">
+              <span>Submission files</span>
+              <input
+                id="submission-files"
+                type="file"
+                onChange={(e) => setFiles(Array.from(e.target.files || []))}
+                multiple
+                required
+              />
+            </label>
+            <button type="submit" className="button-primary">Upload Submission</button>
           </form>
         </section>
       </div>
