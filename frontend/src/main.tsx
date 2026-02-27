@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
 import { checkBackendApiContract, getApiConfigError } from './api/client';
 import './styles.css';
@@ -34,9 +35,11 @@ if (import.meta.env.PROD && apiConfigError) {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
       <BrowserRouter>
-        <ToastProvider>
-          <App />
-        </ToastProvider>
+        <ErrorBoundary>
+          <ToastProvider>
+            <App />
+          </ToastProvider>
+        </ErrorBoundary>
       </BrowserRouter>
     </React.StrictMode>,
   );
