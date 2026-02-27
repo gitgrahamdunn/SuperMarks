@@ -70,20 +70,24 @@ export function ExamDetailPage() {
             ))}
           </ul>
           <form onSubmit={onAddQuestion} className="stack">
+            <label htmlFor="question-label">Question label</label>
             <input
+              id="question-label"
               value={questionLabel}
               onChange={(e) => setQuestionLabel(e.target.value)}
               placeholder="Question label"
               required
             />
+            <label htmlFor="max-marks">Maximum marks</label>
             <input
+              id="max-marks"
               type="number"
               value={maxMarks}
               min={0}
               onChange={(e) => setMaxMarks(Number(e.target.value))}
               required
             />
-            <button type="submit">Add Question</button>
+            <button type="submit" className="btn btn-primary">Add Question</button>
           </form>
         </section>
 
@@ -98,19 +102,23 @@ export function ExamDetailPage() {
           </ul>
 
           <form onSubmit={onUploadSubmission} className="stack" encType="multipart/form-data">
+            <label htmlFor="student-name">Student name</label>
             <input
+              id="student-name"
               value={studentName}
               onChange={(e) => setStudentName(e.target.value)}
               placeholder="Student name"
               required
             />
+            <label htmlFor="submission-files">Submission files</label>
             <input
+              id="submission-files"
               type="file"
               onChange={(e) => setFiles(Array.from(e.target.files || []))}
               multiple
               required
             />
-            <button type="submit">Upload Submission</button>
+            <button type="submit" className="btn btn-primary">Upload Submission</button>
           </form>
         </section>
       </div>

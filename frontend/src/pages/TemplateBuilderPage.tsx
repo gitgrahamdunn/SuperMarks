@@ -84,9 +84,10 @@ export function TemplateBuilderPage() {
       <p><Link to={`/submissions/${submission.id}`}>← Back to Submission</Link></p>
       <h1>Template Builder</h1>
       <div className="actions-row">
-        <label>
+        <label htmlFor="question-select">
           Question:
           <select
+            id="question-select"
             value={selectedQuestionId ?? ''}
             onChange={(e) => setSelectedQuestionId(Number(e.target.value))}
           >
@@ -95,9 +96,10 @@ export function TemplateBuilderPage() {
             ))}
           </select>
         </label>
-        <label>
+        <label htmlFor="page-select">
           Page:
           <select
+            id="page-select"
             value={selectedPageNumber}
             onChange={(e) => setSelectedPageNumber(Number(e.target.value))}
           >
@@ -106,7 +108,7 @@ export function TemplateBuilderPage() {
             ))}
           </select>
         </label>
-        <button type="button" onClick={saveRegions} disabled={!selectedQuestion}>Save Regions</button>
+        <button type="button" className="btn btn-primary" onClick={saveRegions} disabled={!selectedQuestion}>Save Regions</button>
       </div>
 
       {submission.pages.length === 0 ? (

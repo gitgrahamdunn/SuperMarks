@@ -18,7 +18,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   public static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return {
       hasError: true,
-      errorMessage: error.message || 'Unexpected application error during startup.',
+      errorMessage: error.message || 'Unexpected application error.',
     };
   }
 
@@ -29,10 +29,15 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   public render(): React.ReactNode {
     if (this.state.hasError) {
       return (
-        <div style={{ padding: '1rem', fontFamily: 'sans-serif' }}>
-          <h1>Something went wrong</h1>
-          <p>The app hit an unexpected startup error.</p>
-          <pre style={{ whiteSpace: 'pre-wrap' }}>{this.state.errorMessage}</pre>
+        <div className="contract-error-page">
+          <div className="contract-error-card">
+            <h1>Something went wrong</h1>
+            <p>SuperMarks hit an unexpected error. Try reloading the page.</p>
+            <pre>{this.state.errorMessage}</pre>
+            <button type="button" className="btn btn-primary" onClick={() => window.location.reload()}>
+              Reload
+            </button>
+          </div>
         </div>
       );
     }
