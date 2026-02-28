@@ -34,6 +34,7 @@ export function ExamReviewPage() {
   const [saving, setSaving] = useState(false);
   const [saveAvailable, setSaveAvailable] = useState(true);
   const [previewError, setPreviewError] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
@@ -91,10 +92,17 @@ export function ExamReviewPage() {
 
   useEffect(() => {
     setPreviewError(false);
+    setImageLoaded(false);
   }, [currentIndex]);
 
   const currentQuestion = questions[currentIndex];
   const currentPageNumber = Math.max(1, Number((currentQuestion?.rubric_json?.key_page_number as number) || currentQuestion?.evidence?.[0]?.page_number || 1));
+  const evidenceCount = currentQuestion?.evidence?.filter((box) => Number(box.page_number || 1) === currentPageNumber).length ?? 0;
+  const keyVisualUrl = `${api.getQuestionKeyVisualUrl(examId, currentQuestion?.id || 0)}?v=${examId}-${currentQuestion?.id || 0}-${currentPageNumber}`;
+  const keyPageUrlFromRubric = currentQuestion?.rubric_json?.key_page_url || currentQuestion?.rubric_json?.key_page_image_url;
+  const fallbackKeyPageUrl = typeof keyPageUrlFromRubric === 'string' && keyPageUrlFromRubric.trim().length > 0
+    ? keyPageUrlFromRubric
+    : api.getExamKeyPageUrl(examId, currentPageNumber);
 
   const updateCurrentQuestion = (updater: (question: EditableQuestion) => EditableQuestion) => {
     setQuestions((prev) => prev.map((question, index) => (index === currentIndex ? updater(question) : question)));
@@ -235,24 +243,48 @@ export function ExamReviewPage() {
       <p>Question {currentIndex + 1} of {questions.length}</p>
 
       <div className="stack" style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: 10, background: '#f8fafc' }}>
-        <label><input type="checkbox" checked={!previewError && (currentQuestion.evidence?.length ?? 0) > 0} readOnly /> Evidence loaded</label>
-        <label><input type="checkbox" checked={showOverlay} onChange={(e) => setShowOverlay(e.target.checked)} /> Show overlay</label>
+        {previewError && (
+          <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', color: '#78350f', borderRadius: 8, padding: 10 }}>
+            Key page preview not available for this question (PDF/image not rendered).
+          </div>
+        )}
+        {imageLoaded && !previewError && evidenceCount === 0 && (
+          <div style={{ background: '#e0f2fe', border: '1px solid #38bdf8', color: '#0c4a6e', borderRadius: 8, padding: 10 }}>
+            No overlay evidence was produced. You can still review the rubric below.
+          </div>
+        )}
+
         {!previewError ? (
           <EvidenceOverlayCanvas
-            imageUrl={`${api.getQuestionKeyVisualUrl(examId, currentQuestion.id)}?v=${currentQuestion.id}-${currentPageNumber}`}
+            imageUrl={keyVisualUrl}
             evidence={currentQuestion.evidence || []}
-            visible={showOverlay}
+            visible={showOverlay && evidenceCount > 0}
             pageNumber={currentPageNumber}
-            onImageError={() => setPreviewError(true)}
+            onImageError={() => {
+              setPreviewError(true);
+              setImageLoaded(false);
+            }}
+            onImageLoad={() => {
+              setPreviewError(false);
+              setImageLoaded(true);
+            }}
           />
         ) : (
           <div className="stack" style={{ gap: 8 }}>
-            <p className="subtle-text">Image failed to load.</p>
-            <button type="button" onClick={() => window.open(api.getExamKeyPageUrl(examId, currentPageNumber), '_blank', 'noopener,noreferrer')}>
-              Open key page
+            <button type="button" onClick={() => window.open(fallbackKeyPageUrl, '_blank', 'noopener,noreferrer')}>
+              Open key page in new tab
             </button>
           </div>
         )}
+
+        {evidenceCount > 0 && !previewError && (
+          <label>
+            <input type="checkbox" checked={showOverlay} onChange={(e) => setShowOverlay(e.target.checked)} /> Show overlays
+          </label>
+        )}
+        <p className="subtle-text" style={{ margin: 0 }}>
+          Overlay diagnostics: imageLoaded: {String(imageLoaded && !previewError)} | evidenceCount: {evidenceCount} | pageNumber: {currentPageNumber}
+        </p>
       </div>
 
       <label className="stack">

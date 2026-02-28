@@ -5,11 +5,10 @@ import { useToast } from '../components/ToastProvider';
 import type { ExamDetail } from '../types/api';
 
 export function ExamDetailPage() {
+  const ENABLE_MANUAL_QUESTION_ADD = false;
   const params = useParams();
   const examId = Number(params.examId);
   const [detail, setDetail] = useState<ExamDetail | null>(null);
-  const [questionLabel, setQuestionLabel] = useState('');
-  const [maxMarks, setMaxMarks] = useState(5);
   const [studentName, setStudentName] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   const { showError, showSuccess } = useToast();
@@ -27,18 +26,6 @@ export function ExamDetailPage() {
       void loadDetail();
     }
   }, [examId]);
-
-  const onAddQuestion = async (event: FormEvent) => {
-    event.preventDefault();
-    try {
-      await api.addQuestion(examId, questionLabel, maxMarks);
-      showSuccess('Question added');
-      setQuestionLabel('');
-      await loadDetail();
-    } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to add question');
-    }
-  };
 
   const onUploadSubmission = async (event: FormEvent) => {
     event.preventDefault();
@@ -64,31 +51,13 @@ export function ExamDetailPage() {
       <div className="grid-2">
         <section className="card">
           <h2>Questions</h2>
+          <p className="subtle-text">Questions are generated from the exam key.</p>
           <ul>
             {detail.questions.map((question) => (
               <li key={question.id}>{question.label} (max: {question.max_marks})</li>
             ))}
           </ul>
-          <form onSubmit={onAddQuestion} className="stack">
-            <label htmlFor="question-label">Question label</label>
-            <input
-              id="question-label"
-              value={questionLabel}
-              onChange={(e) => setQuestionLabel(e.target.value)}
-              placeholder="Question label"
-              required
-            />
-            <label htmlFor="max-marks">Maximum marks</label>
-            <input
-              id="max-marks"
-              type="number"
-              value={maxMarks}
-              min={0}
-              onChange={(e) => setMaxMarks(Number(e.target.value))}
-              required
-            />
-            <button type="submit" className="btn btn-primary">Add Question</button>
-          </form>
+          {ENABLE_MANUAL_QUESTION_ADD && null}
         </section>
 
         <section className="card">
