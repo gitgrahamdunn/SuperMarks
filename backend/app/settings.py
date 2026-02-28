@@ -43,6 +43,34 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("SUPERMARKS_SQLITE_PATH", "SQLITE_PATH"),
     )
     max_upload_mb: int = 25
+    storage_backend: str = Field(
+        default="local",
+        validation_alias=AliasChoices("SUPERMARKS_STORAGE_BACKEND", "STORAGE_BACKEND"),
+    )
+    s3_endpoint_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_S3_ENDPOINT_URL", "S3_ENDPOINT_URL"),
+    )
+    s3_bucket: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_S3_BUCKET", "S3_BUCKET"),
+    )
+    s3_access_key_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_S3_ACCESS_KEY_ID", "S3_ACCESS_KEY_ID"),
+    )
+    s3_secret_access_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_S3_SECRET_ACCESS_KEY", "S3_SECRET_ACCESS_KEY"),
+    )
+    s3_region: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_S3_REGION", "S3_REGION"),
+    )
+    s3_public_base_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_S3_PUBLIC_BASE_URL", "S3_PUBLIC_BASE_URL"),
+    )
 
     # Deployment toggles
     vercel_environment: bool = False

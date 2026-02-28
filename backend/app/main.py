@@ -19,6 +19,7 @@ from app.routers.exams import public_router as public_exams_router
 from app.routers.exams import router as exams_router
 from app.routers.questions import router as questions_router
 from app.routers.submissions import router as submissions_router
+from app.routers.files import router as files_router
 from app.settings import settings
 from app.storage import ensure_dir
 
@@ -50,6 +51,7 @@ app.include_router(public_exams_router, prefix="/api")
 app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(questions_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(submissions_router, prefix="/api", dependencies=[Depends(require_api_key)])
+app.include_router(files_router, prefix="/api", dependencies=[Depends(require_api_key)])
 
 
 @app.on_event("startup")

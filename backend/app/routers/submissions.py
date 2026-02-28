@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
 from app.pipeline.transcribe import get_ocr_provider
 from app.schemas import (
     GradeResultRead,
+    StoredFileRead,
     SubmissionFileRead,
     SubmissionPageRead,
     SubmissionRead,
@@ -35,8 +37,13 @@ from app.schemas import (
     TranscriptionRead,
 )
 from app.storage import crops_dir, pages_dir, relative_to_data, reset_dir
+from app.storage_provider import get_storage_signed_url, materialize_object_to_path
 
 router = APIRouter(prefix="/submissions", tags=["submissions"])
+
+
+def _run_async(coro):
+    return asyncio.run(coro)
 
 
 @router.get("/{submission_id}", response_model=SubmissionRead)
@@ -56,6 +63,26 @@ def get_submission(submission_id: int, session: Session = Depends(get_session)) 
         files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path) for f in files],
         pages=[SubmissionPageRead(id=p.id, page_number=p.page_number, image_path=p.image_path, width=p.width, height=p.height) for p in pages],
     )
+
+
+@router.get("/{submission_id}/files", response_model=list[StoredFileRead])
+def list_submission_files(submission_id: int, session: Session = Depends(get_session)) -> list[StoredFileRead]:
+    submission = session.get(Submission, submission_id)
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    rows = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == submission_id).order_by(SubmissionFile.id)).all()
+    return [
+        StoredFileRead(
+            id=row.id,
+            original_filename=row.original_filename,
+            stored_path=row.stored_path,
+            content_type=row.content_type,
+            size_bytes=row.size_bytes,
+            signed_url=_run_async(get_storage_signed_url(row.stored_path)),
+        )
+        for row in rows
+    ]
 
 
 @router.post("/{submission_id}/build-pages", response_model=list[SubmissionPageRead])
@@ -78,7 +105,8 @@ def build_pages(submission_id: int, session: Session = Depends(get_session)) -> 
             converter = Pdf2ImageConverter()
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        page_paths = converter.convert(Path(files[0].stored_path), out_dir)
+        source_path = _run_async(materialize_object_to_path(files[0].stored_path, out_dir / "source"))
+        page_paths = converter.convert(source_path, out_dir)
         for idx, page_path in enumerate(page_paths, 1):
             w, h = normalize_image_to_png(page_path, page_path)
             row = SubmissionPage(submission_id=submission_id, page_number=idx, image_path=str(page_path), width=w, height=h)
@@ -88,7 +116,8 @@ def build_pages(submission_id: int, session: Session = Depends(get_session)) -> 
     else:
         for idx, file in enumerate(files, 1):
             out_path = out_dir / f"page_{idx:04d}.png"
-            w, h = normalize_image_to_png(Path(file.stored_path), out_path)
+            source_path = _run_async(materialize_object_to_path(file.stored_path, out_dir / "source"))
+            w, h = normalize_image_to_png(source_path, out_path)
             row = SubmissionPage(submission_id=submission_id, page_number=idx, image_path=str(out_path), width=w, height=h)
             session.add(row)
             session.flush()

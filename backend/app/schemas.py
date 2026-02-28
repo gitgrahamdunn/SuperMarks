@@ -125,3 +125,12 @@ class ExamKeyPageRead(BaseModel):
 
 class ExamKeyUploadResponse(BaseModel):
     uploaded: int
+
+
+class StoredFileRead(BaseModel):
+    id: int
+    original_filename: str
+    stored_path: str
+    content_type: str
+    size_bytes: int
+    signed_url: str
