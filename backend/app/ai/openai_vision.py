@@ -440,3 +440,102 @@ def get_answer_key_parser() -> AnswerKeyParser:
     if os.getenv("OPENAI_MOCK", "").strip() == "1":
         return MockAnswerKeyParser()
     return OpenAIAnswerKeyParser()
+
+
+@dataclass
+class BulkNameDetectionResult:
+    page_number: int
+    student_name: str | None
+    confidence: float
+    evidence: dict[str, float] | None
+
+
+class BulkNameDetector(Protocol):
+    def detect(self, image_path: Path, page_number: int, model: str, request_id: str) -> BulkNameDetectionResult:
+        """Detect student name from a single rendered page image."""
+
+
+class OpenAIBulkNameDetector:
+    def __init__(self, timeout_seconds: float = 60.0) -> None:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        from openai import OpenAI
+        self._client = OpenAI(api_key=api_key, timeout=timeout_seconds)
+
+    def _build_prompt(self) -> str:
+        return (
+            "Extract the student name from this exam page. Look for fields like 'Name: ____' and typical top header boxes. "
+            "Return strict JSON only with keys: page_number (int), student_name (string or null), confidence (0..1), "
+            "evidence ({x,y,w,h} normalized 0..1 or null)."
+        )
+
+    def detect(self, image_path: Path, page_number: int, model: str, request_id: str) -> BulkNameDetectionResult:
+        raw = image_path.read_bytes()
+        encoded = base64.b64encode(raw).decode("utf-8")
+        payload = {
+            "model": model,
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": self._build_prompt()},
+                    {"type": "input_image", "image_url": f"data:image/jpeg;base64,{encoded}"},
+                ],
+            }],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "bulk_name_detect",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["page_number", "student_name", "confidence", "evidence"],
+                        "properties": {
+                            "page_number": {"type": "integer"},
+                            "student_name": {"type": ["string", "null"]},
+                            "confidence": {"type": "number"},
+                            "evidence": {
+                                "type": ["object", "null"],
+                                "additionalProperties": False,
+                                "required": ["x", "y", "w", "h"],
+                                "properties": {
+                                    "x": {"type": "number"},
+                                    "y": {"type": "number"},
+                                    "w": {"type": "number"},
+                                    "h": {"type": "number"},
+                                },
+                            },
+                        },
+                    },
+                }
+            },
+        }
+        try:
+            response = self._client.responses.create(**payload)
+            parsed = json.loads(response.output_text)
+            return BulkNameDetectionResult(
+                page_number=page_number,
+                student_name=parsed.get("student_name"),
+                confidence=float(parsed.get("confidence") or 0.0),
+                evidence=parsed.get("evidence"),
+            )
+        except Exception as exc:  # pragma: no cover
+            status_code = getattr(exc, "status_code", None)
+            if isinstance(exc, (httpx.TimeoutException, TimeoutError)):
+                status_code = 504
+            raise OpenAIRequestError(status_code=status_code, body=str(exc), message=f"OpenAI request failed: {exc}") from exc
+
+
+class MockBulkNameDetector:
+    def detect(self, image_path: Path, page_number: int, model: str, request_id: str) -> BulkNameDetectionResult:
+        _ = (image_path, model, request_id)
+        if page_number <= 2:
+            return BulkNameDetectionResult(page_number=page_number, student_name="Alice Johnson", confidence=0.92, evidence={"x": 0.1, "y": 0.05, "w": 0.3, "h": 0.08})
+        return BulkNameDetectionResult(page_number=page_number, student_name="Bob Smith", confidence=0.89, evidence={"x": 0.12, "y": 0.05, "w": 0.32, "h": 0.08})
+
+
+def get_bulk_name_detector() -> BulkNameDetector:
+    if os.getenv("OPENAI_MOCK", "").strip() == "1":
+        return MockBulkNameDetector()
+    return OpenAIBulkNameDetector()

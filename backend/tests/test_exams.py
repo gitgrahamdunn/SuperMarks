@@ -490,3 +490,60 @@ def test_parse_answer_key_returns_400_when_pdf_render_fails(tmp_path, monkeypatc
         assert payload["detail"] == "PDF render failed. Try uploading images."
         assert payload["stage"] == "build_key_pages"
         assert payload["request_id"]
+
+
+def test_bulk_upload_preview_and_finalize_creates_submissions(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    def _fake_render(input_path: Path, output_dir: Path, start_page_number: int, max_pages: int) -> list[Path]:
+        _ = (input_path, start_page_number, max_pages)
+        from PIL import Image
+        output_dir.mkdir(parents=True, exist_ok=True)
+        created = []
+        for idx in range(1, 5):
+            out = output_dir / f"page_{idx:04d}.png"
+            Image.new("RGB", (400, 600), (255, 255, 255)).save(out, format="PNG")
+            created.append(out)
+        return created
+
+    monkeypatch.setattr("app.routers.exams._render_pdf_pages", _fake_render)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Bulk Upload Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        preview = client.post(
+            f"/api/exams/{exam_id}/submissions/bulk",
+            files={"file": ("all-tests.pdf", _tiny_pdf_bytes(), "application/pdf")},
+        )
+        assert preview.status_code == 201
+        payload = preview.json()
+        assert payload["page_count"] == 4
+        assert len(payload["candidates"]) == 2
+        assert payload["candidates"][0]["student_name"] == "Alice Johnson"
+        assert payload["candidates"][0]["page_start"] == 1
+        assert payload["candidates"][0]["page_end"] == 2
+
+        bulk_upload_id = payload["bulk_upload_id"]
+        finalize = client.post(
+            f"/api/exams/{exam_id}/submissions/bulk/{bulk_upload_id}/finalize",
+            json={
+                "candidates": [
+                    {"student_name": "Alice Johnson", "page_start": 1, "page_end": 2},
+                    {"student_name": "Bob Smith", "page_start": 3, "page_end": 4},
+                ]
+            },
+        )
+        assert finalize.status_code == 200
+        final_payload = finalize.json()
+        assert len(final_payload["submissions"]) == 2
+
+        detail = client.get(f"/api/exams/{exam_id}")
+        assert detail.status_code == 200
+        assert len(detail.json()["submissions"]) == 2
