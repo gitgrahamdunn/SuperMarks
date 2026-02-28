@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, getOpenApiPaths } from '../api/client';
 import { EvidenceOverlayCanvas, type EvidenceBox } from '../components/EvidenceOverlayCanvas';
+import { AutoGrowTextarea } from '../components/AutoGrowTextarea';
 import { useToast } from '../components/ToastProvider';
 import type { QuestionRead } from '../types/api';
 
@@ -285,9 +286,9 @@ export function ExamReviewPage() {
 
         {currentQuestion.criteria.map((criterion, criterionIndex) => (
           <div key={`${currentQuestion.id}-${criterionIndex}`} className="criteria-row">
-            <textarea
+            <AutoGrowTextarea
+              id={`criterion-desc-${currentQuestion.id}-${criterionIndex}`}
               className="textarea-large"
-              rows={6}
               value={criterion.desc}
               onChange={(e) => onCriterionChange(criterionIndex, 'desc', e.target.value)}
               placeholder="Description"
@@ -305,15 +306,21 @@ export function ExamReviewPage() {
         <p className="subtle-text">Total criterion marks: {criteriaTotalMarks}</p>
       </div>
 
-      <label className="stack">
-        Answer key
-        <textarea className="textarea-large" rows={6} value={currentQuestion.answer_key} onChange={(e) => onFieldChange('answer_key', e.target.value)} />
-      </label>
+      <AutoGrowTextarea
+        id={`answer-key-${currentQuestion.id}`}
+        label="Answer key"
+        className="textarea-large"
+        value={currentQuestion.answer_key}
+        onChange={(e) => onFieldChange('answer_key', e.target.value)}
+      />
 
-      <label className="stack">
-        Model solution
-        <textarea className="textarea-large" rows={6} value={currentQuestion.model_solution} onChange={(e) => onFieldChange('model_solution', e.target.value)} />
-      </label>
+      <AutoGrowTextarea
+        id={`model-solution-${currentQuestion.id}`}
+        label="Model solution"
+        className="textarea-large"
+        value={currentQuestion.model_solution}
+        onChange={(e) => onFieldChange('model_solution', e.target.value)}
+      />
 
       {!saveAvailable && <p className="subtle-text">Save is unavailable because the backend does not expose a PATCH endpoint.</p>}
 

@@ -110,7 +110,7 @@ input, select, button, textarea {
   min-height: 140px;
   max-height: 320px;
   overflow-y: auto;
-  resize: vertical;
+  resize: none;
   width: 100%;
   box-sizing: border-box;
   line-height: 1.4;
@@ -127,6 +127,7 @@ input, select, button, textarea {
 body.theme-dark .textarea-large {
   background: color-mix(in srgb, var(--surface), black 8%);
   border-color: color-mix(in srgb, var(--border), white 15%);
+  color: var(--text);
 }
 
 .btn { cursor: pointer; border: 1px solid transparent; }
@@ -266,4 +267,8 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
   white-space: pre-wrap;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: .85rem;
+}
+
+.textarea-large[style*="overflow-y: auto"] {
+  overscroll-behavior: contain;
 }
