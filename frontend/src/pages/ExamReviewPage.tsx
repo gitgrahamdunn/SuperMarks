@@ -285,7 +285,9 @@ export function ExamReviewPage() {
 
         {currentQuestion.criteria.map((criterion, criterionIndex) => (
           <div key={`${currentQuestion.id}-${criterionIndex}`} className="criteria-row">
-            <input
+            <textarea
+              className="textarea-large"
+              rows={6}
               value={criterion.desc}
               onChange={(e) => onCriterionChange(criterionIndex, 'desc', e.target.value)}
               placeholder="Description"
@@ -305,12 +307,12 @@ export function ExamReviewPage() {
 
       <label className="stack">
         Answer key
-        <textarea rows={4} value={currentQuestion.answer_key} onChange={(e) => onFieldChange('answer_key', e.target.value)} />
+        <textarea className="textarea-large" rows={6} value={currentQuestion.answer_key} onChange={(e) => onFieldChange('answer_key', e.target.value)} />
       </label>
 
       <label className="stack">
         Model solution
-        <textarea rows={5} value={currentQuestion.model_solution} onChange={(e) => onFieldChange('model_solution', e.target.value)} />
+        <textarea className="textarea-large" rows={6} value={currentQuestion.model_solution} onChange={(e) => onFieldChange('model_solution', e.target.value)} />
       </label>
 
       {!saveAvailable && <p className="subtle-text">Save is unavailable because the backend does not expose a PATCH endpoint.</p>}
