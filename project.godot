@@ -1,0 +1,30 @@
+; Engine configuration file.
+; It's best edited using the editor and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+config/name="Moon RTS"
+run/main_scene="res://scenes/game/Main.tscn"
+config/features=PackedStringArray("4.2")
+
+[autoload]
+Game="*res://scripts/core/game.gd"
+Sim="*res://scripts/core/sim.gd"
+CommandBus="*res://scripts/core/command_bus.gd"
+DataDB="*res://scripts/core/data_db.gd"
+
+[display]
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+
+[rendering]
+renderer/rendering_method="forward_plus"
+textures/vram_compression/import_etc2_astc=true

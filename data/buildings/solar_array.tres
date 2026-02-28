@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="BuildingDef" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/core/building_def.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"solar_array"
+display_name = "Solar Array"
+costs = {
+&"metal": 75
+}
+build_time = 8.0
+hp = 250
+footprint = Vector2i(2, 2)

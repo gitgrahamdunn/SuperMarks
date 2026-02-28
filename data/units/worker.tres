@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="UnitDef" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/core/unit_def.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = &"worker"
+display_name = "Worker"
+costs = {
+&"metal": 25
+}
+build_time = 4.0
+hp = 60
+move_speed = 80.0

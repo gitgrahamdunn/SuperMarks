@@ -1,76 +1,42 @@
-# SuperMarks Monorepo
+# Moon RTS (Godot 4.x)
 
-SuperMarks is organized as a two-project monorepo for Vercel:
+Moon RTS is a top-down 2D RTS prototype built in Godot 4.x with an authoritative simulation core.
 
-- `backend/`: FastAPI + SQLModel API deployed as a Python serverless project.
-- `frontend/`: Vite + React SPA deployed as a static frontend project.
+## Requirements
 
-## Strategy Lock
+- Godot **4.x** installed (4.2+ recommended).
 
-This repository is locked to **Strategy B: direct backend API calls only**.
+## Run the project
 
-- Frontend must call backend using `VITE_API_BASE_URL=https://<backend>/api`.
-- No frontend `/api` proxy functions.
-- Do not add frontend `/api` rewrites.
+1. Open Godot 4.x.
+2. Import this folder by selecting `project.godot`.
+3. Run the project.
 
-See `docs/ARCHITECTURE.md` for guardrails.
+Main scene: `res://scenes/game/Main.tscn`
 
-## Required Environment Variables
+## Architecture rules
 
-### Frontend
+- **Authoritative simulation** lives in `Sim` autoload and advances in fixed ticks (`20 TPS`).
+- **Commands-only mutation path**: UI and systems submit command dictionaries to `CommandBus`; simulation consumes commands in `Sim.step()`.
+- **No gameplay logic in view nodes**: scene scripts display state and trigger high-level calls only.
+- **Entity model**: Sim uses integer entity IDs and pure dictionaries (no Node references in sim state).
+- **Data-driven stats**: unit/building/tech definitions are `Resource` assets under `res://data/`.
+- **Allowed autoloads only**:
+  - `Game` -> `res://scripts/core/game.gd`
+  - `Sim` -> `res://scripts/core/sim.gd`
+  - `CommandBus` -> `res://scripts/core/command_bus.gd`
+  - `DataDB` -> `res://scripts/core/data_db.gd`
 
-- `VITE_API_BASE_URL=https://<backend-domain>/api`
-- `VITE_BACKEND_API_KEY=<backend-api-key>` (optional if backend auth is disabled)
+## Key locations
 
-### Backend
+- Scenes: `res://scenes/`
+- Scripts: `res://scripts/`
+- Data definitions: `res://data/`
 
-- `BACKEND_API_KEY=<backend-api-key>`
-- `CORS_ALLOW_ORIGINS=https://<frontend-domain>`
+## Smoke harness behavior
 
-## Local development
-
-### Backend
-
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .[dev]
-uvicorn app.main:app --reload --port 8000
-```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Set frontend `.env` with backend values:
-
-```bash
-VITE_API_BASE_URL=http://localhost:8000/api
-VITE_BACKEND_API_KEY=<your-local-key>
-```
-
-## Vercel deployment (two projects)
-
-### 1) Backend project
-
-- Create a Vercel project with **Root Directory** = `backend`
-- Uses `backend/api/index.py` as Python function entrypoint
-- `backend/vercel.json` rewrites all backend paths to the function
-
-### 2) Frontend project
-
-- Create a separate Vercel project with **Root Directory** = `frontend`
-- Build command: `npm run build`
-- Output directory: `dist`
-- SPA fallback routing is handled in `frontend/vercel.json`
-
-## Deployment policy note
-
-Git-based automatic deployments are disabled for both Vercel projects to avoid Hobby plan deployment-cap limits.
-When you are ready to ship, deploy manually from the Vercel UI using **Redeploy**.
+At startup (`Main` scene):
+- `Game.start_new_match()` resets sim and loads data.
+- Spawns a command dome + worker in sim state.
+- Sets initial resources.
+- HUD shows title, resources, and a tick counter derived from sim tick count.
