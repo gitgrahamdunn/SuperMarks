@@ -106,6 +106,29 @@ input, select, button, textarea {
   color: var(--text);
 }
 
+.textarea-large {
+  min-height: 140px;
+  max-height: 320px;
+  overflow-y: auto;
+  resize: vertical;
+  width: 100%;
+  box-sizing: border-box;
+  line-height: 1.4;
+  padding: .5rem;
+  background: var(--surface-alt);
+  border-color: var(--border);
+}
+
+.textarea-large:focus-visible {
+  border-color: color-mix(in srgb, var(--focus), transparent 25%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus), transparent 75%);
+}
+
+body.theme-dark .textarea-large {
+  background: color-mix(in srgb, var(--surface), black 8%);
+  border-color: color-mix(in srgb, var(--border), white 15%);
+}
+
 .btn { cursor: pointer; border: 1px solid transparent; }
 .btn:disabled { opacity: .6; cursor: not-allowed; }
 .btn-primary { background: var(--primary); color: var(--primary-contrast); }
@@ -202,7 +225,7 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
 .criteria-block { border: 1px solid var(--border-soft); border-radius: .6rem; padding: .75rem; }
 .criteria-header { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
 .criteria-header h3 { margin: 0; font-size: 1rem; }
-.criteria-row { display: grid; grid-template-columns: 1fr 120px auto; gap: .5rem; align-items: center; }
+.criteria-row { display: grid; grid-template-columns: 1fr 120px auto; gap: .5rem; align-items: start; }
 
 .contract-error-page { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }
 .contract-error-card {
