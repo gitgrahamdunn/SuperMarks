@@ -59,6 +59,27 @@ class SubmissionFile(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class ExamBulkUploadFile(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    exam_id: int = Field(foreign_key="exam.id", index=True)
+    original_filename: str
+    stored_path: str
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class BulkUploadPage(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    bulk_upload_id: int = Field(foreign_key="exambulkuploadfile.id", index=True)
+    page_number: int
+    image_path: str
+    width: int
+    height: int
+    detected_student_name: Optional[str] = None
+    detection_confidence: float = 0.0
+    detection_evidence_json: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class SubmissionPage(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     submission_id: int = Field(foreign_key="submission.id", index=True)

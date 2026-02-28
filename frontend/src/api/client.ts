@@ -1,4 +1,7 @@
 import type {
+  BulkFinalizePayloadCandidate,
+  BulkFinalizeResponse,
+  BulkUploadPreview,
   ExamDetail,
   ExamRead,
   QuestionRead,
@@ -372,6 +375,26 @@ export const api = {
     files.forEach((file) => formData.append('files', file));
     return request<SubmissionRead>(`exams/${examId}/submissions`, { method: 'POST', body: formData }, DEFAULT_TIMEOUT_MS);
   },
+
+  uploadBulkSubmissionsPdf: async (examId: number, file: File, rosterText?: string) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (rosterText && rosterText.trim()) {
+      formData.append('roster', rosterText);
+    }
+    return request<BulkUploadPreview>(`exams/${examId}/submissions/bulk`, { method: 'POST', body: formData }, BUILD_PAGES_TIMEOUT_MS);
+  },
+  getBulkSubmissionPreview: (examId: number, bulkUploadId: number) => request<BulkUploadPreview>(`exams/${examId}/submissions/bulk/${bulkUploadId}`),
+  finalizeBulkSubmissions: (examId: number, bulkUploadId: number, candidates: BulkFinalizePayloadCandidate[]) => request<BulkFinalizeResponse>(
+    `exams/${examId}/submissions/bulk/${bulkUploadId}/finalize`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ candidates }),
+    },
+    EXAM_CREATE_TIMEOUT_MS,
+  ),
+  getBulkUploadPageUrl: (examId: number, bulkUploadId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/submissions/bulk/${bulkUploadId}/page/${pageNumber}`),
   uploadExamKey: async (examId: number, files: File[], options?: RequestInit) => {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));

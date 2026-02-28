@@ -134,3 +134,43 @@ class StoredFileRead(BaseModel):
     content_type: str
     size_bytes: int
     signed_url: str
+
+
+class NameEvidence(BaseModel):
+    page_number: int
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+class BulkUploadCandidate(BaseModel):
+    candidate_id: str
+    student_name: str
+    confidence: float
+    page_start: int
+    page_end: int
+    needs_review: bool
+    name_evidence: NameEvidence | None = None
+
+
+class BulkUploadPreviewResponse(BaseModel):
+    bulk_upload_id: int
+    page_count: int
+    candidates: list[BulkUploadCandidate]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class BulkUploadFinalizeCandidate(BaseModel):
+    student_name: str
+    page_start: int
+    page_end: int
+
+
+class BulkUploadFinalizeRequest(BaseModel):
+    candidates: list[BulkUploadFinalizeCandidate]
+
+
+class BulkUploadFinalizeResponse(BaseModel):
+    submissions: list[SubmissionRead]
+    warnings: list[str] = Field(default_factory=list)

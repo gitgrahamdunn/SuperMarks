@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import uuid
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -21,15 +22,17 @@ from sqlmodel import Session, delete, select
 
 from app.ai.openai_vision import (
     AnswerKeyParser,
+    BulkNameDetectionResult,
     OpenAIRequestError,
     ParseResult,
     SchemaBuildError,
     build_answer_key_response_schema,
     get_answer_key_parser,
+    get_bulk_name_detector,
 )
 from app.db import get_session
-from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamKeyParseRun, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionStatus, utcnow
-from app.schemas import ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionRead
+from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseRun, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionPage, SubmissionStatus, utcnow
+from app.schemas import BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
 from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
@@ -375,6 +378,280 @@ def create_submission(
         pages=[],
     )
 
+
+
+def _bulk_pages_dir(exam_id: int, bulk_upload_id: int) -> Path:
+    return settings.data_path / "exams" / str(exam_id) / "bulk" / str(bulk_upload_id) / "pages"
+
+
+def _nearest_roster_name(name: str, roster: list[str]) -> str:
+    if not roster:
+        return name
+    best = name
+    best_score = 0.0
+    for candidate in roster:
+        score = SequenceMatcher(None, name.lower(), candidate.lower()).ratio()
+        if score > best_score:
+            best = candidate
+            best_score = score
+    return best if best_score >= 0.65 else name
+
+
+def _segment_bulk_candidates(
+    detections: list[BulkNameDetectionResult],
+    roster: list[str],
+    min_pages_per_student: int,
+    max_carry_forward_pages: int = 2,
+) -> tuple[list[BulkUploadCandidate], list[str]]:
+    warnings: list[str] = []
+    candidates: list[BulkUploadCandidate] = []
+    if not detections:
+        return candidates, warnings
+
+    current_name = "Unknown Student"
+    current_start = detections[0].page_number
+    confidences: list[float] = []
+    last_evidence: NameEvidence | None = None
+    missing_run = 0
+
+    def finalize(end_page: int, needs_review: bool = False) -> None:
+        nonlocal candidates, current_start, confidences, last_evidence
+        if end_page < current_start:
+            return
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        candidate = BulkUploadCandidate(
+            candidate_id=uuid.uuid4().hex,
+            student_name=current_name,
+            confidence=round(avg_conf, 3),
+            page_start=current_start,
+            page_end=end_page,
+            needs_review=needs_review or current_name == "Unknown Student" or (end_page - current_start + 1) < min_pages_per_student,
+            name_evidence=last_evidence,
+        )
+        if (end_page - current_start + 1) < min_pages_per_student:
+            warnings.append(f"Candidate {candidate.student_name} has fewer than min_pages_per_student={min_pages_per_student}")
+        candidates.append(candidate)
+
+    for det in detections:
+        proposed_name = (det.student_name or "").strip()
+        if proposed_name:
+            proposed_name = _nearest_roster_name(proposed_name, roster)
+            evidence = det.evidence or {}
+            last_evidence = NameEvidence(
+                page_number=det.page_number,
+                x=float(evidence.get("x", 0.0)),
+                y=float(evidence.get("y", 0.0)),
+                w=float(evidence.get("w", 0.0)),
+                h=float(evidence.get("h", 0.0)),
+            )
+            if current_name == "Unknown Student":
+                current_name = proposed_name
+                confidences = [det.confidence]
+                missing_run = 0
+                continue
+            if proposed_name != current_name:
+                finalize(det.page_number - 1)
+                current_name = proposed_name
+                current_start = det.page_number
+                confidences = [det.confidence]
+                missing_run = 0
+                continue
+            confidences.append(det.confidence)
+            missing_run = 0
+        else:
+            missing_run += 1
+            if missing_run > max_carry_forward_pages:
+                warnings.append(f"Page {det.page_number} has ambiguous student name; please review.")
+                confidences.append(0.0)
+            else:
+                confidences.append(max(confidences[-1] if confidences else 0.4, 0.4))
+
+    finalize(detections[-1].page_number, needs_review=missing_run > max_carry_forward_pages)
+    return candidates, warnings
+
+
+@router.post("/{exam_id}/submissions/bulk", response_model=BulkUploadPreviewResponse, status_code=status.HTTP_201_CREATED)
+def create_bulk_submission_preview(
+    exam_id: int,
+    file: UploadFile = File(...),
+    name_hint_regex: str | None = Form(default=None),
+    roster: str | None = Form(default=None),
+    min_pages_per_student: int = Form(default=1),
+    session: Session = Depends(get_session),
+) -> BulkUploadPreviewResponse:
+    _ = name_hint_regex
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    filename = _sanitize_filename(file.filename or "bulk.pdf")
+    if Path(filename).suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Bulk upload requires a single PDF file")
+
+    payload = file.file.read()
+    storage = get_storage_provider()
+    bulk = ExamBulkUploadFile(exam_id=exam_id, original_filename=filename, stored_path="")
+    session.add(bulk)
+    session.commit()
+    session.refresh(bulk)
+
+    object_key = f"exams/{exam_id}/bulk/{bulk.id}/{uuid.uuid4().hex}_{filename}"
+    stored = _run_async(storage.put_bytes(object_key, payload, content_type=file.content_type or "application/pdf"))
+    bulk.stored_path = stored["key"]
+    session.add(bulk)
+    session.commit()
+
+    output_dir = reset_dir(_bulk_pages_dir(exam_id, bulk.id))
+    source_path = _run_async(materialize_object_to_path(bulk.stored_path, settings.data_path / "cache" / "bulk" / str(exam_id) / str(bulk.id)))
+    rendered_paths = _render_pdf_pages(source_path, output_dir, start_page_number=1, max_pages=500)
+    session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id))
+
+    detections: list[BulkNameDetectionResult] = []
+    detector = get_bulk_name_detector()
+    for idx, page_path in enumerate(rendered_paths, start=1):
+        with Image.open(page_path) as image:
+            w, h = image.width, image.height
+        detection: BulkNameDetectionResult | None = None
+        try:
+            detection = detector.detect(page_path, idx, model="gpt-5-nano", request_id=uuid.uuid4().hex)
+            if detection.student_name is None or detection.confidence < 0.5:
+                detection = detector.detect(page_path, idx, model="gpt-5-mini", request_id=uuid.uuid4().hex)
+        except OpenAIRequestError:
+            detection = BulkNameDetectionResult(page_number=idx, student_name=None, confidence=0.0, evidence=None)
+        row = BulkUploadPage(
+            bulk_upload_id=bulk.id,
+            page_number=idx,
+            image_path=str(page_path),
+            width=w,
+            height=h,
+            detected_student_name=detection.student_name,
+            detection_confidence=detection.confidence,
+            detection_evidence_json=json.dumps(detection.evidence or {}),
+        )
+        session.add(row)
+        detections.append(detection)
+
+    session.commit()
+
+    roster_list: list[str] = []
+    if roster:
+        try:
+            maybe_json = json.loads(roster)
+            if isinstance(maybe_json, list):
+                roster_list = [str(item).strip() for item in maybe_json if str(item).strip()]
+        except json.JSONDecodeError:
+            roster_list = [line.strip() for line in roster.splitlines() if line.strip()]
+
+    candidates, warnings = _segment_bulk_candidates(detections, roster=roster_list, min_pages_per_student=max(min_pages_per_student, 1))
+    return BulkUploadPreviewResponse(
+        bulk_upload_id=bulk.id,
+        page_count=len(rendered_paths),
+        candidates=candidates,
+        warnings=warnings,
+    )
+
+
+@router.get("/{exam_id}/submissions/bulk/{bulk_upload_id}", response_model=BulkUploadPreviewResponse)
+def get_bulk_submission_preview(exam_id: int, bulk_upload_id: int, session: Session = Depends(get_session)) -> BulkUploadPreviewResponse:
+    bulk = session.get(ExamBulkUploadFile, bulk_upload_id)
+    if not bulk or bulk.exam_id != exam_id:
+        raise HTTPException(status_code=404, detail="Bulk upload not found")
+
+    pages = session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload_id).order_by(BulkUploadPage.page_number)).all()
+    detections = [BulkNameDetectionResult(page_number=p.page_number, student_name=p.detected_student_name, confidence=p.detection_confidence, evidence=json.loads(p.detection_evidence_json or "{}")) for p in pages]
+    candidates, warnings = _segment_bulk_candidates(detections, roster=[], min_pages_per_student=1)
+    return BulkUploadPreviewResponse(bulk_upload_id=bulk_upload_id, page_count=len(pages), candidates=candidates, warnings=warnings)
+
+
+@router.get("/{exam_id}/submissions/bulk/{bulk_upload_id}/page/{page_number}")
+def get_bulk_upload_page_image(exam_id: int, bulk_upload_id: int, page_number: int, session: Session = Depends(get_session)) -> FileResponse:
+    bulk = session.get(ExamBulkUploadFile, bulk_upload_id)
+    if not bulk or bulk.exam_id != exam_id:
+        raise HTTPException(status_code=404, detail="Bulk upload not found")
+
+    row = session.exec(
+        select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload_id, BulkUploadPage.page_number == page_number)
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    image_path = Path(row.image_path)
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Page image not found")
+    return FileResponse(image_path)
+
+
+@router.post("/{exam_id}/submissions/bulk/{bulk_upload_id}/finalize", response_model=BulkUploadFinalizeResponse)
+def finalize_bulk_submission_preview(
+    exam_id: int,
+    bulk_upload_id: int,
+    payload: BulkUploadFinalizeRequest,
+    session: Session = Depends(get_session),
+) -> BulkUploadFinalizeResponse:
+    bulk = session.get(ExamBulkUploadFile, bulk_upload_id)
+    if not bulk or bulk.exam_id != exam_id:
+        raise HTTPException(status_code=404, detail="Bulk upload not found")
+
+    pages = session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload_id).order_by(BulkUploadPage.page_number)).all()
+    if not pages:
+        raise HTTPException(status_code=400, detail="No rendered pages available")
+
+    page_map = {p.page_number: p for p in pages}
+    max_page = pages[-1].page_number
+    used_pages: set[int] = set()
+    warnings: list[str] = []
+    created: list[SubmissionRead] = []
+
+    for candidate in payload.candidates:
+        if candidate.page_start < 1 or candidate.page_end > max_page or candidate.page_end < candidate.page_start:
+            raise HTTPException(status_code=400, detail=f"Invalid page range for {candidate.student_name}")
+        for page_num in range(candidate.page_start, candidate.page_end + 1):
+            if page_num in used_pages:
+                raise HTTPException(status_code=400, detail=f"Overlapping page range at page {page_num}")
+            used_pages.add(page_num)
+
+    all_pages = set(range(1, max_page + 1))
+    if used_pages != all_pages:
+        warnings.append("Candidate ranges do not cover all pages.")
+
+    for candidate in payload.candidates:
+        submission = Submission(exam_id=exam_id, student_name=candidate.student_name, status=SubmissionStatus.UPLOADED)
+        session.add(submission)
+        session.flush()
+
+        page_reads = []
+        file_row = SubmissionFile(
+            submission_id=submission.id,
+            file_kind="pdf",
+            original_filename=bulk.original_filename,
+            stored_path=bulk.stored_path,
+            content_type="application/pdf",
+            size_bytes=0,
+        )
+        session.add(file_row)
+        session.flush()
+
+        for idx, page_num in enumerate(range(candidate.page_start, candidate.page_end + 1), start=1):
+            src = page_map[page_num]
+            sp = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=src.image_path, width=src.width, height=src.height)
+            session.add(sp)
+            session.flush()
+            page_reads.append(SubmissionPageRead(id=sp.id, page_number=idx, image_path=relative_to_data(Path(src.image_path)), width=src.width, height=src.height))
+
+        created.append(
+            SubmissionRead(
+                id=submission.id,
+                exam_id=submission.exam_id,
+                student_name=submission.student_name,
+                status=submission.status,
+                created_at=submission.created_at,
+                files=[SubmissionFileRead(id=file_row.id, file_kind="pdf", original_filename=bulk.original_filename, stored_path=bulk.stored_path)],
+                pages=page_reads,
+            )
+        )
+
+    session.commit()
+    return BulkUploadFinalizeResponse(submissions=created, warnings=warnings)
 
 
 @router.post("/{exam_id}/key/upload", response_model=ExamKeyUploadResponse)

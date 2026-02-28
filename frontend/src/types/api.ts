@@ -83,3 +83,40 @@ export interface ExamKeyPage {
   width: number;
   height: number;
 }
+
+
+export interface NameEvidence {
+  page_number: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface BulkUploadCandidate {
+  candidate_id: string;
+  student_name: string;
+  confidence: number;
+  page_start: number;
+  page_end: number;
+  needs_review: boolean;
+  name_evidence: NameEvidence | null;
+}
+
+export interface BulkUploadPreview {
+  bulk_upload_id: number;
+  page_count: number;
+  candidates: BulkUploadCandidate[];
+  warnings: string[];
+}
+
+export interface BulkFinalizePayloadCandidate {
+  student_name: string;
+  page_start: number;
+  page_end: number;
+}
+
+export interface BulkFinalizeResponse {
+  submissions: SubmissionRead[];
+  warnings: string[];
+}
