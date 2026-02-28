@@ -117,3 +117,30 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
 
         assert (Path(settings.data_dir) / "crops" / str(exam_id) / str(submission_id) / "Q1.png").exists()
         assert (Path(settings.data_dir) / "crops" / str(exam_id) / str(submission_id) / "Q2.png").exists()
+
+
+def test_submission_files_list_includes_signed_url(tmp_path: Path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_resp = client.post("/api/exams", json={"name": "Algebra Test"})
+        exam_id = exam_resp.json()["id"]
+
+        upload_resp = client.post(
+            f"/api/exams/{exam_id}/submissions",
+            data={"student_name": "Alice"},
+            files=[("files", ("page1.png", make_image_bytes("Q1 x=4"), "image/png"))],
+        )
+        assert upload_resp.status_code == 201
+        submission_id = upload_resp.json()["id"]
+
+        files_resp = client.get(f"/api/submissions/{submission_id}/files")
+        assert files_resp.status_code == 200
+        payload = files_resp.json()
+        assert len(payload) == 1
+        assert payload[0]["signed_url"].startswith("/api/files/local?key=")
+        assert payload[0]["content_type"] == "image/png"

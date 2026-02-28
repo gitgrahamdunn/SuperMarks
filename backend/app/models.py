@@ -54,6 +54,8 @@ class SubmissionFile(SQLModel, table=True):
     file_kind: str
     original_filename: str
     stored_path: str
+    content_type: str = "application/octet-stream"
+    size_bytes: int = 0
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -81,6 +83,8 @@ class ExamKeyFile(SQLModel, table=True):
     exam_id: int = Field(foreign_key="exam.id", index=True)
     original_filename: str
     stored_path: str
+    content_type: str = "application/octet-stream"
+    size_bytes: int = 0
     created_at: datetime = Field(default_factory=utcnow)
 
 

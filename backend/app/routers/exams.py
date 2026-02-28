@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -28,9 +29,10 @@ from app.ai.openai_vision import (
 )
 from app.db import get_session
 from app.models import Exam, ExamKeyFile, ExamKeyPage, ExamKeyParseRun, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionStatus, utcnow
-from app.schemas import ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, SubmissionFileRead, SubmissionRead
+from app.schemas import ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionRead
 from app.settings import settings
-from app.storage import ensure_dir, reset_dir, relative_to_data, save_upload_file, upload_dir
+from app.storage import ensure_dir, reset_dir, relative_to_data
+from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 public_router = APIRouter(prefix="/exams", tags=["exams-public"])
@@ -62,6 +64,15 @@ def _load_key_page_images(exam_id: int, session: Session) -> list[Path]:
         return []
     return [path for path in sorted(legacy_dir.iterdir()) if path.suffix.lower() in {".png", ".jpg", ".jpeg"}]
 
+
+
+def _sanitize_filename(filename: str) -> str:
+    cleaned = Path(filename or "upload.bin").name
+    return cleaned.replace("/", "_").replace("\\", "_")
+
+
+def _run_async(coro):
+    return asyncio.run(coro)
 
 
 
@@ -123,7 +134,7 @@ def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
     page_num = 1
 
     for key_file in key_files:
-        source_path = Path(key_file.stored_path)
+        source_path = _run_async(materialize_object_to_path(key_file.stored_path, settings.data_path / "cache" / "keys" / str(exam_id)))
         if not source_path.exists():
             continue
 
@@ -231,10 +242,6 @@ def _invoke_parser(parser: AnswerKeyParser, image_paths: list[Path], model: str,
     except TypeError:
         return parser.parse(image_paths, model=model)
 
-def _exam_key_dir(exam_id: int) -> Path:
-    return ensure_dir(settings.data_path / "exams" / str(exam_id) / "key")
-
-
 @router.post("", response_model=ExamRead, status_code=status.HTTP_201_CREATED)
 def create_exam(payload: ExamCreate, session: Session = Depends(get_session)) -> Exam:
     exam = Exam(name=payload.name)
@@ -326,8 +333,8 @@ def create_submission(
     session.commit()
     session.refresh(submission)
 
-    sub_upload_dir = upload_dir(exam_id, submission.id)
     created_files: list[SubmissionFileRead] = []
+    storage = get_storage_provider()
     max_size = settings.max_upload_mb * 1024 * 1024
 
     for upload, kind in zip(files, kinds, strict=True):
@@ -337,20 +344,24 @@ def create_submission(
         if size > max_size:
             raise HTTPException(status_code=400, detail=f"File {upload.filename} exceeds {settings.max_upload_mb}MB")
 
-        filename = Path(upload.filename or "upload.bin").name
-        destination = sub_upload_dir / filename
-        save_upload_file(upload, destination)
+        filename = _sanitize_filename(upload.filename or "upload.bin")
+        content_type = upload.content_type or "application/octet-stream"
+        payload = upload.file.read()
+        object_key = f"exams/{exam_id}/submissions/{submission.id}/{uuid.uuid4().hex}_{filename}"
+        stored = _run_async(storage.put_bytes(object_key, payload, content_type=content_type))
 
         row = SubmissionFile(
             submission_id=submission.id,
             file_kind=kind,
             original_filename=filename,
-            stored_path=str(destination),
+            stored_path=stored["key"],
+            content_type=content_type,
+            size_bytes=size,
         )
         session.add(row)
         session.flush()
         created_files.append(
-            SubmissionFileRead(id=row.id, file_kind=row.file_kind, original_filename=row.original_filename, stored_path=relative_to_data(destination))
+            SubmissionFileRead(id=row.id, file_kind=row.file_kind, original_filename=row.original_filename, stored_path=row.stored_path)
         )
 
     session.commit()
@@ -379,22 +390,26 @@ def upload_exam_key_files(
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
-    key_dir = _exam_key_dir(exam_id)
+    storage = get_storage_provider()
     uploaded = 0
 
     for idx, upload in enumerate(files, start=1):
-        filename = Path(upload.filename or f"key-{idx}").name
+        filename = _sanitize_filename(upload.filename or f"key-{idx}")
         extension = Path(filename).suffix.lower()
         if extension not in _ALLOWED_KEY_EXTENSIONS:
             raise HTTPException(status_code=400, detail="Unsupported file type. Use pdf/png/jpg/jpeg")
 
-        destination = key_dir / filename
-        save_upload_file(upload, destination)
+        content_type = upload.content_type or "application/octet-stream"
+        payload = upload.file.read()
+        object_key = f"exams/{exam_id}/key/{uuid.uuid4().hex}_{filename}"
+        stored = _run_async(storage.put_bytes(object_key, payload, content_type=content_type))
 
         row = ExamKeyFile(
             exam_id=exam_id,
             original_filename=filename,
-            stored_path=str(destination),
+            stored_path=stored["key"],
+            content_type=content_type,
+            size_bytes=len(payload),
         )
         session.add(row)
         uploaded += 1
@@ -403,6 +418,28 @@ def upload_exam_key_files(
     session.add(exam)
     session.commit()
     return ExamKeyUploadResponse(uploaded=uploaded)
+
+
+@router.get("/{exam_id}/key/files", response_model=list[StoredFileRead])
+def list_exam_key_files(exam_id: int, session: Session = Depends(get_session)) -> list[StoredFileRead]:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    rows = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id).order_by(ExamKeyFile.id)).all()
+    result: list[StoredFileRead] = []
+    for row in rows:
+        result.append(
+            StoredFileRead(
+                id=row.id,
+                original_filename=row.original_filename,
+                stored_path=row.stored_path,
+                content_type=row.content_type,
+                size_bytes=row.size_bytes,
+                signed_url=_run_async(get_storage_signed_url(row.stored_path)),
+            )
+        )
+    return result
 
 
 @router.post("/{exam_id}/key/build-pages", response_model=list[ExamKeyPageRead])
@@ -595,6 +632,7 @@ def parse_answer_key(
     timings: dict[str, int] = {"build_pages_ms": 0, "openai_ms": 0, "validate_ms": 0, "save_ms": 0}
     page_index = 0
     page_count = 0
+    key_pages_meta: list[dict[str, object]] = []
 
     def _err(
         status_code: int,

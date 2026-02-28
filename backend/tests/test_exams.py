@@ -124,14 +124,38 @@ def test_upload_exam_key_files_stores_file_and_db_row(tmp_path) -> None:
         assert response.status_code == 200
         assert response.json() == {"uploaded": 1}
 
-        stored = Path(settings.data_dir) / "exams" / str(exam_id) / "key" / "key.png"
-        assert stored.exists()
-
     with Session(db.engine) as session:
         rows = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id)).all()
         assert len(rows) == 1
         assert rows[0].original_filename == "key.png"
-        assert rows[0].stored_path == str(stored)
+        assert rows[0].stored_path.startswith(f"exams/{exam_id}/key/")
+        assert rows[0].content_type == "image/png"
+        assert rows[0].size_bytes > 0
+
+
+def test_list_exam_key_files_includes_signed_url(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Biology Midterm"})
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        response = client.get(f"/api/exams/{exam_id}/key/files")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 1
+        assert payload[0]["signed_url"].startswith("/api/files/local?key=")
+        assert payload[0]["content_type"] == "image/png"
 
 
 def test_patch_question_updates_fields_and_list_reflects_changes(tmp_path) -> None:
