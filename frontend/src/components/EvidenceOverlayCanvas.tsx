@@ -22,6 +22,7 @@ interface EvidenceOverlayCanvasProps {
   visible: boolean;
   pageNumber: number;
   onImageError?: () => void;
+  onImageLoad?: () => void;
 }
 
 export function EvidenceOverlayCanvas({
@@ -30,6 +31,7 @@ export function EvidenceOverlayCanvas({
   visible,
   pageNumber,
   onImageError,
+  onImageLoad,
 }: EvidenceOverlayCanvasProps) {
   const imageRef = useRef<HTMLImageElement | null>(null);
   const [renderedSize, setRenderedSize] = useState({ width: 0, height: 0 });
@@ -76,7 +78,10 @@ export function EvidenceOverlayCanvas({
           src={imageUrl}
           alt="Key page"
           style={{ width: '100%', borderRadius: 8, display: 'block' }}
-          onLoad={updateRenderedSize}
+          onLoad={() => {
+            updateRenderedSize();
+            onImageLoad?.();
+          }}
           onError={onImageError}
         />
         {visible && renderedSize.width > 0 && renderedSize.height > 0 && (
