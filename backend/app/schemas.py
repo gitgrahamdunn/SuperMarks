@@ -141,6 +141,21 @@ class StoredFileRead(BaseModel):
     blob_url: str | None = None
 
 
+class BlobFileMetadata(BaseModel):
+    original_filename: str
+    blob_pathname: str
+    content_type: str = "application/octet-stream"
+    size_bytes: int = Field(default=0, ge=0)
+
+
+class BlobRegisterRequest(BaseModel):
+    files: list[BlobFileMetadata] = Field(default_factory=list)
+
+
+class BlobRegisterResponse(BaseModel):
+    registered: int
+
+
 class NameEvidence(BaseModel):
     page_number: int
     x: float

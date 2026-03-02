@@ -16,10 +16,11 @@ import httpx
 
 from PIL import Image, ImageOps
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from sqlmodel import Session, delete, select
 
+from app.blob_service import create_signed_blob_url
 from app.ai.openai_vision import (
     AnswerKeyParser,
     BulkNameDetectionResult,
@@ -32,7 +33,7 @@ from app.ai.openai_vision import (
 )
 from app.db import get_session
 from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParsePage, ExamKeyParseRun, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionPage, SubmissionStatus, utcnow
-from app.schemas import BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
+from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
 from app.storage_provider import get_storage_signed_url, materialize_object_to_path
@@ -78,6 +79,14 @@ def _sanitize_filename(filename: str) -> str:
 
 def _run_async(coro):
     return asyncio.run(coro)
+
+
+def _resolve_signed_url(pathname: str) -> str:
+    try:
+        return _run_async(create_signed_blob_url(pathname))
+    except Exception:
+        return _run_async(get_storage_signed_url(pathname))
+
 
 
 
@@ -314,24 +323,28 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
 
 
 @router.post("/{exam_id}/submissions", response_model=SubmissionRead, status_code=status.HTTP_201_CREATED)
-def create_submission(
+async def create_submission(
     exam_id: int,
-    student_name: str = Form(...),
-    files: list[UploadFile] = File(...),
+    request: Request,
     session: Session = Depends(get_session),
 ) -> SubmissionRead:
     exam = session.get(Exam, exam_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    if not files:
-        raise HTTPException(status_code=400, detail="At least one file is required")
+    student_name = ""
+    files: list[UploadFile] = []
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+        student_name = str(payload.get("student_name", "")).strip() if isinstance(payload, dict) else ""
+    else:
+        form = await request.form()
+        student_name = str(form.get("student_name", "")).strip()
+        files = [item for item in form.getlist("files") if hasattr(item, "filename") and hasattr(item, "file")]
 
-    kinds = [_ALLOWED_TYPES.get(f.content_type or "") for f in files]
-    if any(kind is None for kind in kinds):
-        raise HTTPException(status_code=400, detail="Unsupported file type. Use pdf/png/jpg/jpeg")
-    if "pdf" in kinds and len(files) > 1:
-        raise HTTPException(status_code=400, detail="Upload one PDF OR multiple images, not mixed")
+    if not student_name:
+        raise HTTPException(status_code=400, detail="student_name is required")
 
     submission = Submission(exam_id=exam_id, student_name=student_name, status=SubmissionStatus.UPLOADED)
     session.add(submission)
@@ -339,51 +352,39 @@ def create_submission(
     session.refresh(submission)
 
     created_files: list[SubmissionFileRead] = []
-    max_size = settings.max_upload_mb * 1024 * 1024
+    if files:
+        kinds = [_ALLOWED_TYPES.get(f.content_type or "") for f in files]
+        if any(kind is None for kind in kinds):
+            raise HTTPException(status_code=400, detail="Unsupported file type. Use pdf/png/jpg/jpeg")
+        if "pdf" in kinds and len(files) > 1:
+            raise HTTPException(status_code=400, detail="Upload one PDF OR multiple images, not mixed")
 
-    for upload, kind in zip(files, kinds, strict=True):
-        upload.file.seek(0, 2)
-        size = upload.file.tell()
-        upload.file.seek(0)
-        if size > max_size:
-            raise HTTPException(status_code=400, detail=f"File {upload.filename} exceeds {settings.max_upload_mb}MB")
-        if size > _VERCEL_SERVER_UPLOAD_LIMIT_BYTES:
-            raise HTTPException(status_code=413, detail="File too large for server upload on Vercel. Use client upload mode.")
-
-        filename = _sanitize_filename(upload.filename or "upload.bin")
-        content_type = upload.content_type or "application/octet-stream"
-        payload = upload.file.read()
-        object_key = f"exams/{exam_id}/submissions/{submission.id}/{uuid.uuid4().hex}_{filename}"
-        try:
-            stored = upload_bytes(object_key, payload, content_type)
-        except BlobUploadError as exc:
-            raise HTTPException(status_code=500, detail=f"Blob upload failed: {exc}") from exc
-
-        row = SubmissionFile(
-            submission_id=submission.id,
-            file_kind=kind,
-            original_filename=filename,
-            stored_path=stored["pathname"],
-            blob_url=stored["url"],
-            blob_pathname=stored["pathname"],
-            content_type=stored["contentType"],
-            size_bytes=size,
-        )
-        session.add(row)
-        session.flush()
-        created_files.append(
-            SubmissionFileRead(
-                id=row.id,
-                file_kind=row.file_kind,
-                original_filename=row.original_filename,
-                stored_path=row.stored_path,
-                blob_url=row.blob_url,
-                content_type=row.content_type,
-                size_bytes=row.size_bytes,
+        storage = get_storage_provider()
+        max_size = settings.max_upload_mb * 1024 * 1024
+        for upload, kind in zip(files, kinds, strict=True):
+            upload.file.seek(0, 2)
+            size = upload.file.tell()
+            upload.file.seek(0)
+            if size > max_size:
+                raise HTTPException(status_code=400, detail=f"File {upload.filename} exceeds {settings.max_upload_mb}MB")
+            filename = _sanitize_filename(upload.filename or "upload.bin")
+            upload_content_type = upload.content_type or "application/octet-stream"
+            payload = upload.file.read()
+            object_key = f"exams/{exam_id}/submissions/{submission.id}/{uuid.uuid4().hex}_{filename}"
+            stored = await storage.put_bytes(object_key, payload, content_type=upload_content_type)
+            row = SubmissionFile(
+                submission_id=submission.id,
+                file_kind=kind,
+                original_filename=filename,
+                stored_path=stored["key"],
+                content_type=upload_content_type,
+                size_bytes=size,
             )
-        )
+            session.add(row)
+            session.flush()
+            created_files.append(SubmissionFileRead(id=row.id, file_kind=row.file_kind, original_filename=row.original_filename, stored_path=row.stored_path))
+        session.commit()
 
-    session.commit()
     return SubmissionRead(
         id=submission.id,
         exam_id=submission.exam_id,
@@ -393,6 +394,32 @@ def create_submission(
         files=created_files,
         pages=[],
     )
+
+
+
+@router.post("/{exam_id}/key/register", response_model=BlobRegisterResponse)
+def register_exam_key_files(exam_id: int, payload: BlobRegisterRequest, session: Session = Depends(get_session)) -> BlobRegisterResponse:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    registered = 0
+    for file in payload.files:
+        row = ExamKeyFile(
+            exam_id=exam_id,
+            original_filename=_sanitize_filename(file.original_filename),
+            stored_path=file.blob_pathname,
+            content_type=file.content_type,
+            size_bytes=file.size_bytes,
+        )
+        session.add(row)
+        registered += 1
+
+    if registered > 0:
+        exam.status = ExamStatus.KEY_UPLOADED
+        session.add(exam)
+    session.commit()
+    return BlobRegisterResponse(registered=registered)
 
 
 
@@ -737,8 +764,7 @@ def list_exam_key_files(exam_id: int, session: Session = Depends(get_session)) -
                 stored_path=row.stored_path,
                 content_type=row.content_type,
                 size_bytes=row.size_bytes,
-                signed_url=row.blob_url or _run_async(get_storage_signed_url(row.stored_path)),
-                blob_url=row.blob_url,
+                signed_url=_resolve_signed_url(row.stored_path),
             )
         )
     return result

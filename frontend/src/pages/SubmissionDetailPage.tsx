@@ -44,6 +44,16 @@ export function SubmissionDetailPage() {
     }
   };
 
+
+  const openSignedFile = async (pathname: string) => {
+    try {
+      const result = await api.getSignedBlobUrl(pathname);
+      window.open(result.url, '_blank', 'noopener,noreferrer');
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to open file');
+    }
+  };
+
   if (!submission) return <p>Loading...</p>;
 
   return (
@@ -63,17 +73,16 @@ export function SubmissionDetailPage() {
         <Link to={`/submissions/${submission.id}/results?examId=${submission.exam_id}`}>Results</Link>
       </div>
 
-      <h2>Student Files</h2>
-      {storedFiles.length === 0 && <p className="subtle-text">No uploaded files.</p>}
-      {storedFiles.length > 0 && (
-        <ul>
-          {storedFiles.map((file) => (
-            <li key={file.id}>
-              {file.original_filename} - <a href={file.blob_url || file.signed_url} target="_blank" rel="noreferrer">Download/View</a>
-            </li>
-          ))}
-        </ul>
-      )}
+
+      <h2>Uploaded Files</h2>
+      <ul>
+        {submission.files.map((file) => (
+          <li key={file.id}>
+            {file.original_filename}
+            <button type="button" onClick={() => void openSignedFile(file.stored_path)}>View</button>
+          </li>
+        ))}
+      </ul>
 
       <h2>Pages</h2>
       {submission.pages.length === 0 && <p>No pages yet. Build pages first.</p>}

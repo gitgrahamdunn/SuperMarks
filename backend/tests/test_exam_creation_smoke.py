@@ -12,6 +12,18 @@ from app.routers.exams import get_answer_key_parser
 from app.settings import settings
 
 
+def _tiny_png_bytes() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+        b"\x90wS\xde"
+        b"\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01"
+        b"\x0b\xe7\x02\x9d"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+
 class _StubAnswerKeyParser:
     def parse(self, image_paths: list[Path], model: str) -> ParseResult:
         assert image_paths
@@ -51,14 +63,11 @@ def test_exam_creation_workflow_smoke(tmp_path) -> None:
             exam_id = create_exam_json["id"]
             upload_response = client.post(
                 f"/api/exams/{exam_id}/key/upload",
-                files=[("files", ("key.png", b"\x89PNG\r\n\x1a\n", "image/png"))],
+                files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
             )
             assert upload_response.status_code == 200
             assert upload_response.json() == {"uploaded": 1}
 
-            key_pages_dir = Path(settings.data_dir) / "key_pages" / str(exam_id)
-            key_pages_dir.mkdir(parents=True, exist_ok=True)
-            (key_pages_dir / "page-1.png").write_bytes(b"fake-image")
 
             parse_response = client.post(f"/api/exams/{exam_id}/key/parse")
             assert parse_response.status_code == 200

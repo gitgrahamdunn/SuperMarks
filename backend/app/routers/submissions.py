@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from sqlmodel import Session, delete, select
 
 from app.db import get_session
+from app.blob_service import create_signed_blob_url
 from app.models import (
     AnswerCrop,
     Exam,
@@ -28,6 +29,8 @@ from app.pipeline.grade import get_grader
 from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
 from app.pipeline.transcribe import get_ocr_provider
 from app.schemas import (
+    BlobRegisterRequest,
+    BlobRegisterResponse,
     GradeResultRead,
     StoredFileRead,
     SubmissionFileRead,
@@ -44,6 +47,14 @@ router = APIRouter(prefix="/submissions", tags=["submissions"])
 
 def _run_async(coro):
     return asyncio.run(coro)
+
+
+def _resolve_signed_url(pathname: str) -> str:
+    try:
+        return _run_async(create_signed_blob_url(pathname))
+    except Exception:
+        return _run_async(get_storage_signed_url(pathname))
+
 
 
 @router.get("/{submission_id}", response_model=SubmissionRead)
@@ -79,11 +90,43 @@ def list_submission_files(submission_id: int, session: Session = Depends(get_ses
             stored_path=row.stored_path,
             content_type=row.content_type,
             size_bytes=row.size_bytes,
-            signed_url=row.blob_url or _run_async(get_storage_signed_url(row.stored_path)),
-            blob_url=row.blob_url,
+            signed_url=_resolve_signed_url(row.stored_path),
         )
         for row in rows
     ]
+
+
+
+
+@router.post("/{submission_id}/files/register", response_model=BlobRegisterResponse)
+def register_submission_files(submission_id: int, payload: BlobRegisterRequest, session: Session = Depends(get_session)) -> BlobRegisterResponse:
+    submission = session.get(Submission, submission_id)
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    registered = 0
+    for file in payload.files:
+        lower_name = file.original_filename.lower()
+        if lower_name.endswith(".pdf"):
+            kind = "pdf"
+        elif lower_name.endswith((".png", ".jpg", ".jpeg")):
+            kind = "image"
+        else:
+            kind = "image" if file.content_type.startswith("image/") else "pdf" if file.content_type == "application/pdf" else "binary"
+
+        row = SubmissionFile(
+            submission_id=submission_id,
+            file_kind=kind,
+            original_filename=file.original_filename,
+            stored_path=file.blob_pathname,
+            content_type=file.content_type,
+            size_bytes=file.size_bytes,
+        )
+        session.add(row)
+        registered += 1
+
+    session.commit()
+    return BlobRegisterResponse(registered=registered)
 
 
 @router.post("/{submission_id}/build-pages", response_model=list[SubmissionPageRead])
