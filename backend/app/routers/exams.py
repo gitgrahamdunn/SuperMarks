@@ -31,7 +31,7 @@ from app.ai.openai_vision import (
     get_bulk_name_detector,
 )
 from app.db import get_session
-from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseRun, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionPage, SubmissionStatus, utcnow
+from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParsePage, ExamKeyParseRun, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionPage, SubmissionStatus, utcnow
 from app.schemas import BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
@@ -898,316 +898,348 @@ def get_question_key_visual(
     return FileResponse(path=image_path, media_type=media_type)
 
 
-@router.post("/{exam_id}/key/parse")
-def parse_answer_key(
-    exam_id: int,
-    session: Session = Depends(get_session),
-    parser: AnswerKeyParser = Depends(get_answer_key_parser),
-) -> dict[str, object]:
-    request_id = str(uuid.uuid4())
-    stage = "load_exam"
-    timings: dict[str, int] = {"build_pages_ms": 0, "openai_ms": 0, "validate_ms": 0, "save_ms": 0}
-    page_index = 0
-    page_count = 0
-    key_pages_meta: list[dict[str, object]] = []
+def _extract_usage(result: ParseResult) -> tuple[int, int, float]:
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+    cost = float(usage.get("cost") or usage.get("cost_usd") or 0.0)
+    return input_tokens, output_tokens, cost
 
-    def _err(
-        status_code: int,
-        detail: str,
-        *,
-        openai_status: int | None = None,
-        openai_error: str | None = None,
-        error_page_index: int | None = None,
-    ) -> JSONResponse:
-        payload: dict[str, object] = {
-            "detail": detail,
-            "request_id": request_id,
-            "stage": stage,
-            "openai_status": openai_status,
-            "openai_error": openai_error,
-            "page_index": error_page_index if error_page_index is not None else page_index,
-            "page_count": page_count,
-            "key_pages": key_pages_meta,
+
+def _ensure_unique_label(existing_labels: set[str], label: str, page_number: int) -> tuple[str, bool]:
+    base = label.strip() or "Q?"
+    if base not in existing_labels:
+        return base, False
+    candidate = f"{base} (page {page_number})"
+    if candidate not in existing_labels:
+        return candidate, True
+    suffix = 2
+    while f"{candidate} #{suffix}" in existing_labels:
+        suffix += 1
+    return f"{candidate} #{suffix}", True
+
+
+def _upsert_questions_for_page(exam_id: int, page_number: int, questions_payload: list[dict[str, Any]], session: Session) -> list[dict[str, Any]]:
+    existing = {q.label: q for q in session.exec(select(Question).where(Question.exam_id == exam_id)).all()}
+    existing_labels = set(existing.keys())
+    stored: list[dict[str, Any]] = []
+
+    for parsed in questions_payload:
+        raw_label = str(parsed.get("label") or "Q?")
+        label, relabeled = _ensure_unique_label(existing_labels, raw_label, page_number)
+        existing_labels.add(label)
+
+        max_marks = int(parsed.get("max_marks") or 0)
+        marks_source = str(parsed.get("marks_source") or "unknown")
+        if marks_source not in {"explicit", "inferred", "unknown"}:
+            marks_source = "unknown"
+        marks_confidence = float(parsed.get("marks_confidence") or 0)
+        parsed_warnings = parsed.get("warnings") if isinstance(parsed.get("warnings"), list) else []
+        evidence_list = parsed.get("evidence") if isinstance(parsed.get("evidence"), list) else []
+
+        rubric = {
+            "total_marks": max_marks,
+            "criteria": parsed.get("criteria", []),
+            "answer_key": parsed.get("answer_key", ""),
+            "model_solution": parsed.get("model_solution", ""),
+            "question_text": parsed.get("question_text", ""),
+            "marks_source": marks_source,
+            "marks_confidence": marks_confidence,
+            "warnings": parsed_warnings,
+            "marks_reason": parsed.get("marks_reason", ""),
+            "evidence": evidence_list,
+            "needs_review": relabeled or bool(parsed.get("needs_review", False)),
+            "source_page_number": page_number,
+            "original_label": raw_label,
         }
-        return JSONResponse(status_code=status_code, content=payload)
 
-    run = ExamKeyParseRun(exam_id=exam_id, request_id=request_id, model_used="", status="running", started_at=utcnow())
+        question = existing.get(label)
+        if question:
+            question.max_marks = max_marks
+            question.rubric_json = json.dumps(rubric)
+            session.add(question)
+            session.flush()
+        else:
+            question = Question(exam_id=exam_id, label=label, max_marks=max_marks, rubric_json=json.dumps(rubric))
+            session.add(question)
+            session.flush()
+            existing[label] = question
+
+        session.exec(delete(QuestionParseEvidence).where(QuestionParseEvidence.question_id == question.id))
+        for e in evidence_list:
+            if not isinstance(e, dict):
+                continue
+            kind = str(e.get("kind") or "question_box")
+            if kind not in {"question_box", "answer_box", "marks_box"}:
+                continue
+            session.add(QuestionParseEvidence(
+                question_id=question.id,
+                exam_id=exam_id,
+                page_number=int(e.get("page_number") or page_number),
+                x=float(e.get("x") or 0),
+                y=float(e.get("y") or 0),
+                w=float(e.get("w") or 0.1),
+                h=float(e.get("h") or 0.1),
+                evidence_kind=kind,
+                confidence=float(e.get("confidence") or 0),
+            ))
+
+        stored.append({"id": question.id, "label": label, "max_marks": max_marks})
+
+    return stored
+
+
+def _get_run_or_404(exam_id: int, request_id: str, session: Session) -> ExamKeyParseRun:
+    run = session.exec(select(ExamKeyParseRun).where(ExamKeyParseRun.exam_id == exam_id, ExamKeyParseRun.request_id == request_id)).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Parse run not found")
+    return run
+
+
+@router.post("/{exam_id}/key/parse/start")
+def start_answer_key_parse(exam_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id)).all()
+    if not page_rows:
+        build_key_pages_for_exam(exam_id, session)
+
+    page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
+    if not page_rows:
+        raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
+
+    request_id = str(uuid.uuid4())
+    run = ExamKeyParseRun(
+        exam_id=exam_id,
+        request_id=request_id,
+        status="running",
+        page_count=len(page_rows),
+        pages_done=0,
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    exam.status = ExamStatus.KEY_PAGES_READY
+    session.add(exam)
     session.add(run)
     session.commit()
     session.refresh(run)
 
-    try:
-        exam = session.get(Exam, exam_id)
-        if not exam:
-            raise HTTPException(status_code=404, detail="Exam not found")
+    return {"request_id": request_id, "parse_run_id": run.id, "page_count": run.page_count}
 
-        stage = "build_key_pages"
-        build_started = time.perf_counter()
-        if not session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id)).first():
-            legacy_paths = _load_key_page_images(exam_id, session)
-            if legacy_paths:
-                image_paths = legacy_paths
-            else:
-                build_key_pages_for_exam(exam_id, session)
-                page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
-                image_paths = [Path(r.image_path) for r in page_rows if Path(r.image_path).exists()]
-        else:
-            page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
-            image_paths = [Path(r.image_path) for r in page_rows if Path(r.image_path).exists()]
 
-        key_page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
-        key_pages_meta = [
-            {"page_number": row.page_number, "width": row.width, "height": row.height}
-            for row in key_page_rows
-        ]
-        exam.status = ExamStatus.KEY_PAGES_READY
-        session.add(exam)
-        session.commit()
-        timings["build_pages_ms"] = int((time.perf_counter() - build_started) * 1000)
+@router.post("/{exam_id}/key/parse/next")
+def parse_answer_key_next_page(
+    exam_id: int,
+    request_id: str,
+    session: Session = Depends(get_session),
+    parser: AnswerKeyParser = Depends(get_answer_key_parser),
+) -> dict[str, object]:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
 
-        if not image_paths:
-            raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
+    run = _get_run_or_404(exam_id, request_id, session)
+    page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
+    if not page_rows:
+        raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
 
-        page_count = len(image_paths)
+    processed = {row.page_number for row in session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.parse_run_id == run.id)).all()}
+    target_page = next((row for row in page_rows if row.page_number not in processed), None)
 
-        stage = "model_config"
-        nano_model, mini_model = _resolve_models()
-
-        attempts: list[dict[str, object]] = []
-        merged_questions_payload: list[dict[str, object]] = []
-        merged_warnings: list[str] = []
-        confidence_scores: list[float] = []
-        result_model = nano_model
-
-        for idx, page_path in enumerate(image_paths, start=1):
-            page_index = idx
-            nano_failures = 0
-            mini_failures = 0
-
-            stage = f"call_openai_nano_page_{idx}"
-            nano_started = time.perf_counter()
-            try:
-                nano_result = _invoke_parser(parser, [page_path], nano_model, request_id)
-            except OpenAIRequestError as exc:
-                nano_failures = 2
-                timings["openai_ms"] += int((time.perf_counter() - nano_started) * 1000)
-                attempts.append({"model": nano_model, "openai_ms": int((time.perf_counter() - nano_started) * 1000), "page_index": idx, "failed": True})
-
-                stage = f"call_openai_mini_page_{idx}"
-                mini_started = time.perf_counter()
-                try:
-                    mini_result = _invoke_parser(parser, [page_path], mini_model, request_id)
-                except OpenAIRequestError as mini_exc:
-                    mini_failures = 1
-                    timings["openai_ms"] += int((time.perf_counter() - mini_started) * 1000)
-                    if nano_failures >= 2 and mini_failures >= 1:
-                        stage = f"call_openai_mini_page_{idx}"
-                        run.status = "failed"
-                        run.finished_at = utcnow()
-                        run.error_json = json.dumps({
-                            "detail": f"OpenAI timed out on page {idx}",
-                            "request_id": request_id,
-                            "page_index": idx,
-                            "page_count": page_count,
-                            "stage": stage,
-                        })
-                        session.add(run)
-                        session.commit()
-                        return _err(504, f"OpenAI timed out on page {idx}", openai_status=mini_exc.status_code, openai_error=mini_exc.body[:2000], error_page_index=idx)
-                    raise mini_exc
-
-                attempts.append({"model": mini_model, "openai_ms": int((time.perf_counter() - mini_started) * 1000), "page_index": idx, "confidence_score": mini_result.payload.get("confidence_score")})
-                result = mini_result
-                result_model = mini_result.model
-            else:
-                nano_ms = int((time.perf_counter() - nano_started) * 1000)
-                timings["openai_ms"] += nano_ms
-                attempts.append({"model": nano_model, "openai_ms": nano_ms, "page_index": idx, "confidence_score": nano_result.payload.get("confidence_score")})
-                result = nano_result
-
-            stage = "validate_output"
-            validate_started = time.perf_counter()
-            try:
-                confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
-            except ValueError:
-                confidence, questions_payload, warnings = 0.0, [], ["Model output invalid; please add questions manually in review."]
-
-            if result.model == nano_model and (not questions_payload or confidence < 0.60):
-                logger.info("nano questions=0 or low confidence -> escalating to mini", extra={"request_id": request_id, "page_index": idx, "stage": f"call_openai_mini_page_{idx}"})
-                stage = f"call_openai_mini_page_{idx}"
-                mini_started = time.perf_counter()
-                try:
-                    mini_result = _invoke_parser(parser, [page_path], mini_model, request_id)
-                except OpenAIRequestError as mini_exc:
-                    mini_failures = 1
-                    timings["openai_ms"] += int((time.perf_counter() - mini_started) * 1000)
-                    if nano_failures >= 2 and mini_failures >= 1:
-                        run.status = "failed"
-                        run.finished_at = utcnow()
-                        run.error_json = json.dumps({
-                            "detail": f"OpenAI timed out on page {idx}",
-                            "request_id": request_id,
-                            "page_index": idx,
-                            "page_count": page_count,
-                            "stage": stage,
-                        })
-                        session.add(run)
-                        session.commit()
-                        return _err(504, f"OpenAI timed out on page {idx}", openai_status=mini_exc.status_code, openai_error=mini_exc.body[:2000], error_page_index=idx)
-                    raise mini_exc
-
-                mini_ms = int((time.perf_counter() - mini_started) * 1000)
-                timings["openai_ms"] += mini_ms
-                attempts.append({"model": mini_model, "openai_ms": mini_ms, "page_index": idx, "confidence_score": mini_result.payload.get("confidence_score")})
-                try:
-                    confidence, questions_payload, warnings = _validate_parse_payload(mini_result.payload)
-                except ValueError:
-                    confidence, questions_payload, warnings = 0.0, [], ["Model output invalid; please add questions manually in review."]
-                result_model = mini_result.model
-
-            timings["validate_ms"] += int((time.perf_counter() - validate_started) * 1000)
-
-            for question_payload in questions_payload:
-                evidence_payload = question_payload.get("evidence") if isinstance(question_payload, dict) else None
-                if not isinstance(evidence_payload, list):
-                    continue
-                normalized_evidence: list[dict[str, object]] = []
-                for evidence_item in evidence_payload:
-                    if not isinstance(evidence_item, dict):
-                        continue
-                    normalized_evidence.append({
-                        "page_number": int(evidence_item.get("page_number") or idx),
-                        "x": float(evidence_item.get("x") or 0),
-                        "y": float(evidence_item.get("y") or 0),
-                        "w": float(evidence_item.get("w") or 0.1),
-                        "h": float(evidence_item.get("h") or 0.1),
-                        "kind": str(evidence_item.get("kind") or "question_box"),
-                        "confidence": float(evidence_item.get("confidence") or 0),
-                    })
-                question_payload["evidence"] = normalized_evidence
-
-            confidence_scores.append(confidence)
-            merged_questions_payload.extend(questions_payload)
-            merged_warnings.extend(warnings)
-
-        stage = "save_questions"
-        save_started = time.perf_counter()
-        existing = {q.label: q for q in session.exec(select(Question).where(Question.exam_id == exam_id)).all()}
-
-        for parsed in merged_questions_payload:
-            label = str(parsed.get("label") or "Q?")
-            max_marks = int(parsed.get("max_marks") or 0)
-            marks_source = str(parsed.get("marks_source") or "unknown")
-            if marks_source not in {"explicit", "inferred", "unknown"}:
-                marks_source = "unknown"
-            marks_confidence = float(parsed.get("marks_confidence") or 0)
-            parsed_warnings = parsed.get("warnings") if isinstance(parsed.get("warnings"), list) else []
-            evidence_list = parsed.get("evidence") if isinstance(parsed.get("evidence"), list) else []
-
-            rubric = {
-                "total_marks": max_marks,
-                "criteria": parsed.get("criteria", []),
-                "answer_key": parsed.get("answer_key", ""),
-                "model_solution": parsed.get("model_solution", ""),
-                "question_text": parsed.get("question_text", ""),
-                "marks_source": marks_source,
-                "marks_confidence": marks_confidence,
-                "warnings": parsed_warnings,
-                "marks_reason": parsed.get("marks_reason", ""),
-                "evidence": evidence_list,
-                "needs_review": False,
-            }
-
-            question = existing.get(label)
-            if question:
-                question.max_marks = max_marks
-                question.rubric_json = json.dumps(rubric)
-                session.add(question)
-                session.flush()
-            else:
-                question = Question(exam_id=exam_id, label=label, max_marks=max_marks, rubric_json=json.dumps(rubric))
-                session.add(question)
-                session.flush()
-
-            session.exec(delete(QuestionParseEvidence).where(QuestionParseEvidence.question_id == question.id))
-            for e in evidence_list:
-                if not isinstance(e, dict):
-                    continue
-                kind = str(e.get("kind") or "question_box")
-                if kind not in {"question_box", "answer_box", "marks_box"}:
-                    continue
-                session.add(QuestionParseEvidence(
-                    question_id=question.id,
-                    exam_id=exam_id,
-                    page_number=int(e.get("page_number") or 1),
-                    x=float(e.get("x") or 0),
-                    y=float(e.get("y") or 0),
-                    w=float(e.get("w") or 0.1),
-                    h=float(e.get("h") or 0.1),
-                    evidence_kind=kind,
-                    confidence=float(e.get("confidence") or 0),
-                ))
-
-        exam.status = ExamStatus.PARSED
-        session.add(exam)
-        if merged_questions_payload:
-            exam.status = ExamStatus.REVIEWING
-            session.add(exam)
-
-        timings["save_ms"] = int((time.perf_counter() - save_started) * 1000)
-        run.model_used = result_model
-        run.status = "success"
-        run.finished_at = utcnow()
-        run.timings_json = json.dumps(timings)
+    if target_page is None:
+        run.status = "done"
+        run.updated_at = utcnow()
         session.add(run)
         session.commit()
-
         return {
-            "ok": True,
             "request_id": request_id,
-            "stage": stage,
-            "model_used": result_model,
-            "confidence_score": min(confidence_scores) if confidence_scores else 0.0,
-            "questions": merged_questions_payload,
-            "questions_count": len(merged_questions_payload),
-            "warnings": merged_warnings,
-            "timings": timings,
-            "attempts": attempts,
-            "page_index": page_count,
-            "page_count": page_count,
-            "key_pages": key_pages_meta,
+            "page_number": None,
+            "page_count": run.page_count,
+            "pages_done": run.pages_done,
+            "done": True,
+            "totals": {
+                "cost_total": run.cost_total,
+                "input_tokens_total": run.input_tokens_total,
+                "output_tokens_total": run.output_tokens_total,
+            },
         }
-    except HTTPException as exc:
-        run.status = "failed"
-        run.finished_at = utcnow()
-        run.error_json = json.dumps({"detail": str(exc.detail), "stage": stage, "page_index": page_index, "page_count": page_count})
+
+    nano_model, mini_model = _resolve_models()
+    page_path = Path(target_page.image_path)
+    if not page_path.exists():
+        parse_page = ExamKeyParsePage(
+            parse_run_id=run.id,
+            page_number=target_page.page_number,
+            model_used="none",
+            confidence=0.0,
+            status="failed",
+            error_json=json.dumps({"detail": "Page image missing"}),
+        )
+        session.add(parse_page)
+        run.pages_done += 1
+        run.updated_at = utcnow()
         session.add(run)
         session.commit()
-        return _err(exc.status_code, str(exc.detail))
-    except OpenAIRequestError as exc:
-        run.status = "failed"
-        run.finished_at = utcnow()
-        run.error_json = json.dumps({
-            "detail": "OpenAI request failed",
-            "stage": stage,
-            "openai_status": exc.status_code,
-            "page_index": page_index,
-            "page_count": page_count,
-            "key_pages": key_pages_meta,
-        })
-        session.add(run)
-        session.commit()
-        if exc.status_code == 504:
-            return _err(504, "OpenAI request timed out", openai_status=exc.status_code, openai_error=exc.body[:2000])
-        return _err(502, "OpenAI request failed", openai_status=exc.status_code, openai_error=exc.body[:2000])
-    except Exception as exc:
-        logger.exception("key/parse failed", extra={"stage": stage, "exam_id": exam_id, "request_id": request_id, "page_index": page_index, "page_count": page_count})
-        run.status = "failed"
-        run.finished_at = utcnow()
-        run.error_json = json.dumps({"detail": str(exc)[:300], "stage": stage, "page_index": page_index, "page_count": page_count})
-        session.add(run)
-        session.commit()
-        return _err(500, f"Key parsing failed: {type(exc).__name__}: {str(exc)[:300]}")
+        return {
+            "request_id": request_id,
+            "page_number": target_page.page_number,
+            "page_count": run.page_count,
+            "pages_done": run.pages_done,
+            "page_result": {"questions": [], "confidence": 0.0},
+            "warning": "Page image missing",
+            "totals": {"cost_total": run.cost_total, "input_tokens_total": run.input_tokens_total, "output_tokens_total": run.output_tokens_total},
+        }
+
+    warnings: list[str] = []
+    page_status = "ok"
+    used_model = nano_model
+    confidence = 0.0
+    questions_payload: list[dict[str, Any]] = []
+    input_tokens = 0
+    output_tokens = 0
+    cost = 0.0
+    error_payload: dict[str, Any] | None = None
+
+    def _try_model(model_name: str) -> ParseResult:
+        return _invoke_parser(parser, [page_path], model_name, request_id)
+
+    result: ParseResult | None = None
+    for model_name in [nano_model, nano_model, mini_model]:
+        used_model = model_name
+        try:
+            result = _try_model(model_name)
+            in_t, out_t, cst = _extract_usage(result)
+            input_tokens += in_t
+            output_tokens += out_t
+            cost += cst
+            confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
+            if model_name == nano_model and (not questions_payload or confidence < 0.60):
+                warnings.append("Low confidence on nano; escalating")
+                continue
+            break
+        except (OpenAIRequestError, ValueError) as exc:
+            warnings.append(f"{model_name} failed: {type(exc).__name__}")
+            error_payload = {"detail": str(exc)[:300], "model": model_name}
+            continue
+
+    if not questions_payload:
+        page_status = "failed"
+
+    stored_questions: list[dict[str, Any]] = []
+    if questions_payload:
+        stored_questions = _upsert_questions_for_page(exam_id, target_page.page_number, questions_payload, session)
+
+    parse_page = ExamKeyParsePage(
+        parse_run_id=run.id,
+        page_number=target_page.page_number,
+        model_used=used_model,
+        confidence=confidence,
+        status=page_status,
+        cost=cost,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        result_json=json.dumps({"questions": questions_payload, "warnings": warnings}),
+        error_json=json.dumps(error_payload) if error_payload else None,
+        updated_at=utcnow(),
+    )
+    session.add(parse_page)
+
+    run.pages_done += 1
+    run.cost_total += cost
+    run.input_tokens_total += input_tokens
+    run.output_tokens_total += output_tokens
+    usage = json.loads(run.model_usage_json or "{}") if run.model_usage_json else {}
+    usage[used_model] = int(usage.get(used_model, 0)) + 1
+    run.model_usage_json = json.dumps(usage)
+    run.updated_at = utcnow()
+    if run.pages_done >= run.page_count:
+        run.status = "done"
+        exam.status = ExamStatus.REVIEWING
+        session.add(exam)
+    session.add(run)
+    session.commit()
+
+    return {
+        "request_id": request_id,
+        "page_number": target_page.page_number,
+        "page_count": run.page_count,
+        "pages_done": run.pages_done,
+        "page_result": {"questions": stored_questions, "confidence": confidence, "status": page_status, "warnings": warnings},
+        "totals": {
+            "cost_total": run.cost_total,
+            "input_tokens_total": run.input_tokens_total,
+            "output_tokens_total": run.output_tokens_total,
+            "model_usage": json.loads(run.model_usage_json or "{}"),
+        },
+    }
+
+
+@router.get("/{exam_id}/key/parse/status")
+def get_answer_key_parse_status(exam_id: int, request_id: str, session: Session = Depends(get_session)) -> dict[str, object]:
+    run = _get_run_or_404(exam_id, request_id, session)
+    pages = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.parse_run_id == run.id)).all()
+    warnings = [f"Page {p.page_number} failed" for p in pages if p.status == "failed"]
+    return {
+        "request_id": request_id,
+        "status": run.status,
+        "page_count": run.page_count,
+        "pages_done": run.pages_done,
+        "totals": {
+            "cost_total": run.cost_total,
+            "input_tokens_total": run.input_tokens_total,
+            "output_tokens_total": run.output_tokens_total,
+            "model_usage": json.loads(run.model_usage_json or "{}"),
+        },
+        "warnings": warnings,
+    }
+
+
+@router.post("/{exam_id}/key/parse/finish")
+def finish_answer_key_parse(exam_id: int, request_id: str, session: Session = Depends(get_session)) -> dict[str, object]:
+    run = _get_run_or_404(exam_id, request_id, session)
+    run.status = "done"
+    run.updated_at = utcnow()
+    session.add(run)
+    session.commit()
+    questions = list_questions(exam_id, session)
+    return {"request_id": request_id, "status": run.status, "questions": [q.model_dump() for q in questions]}
+
+
+@router.post("/{exam_id}/key/parse")
+def parse_answer_key(exam_id: int, session: Session = Depends(get_session), parser: AnswerKeyParser = Depends(get_answer_key_parser)) -> dict[str, object]:
+    started = start_answer_key_parse(exam_id=exam_id, session=session)
+    request_id = str(started["request_id"])
+    page_count = int(started["page_count"])
+    attempts: list[dict[str, object]] = []
+    last_page: dict[str, Any] | None = None
+    for _ in range(page_count):
+        last_page = parse_answer_key_next_page(exam_id=exam_id, request_id=request_id, session=session, parser=parser)
+        if isinstance(last_page, dict) and isinstance(last_page.get("page_number"), int):
+            attempts.append({
+                "page_index": last_page["page_number"],
+                "model": ((last_page.get("totals") or {}).get("model_usage") or {}),
+                "confidence_score": ((last_page.get("page_result") or {}).get("confidence") or 0.0),
+            })
+    final = finish_answer_key_parse(exam_id=exam_id, request_id=request_id, session=session)
+    questions = final.get("questions", []) if isinstance(final, dict) else []
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "stage": "save_questions",
+        "model_used": "gpt-5-mini",
+        "confidence_score": min([float((a.get("confidence_score") or 0.0)) for a in attempts], default=0.0),
+        "questions": questions,
+        "questions_count": len(questions) if isinstance(questions, list) else 0,
+        "warnings": [],
+        "timings": {"openai_ms": 0, "save_ms": 0, "build_pages_ms": 0, "validate_ms": 0},
+        "attempts": attempts,
+        "page_index": last_page.get("pages_done") if isinstance(last_page, dict) else page_count,
+        "page_count": page_count,
+        "key_pages": [],
+    }
 
 
 @router.post("/{exam_id}/key/review/complete")

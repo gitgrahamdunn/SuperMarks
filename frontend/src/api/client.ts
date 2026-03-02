@@ -10,6 +10,10 @@ import type {
   SubmissionPage,
   SubmissionRead,
   SubmissionResults,
+  ParseFinishResponse,
+  ParseNextResponse,
+  ParseStartResponse,
+  ParseStatusResponse,
 } from '../types/api';
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
@@ -56,6 +60,10 @@ const REQUIRED_BACKEND_PATHS = [
   '/api/exams/{exam_id}/key/upload',
   '/api/exams/{exam_id}/key/build-pages',
   '/api/exams/{exam_id}/key/parse',
+  '/api/exams/{exam_id}/key/parse/start',
+  '/api/exams/{exam_id}/key/parse/next',
+  '/api/exams/{exam_id}/key/parse/status',
+  '/api/exams/{exam_id}/key/parse/finish',
   '/api/exams/{exam_id}/key/pages',
   '/api/exams/{exam_id}/key/review/complete',
 ] as const;
@@ -416,6 +424,11 @@ export const api = {
   getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),
   completeExamKeyReview: (examId: number) => request<{ exam_id: number; status: string; warnings: string[] }>(`exams/${examId}/key/review/complete`, { method: 'POST' }),
   parseExamKey: (examId: number, options?: RequestInit) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
+
+  startExamKeyParse: (examId: number, options?: RequestInit) => request<ParseStartResponse>(`exams/${examId}/key/parse/start`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
+  parseExamKeyNext: (examId: number, requestId: string, options?: RequestInit) => request<ParseNextResponse>(`exams/${examId}/key/parse/next?request_id=${encodeURIComponent(requestId)}`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
+  getExamKeyParseStatus: (examId: number, requestId: string, options?: RequestInit) => request<ParseStatusResponse>(`exams/${examId}/key/parse/status?request_id=${encodeURIComponent(requestId)}`, options, EXAM_READ_TIMEOUT_MS),
+  finishExamKeyParse: (examId: number, requestId: string, options?: RequestInit) => request<ParseFinishResponse>(`exams/${examId}/key/parse/finish?request_id=${encodeURIComponent(requestId)}`, { method: 'POST', ...options }, EXAM_CREATE_TIMEOUT_MS),
   parseExamKeyRaw: async (examId: number, options?: RequestInit) => {
     const path = `exams/${examId}/key/parse`;
     const url = buildApiUrl(path);

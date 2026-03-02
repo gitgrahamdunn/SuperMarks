@@ -40,6 +40,7 @@ type ParseErrorDetails = {
 
 type ParseTimings = Record<string, number>;
 type ParseOutcomeData = { timings?: ParseTimings; page_count?: number; page_index?: number };
+type RunningTotals = { cost_total: number; input_tokens_total: number; output_tokens_total: number; model_usage?: Record<string, number> };
 
 type ParseChecklistStep = {
   id: ParseChecklistStepId;
@@ -128,6 +129,9 @@ export function ExamsPage() {
   const [parsePageCount, setParsePageCount] = useState(0);
   const [parsePageIndex, setParsePageIndex] = useState(0);
   const [parseTimings, setParseTimings] = useState<ParseTimings | null>(null);
+  const [runningTotals, setRunningTotals] = useState<RunningTotals | null>(null);
+  const [failedPage, setFailedPage] = useState<number | null>(null);
+  const [parseRequestId, setParseRequestId] = useState<string | null>(null);
   const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
@@ -199,6 +203,9 @@ export function ExamsPage() {
     setParsePageCount(0);
     setParsePageIndex(0);
     setParseTimings(null);
+    setRunningTotals(null);
+    setFailedPage(null);
+    setParseRequestId(null);
     setChecklistSteps(initChecklist());
   };
 
@@ -268,29 +275,39 @@ export function ExamsPage() {
       markChecklist('reading_questions', 'active');
       setParseProgress(50);
       startParseProgress();
-      const parseOutcome = await api.parseExamKeyRaw(exam.id, requestOptions);
-      logStep({ step: 'parsing', endpointUrl: parseOutcome.url, status: parseOutcome.status, responseSnippet: (parseOutcome.responseText || JSON.stringify(parseOutcome.data)).slice(0, 500) });
+      const started = await api.startExamKeyParse(exam.id, requestOptions);
+      setParseRequestId(started.request_id);
+      setParsePageCount(started.page_count);
+      logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/start`), status: 200, responseSnippet: JSON.stringify(started).slice(0, 500) });
 
-      if (!parseOutcome.data) {
-        setWizardError({ summary: `Step: parsing | Status: ${parseOutcome.status}`, details: parseOutcome.responseText ?? '<empty>' });
-        showError(`parsing failed (status ${parseOutcome.status})`);
-        return;
+      for (let index = 0; index < started.page_count; index += 1) {
+        const next = await api.parseExamKeyNext(exam.id, started.request_id, requestOptions);
+        setParsePageIndex(next.pages_done);
+        setRunningTotals(next.totals);
+        const pct = Math.min(98, 50 + Math.round((next.pages_done / Math.max(1, next.page_count)) * 45));
+        setParseProgress(pct);
+        logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/next?request_id=${started.request_id}`), status: 200, responseSnippet: JSON.stringify(next).slice(0, 500) });
+
+        if (next.page_result?.status === 'failed' && next.page_number) {
+          setFailedPage(next.page_number);
+          showWarning(`Page ${next.page_number} failed — you can retry this run by pressing Enter exam & parse again.`);
+        }
       }
 
-      const parseData = parseOutcome.data as ParseOutcomeData;
-      if (typeof parseData.page_count === 'number') setParsePageCount(parseData.page_count);
-      if (typeof parseData.page_index === 'number') setParsePageIndex(parseData.page_index);
-      if (parseData.timings) setParseTimings(parseData.timings);
+      const status = await api.getExamKeyParseStatus(exam.id, started.request_id, requestOptions);
+      setRunningTotals(status.totals);
+      const finished = await api.finishExamKeyParse(exam.id, started.request_id, requestOptions);
+      logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/finish?request_id=${started.request_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
 
       markChecklist('reading_questions', 'done');
       markChecklist('detecting_marks', 'done');
       markChecklist('drafting_rubric', 'done');
       markChecklist('finalizing', 'done');
       setParseProgress(100);
-      const questionCount = extractParsedQuestionCount(parseOutcome.data);
+      const questionCount = extractParsedQuestionCount(finished.questions);
       setParsedQuestionCount(questionCount);
       setStep('done');
-      localStorage.setItem(`supermarks:lastParse:${exam.id}`, JSON.stringify(parseOutcome.data));
+      localStorage.setItem(`supermarks:lastParse:${exam.id}`, JSON.stringify(finished));
 
       setIsModalOpen(false);
       resetWizardState();
@@ -304,7 +321,7 @@ export function ExamsPage() {
           : stepName === 'uploading' && examId
             ? buildApiUrl(`exams/${examId}/key/upload`)
             : stepName === 'parsing' && examId
-              ? buildApiUrl(`exams/${examId}/key/parse`)
+              ? buildApiUrl(`exams/${examId}/key/parse/start`)
               : buildApiUrl('unknown');
 
       if (isNetworkFetchError(err) || isAbortError(err)) {
@@ -496,6 +513,10 @@ export function ExamsPage() {
             {createdExamId && <p className="subtle-text">Exam ID: {createdExamId}</p>}
             {failedSummary && <p className="warning-text">{failedSummary}</p>}
             {parseTimings && <pre className="code-box">{Object.entries(parseTimings).map(([k, v]) => `${k}: ${v}ms`).join('\n')}</pre>}
+            {runningTotals && (
+              <pre className="code-box">{`cost_total: $${runningTotals.cost_total.toFixed(6)}\ninput_tokens_total: ${runningTotals.input_tokens_total}\noutput_tokens_total: ${runningTotals.output_tokens_total}\nmodel_usage: ${JSON.stringify(runningTotals.model_usage || {})}`}</pre>
+            )}
+            {failedPage && <p className="warning-text">Page {failedPage} failed — retry?</p>}
             {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
 
             <details>
@@ -533,7 +554,7 @@ export function ExamsPage() {
                   closeModal();
                 }}
               >
-                {isRunning ? 'Cancel request' : 'Close'}
+                {isRunning ? 'Cancel' : 'Close'}
               </button>
             </div>
           </form>
