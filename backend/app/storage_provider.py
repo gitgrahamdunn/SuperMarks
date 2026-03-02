@@ -9,6 +9,7 @@ from typing import Protocol
 from urllib.parse import quote
 
 from app.settings import settings
+from app.blob_service import blob_mock_enabled, download_blob_bytes, get_blob_token
 from app.storage import ensure_dir
 
 
@@ -149,10 +150,20 @@ async def materialize_object_to_path(key: str, cache_dir: Path) -> Path:
         if source.exists():
             return source
 
-    if not hasattr(provider, "get_bytes"):
-        raise RuntimeError("Configured storage provider does not support object reads")
+    use_blob = blob_mock_enabled()
+    if not use_blob:
+        try:
+            use_blob = bool(get_blob_token().strip())
+        except RuntimeError:
+            use_blob = False
 
-    data = await provider.get_bytes(key)  # type: ignore[attr-defined]
+    if use_blob:
+        data = await download_blob_bytes(key)
+    else:
+        if not hasattr(provider, "get_bytes"):
+            raise RuntimeError("Configured storage provider does not support object reads")
+        data = await provider.get_bytes(key)  # type: ignore[attr-defined]
+
     target.write_bytes(data)
     if not target.suffix:
         guessed = mimetypes.guess_extension("application/octet-stream") or ".bin"

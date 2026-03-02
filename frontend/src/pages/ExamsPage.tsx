@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE_URL, ApiError, api, buildApiUrl, getBackendVersion, getClientDiagnostics, maskApiBaseUrl, pingApiHealth } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { FileUploader } from '../components/FileUploader';
+import { uploadToBlob } from '../blob/upload';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/ToastProvider';
 import type { ExamRead } from '../types/api';
@@ -276,8 +277,18 @@ export function ExamsPage() {
 
       setStep('uploading');
       markChecklist('uploading_key', 'active');
-      const uploadResult = await api.uploadExamKey(exam.id, modalFiles, requestOptions);
-      logStep({ step: 'uploading', endpointUrl: buildApiUrl(`exams/${exam.id}/key/upload`), status: 200, responseSnippet: JSON.stringify(uploadResult).slice(0, 500) });
+      const { token } = await api.getBlobUploadToken();
+      const uploaded = await Promise.all(
+        modalFiles.map((file) => uploadToBlob(file, `exams/${exam.id}/key/${crypto.randomUUID()}-${file.name}`, token)),
+      );
+      const registerPayload = uploaded.map((file, index) => ({
+        original_filename: modalFiles[index].name,
+        blob_pathname: file.pathname,
+        content_type: file.contentType,
+        size_bytes: file.size,
+      }));
+      const uploadResult = await api.registerExamKeyFiles(exam.id, registerPayload);
+      logStep({ step: 'uploading', endpointUrl: buildApiUrl(`exams/${exam.id}/key/register`), status: 200, responseSnippet: JSON.stringify(uploadResult).slice(0, 500) });
       markChecklist('uploading_key', 'done');
       setParseProgress(28);
 
@@ -337,7 +348,7 @@ export function ExamsPage() {
         stepName === 'creating'
           ? buildApiUrl('exams')
           : stepName === 'uploading' && examId
-            ? buildApiUrl(`exams/${examId}/key/upload`)
+            ? buildApiUrl(`exams/${examId}/key/register`)
             : stepName === 'parsing' && examId
               ? buildApiUrl(`exams/${examId}/key/parse/start`)
               : buildApiUrl('unknown');

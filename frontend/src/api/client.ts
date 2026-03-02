@@ -57,7 +57,10 @@ class ApiError extends Error {
 
 const REQUIRED_BACKEND_PATHS = [
   '/api/exams',
-  '/api/exams/{exam_id}/key/upload',
+  '/api/blob/upload-token',
+  '/api/blob/signed-url',
+  '/api/exams/{exam_id}/key/register',
+  '/api/submissions/{submission_id}/files/register',
   '/api/exams/{exam_id}/key/build-pages',
   '/api/exams/{exam_id}/key/parse',
   '/api/exams/{exam_id}/key/parse/start',
@@ -407,12 +410,22 @@ export const api = {
     body: JSON.stringify({ label, max_marks }),
   }),
   listQuestions: (examId: number) => request<QuestionRead[]>(`exams/${examId}/questions`),
-  uploadSubmission: async (examId: number, studentName: string, files: File[]) => {
-    const formData = new FormData();
-    formData.append('student_name', studentName);
-    files.forEach((file) => formData.append('files', file));
-    return request<SubmissionRead>(`exams/${examId}/submissions`, { method: 'POST', body: formData }, DEFAULT_TIMEOUT_MS);
-  },
+  createSubmission: async (examId: number, studentName: string) => request<SubmissionRead>(`exams/${examId}/submissions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ student_name: studentName }),
+  }, DEFAULT_TIMEOUT_MS),
+  getBlobUploadToken: () => request<{ token: string }>('blob/upload-token', { method: 'POST' }),
+  registerExamKeyFiles: (examId: number, files: Array<{ original_filename: string; blob_pathname: string; content_type: string; size_bytes: number }>) => request<{ registered: number }>(`exams/${examId}/key/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files }),
+  }),
+  registerSubmissionFiles: (submissionId: number, files: Array<{ original_filename: string; blob_pathname: string; content_type: string; size_bytes: number }>) => request<{ registered: number }>(`submissions/${submissionId}/files/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ files }),
+  }),
 
   uploadBulkSubmissionsPdf: async (examId: number, file: File, rosterText?: string) => {
     const formData = new FormData();
@@ -433,11 +446,6 @@ export const api = {
     EXAM_CREATE_TIMEOUT_MS,
   ),
   getBulkUploadPageUrl: (examId: number, bulkUploadId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/submissions/bulk/${bulkUploadId}/page/${pageNumber}`),
-  uploadExamKey: async (examId: number, files: File[], options?: RequestInit) => {
-    const formData = new FormData();
-    files.forEach((file) => formData.append('files', file));
-    return request<Record<string, unknown>>(`exams/${examId}/key/upload`, { method: 'POST', body: formData, ...options }, KEY_UPLOAD_TIMEOUT_MS);
-  },
   getExamQuestionsForReview: async (examId: number) => {
     const paths = await getOpenApiPaths();
 
@@ -500,6 +508,11 @@ export const api = {
   getResults: (submissionId: number) => request<SubmissionResults>(`submissions/${submissionId}/results`),
   getPageImageUrl: (submissionId: number, pageNumber: number) => buildApiUrl(`submissions/${submissionId}/page/${pageNumber}`),
   getCropImageUrl: (submissionId: number, questionId: number) => buildApiUrl(`submissions/${submissionId}/crop/${questionId}`),
+  getSignedBlobUrl: (pathname: string) => request<{ url: string }>('blob/signed-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pathname }),
+  }),
   getQuestionKeyVisualUrl: (examId: number, questionId: number) => buildApiUrl(`exams/${examId}/questions/${questionId}/key-visual`),
   saveRegions: (questionId: number, regions: Region[]) => request<Region[]>(`questions/${questionId}/regions`, {
     method: 'POST',

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
+import { uploadToBlob } from '../blob/upload';
 import { useToast } from '../components/ToastProvider';
 import type { BulkUploadPreview, ExamDetail } from '../types/api';
 
@@ -15,6 +16,8 @@ export function ExamDetailPage() {
   const [activeCandidateId, setActiveCandidateId] = useState<string>('');
   const [isUploading, setIsUploading] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
+  const [studentName, setStudentName] = useState('');
+  const [studentFiles, setStudentFiles] = useState<File[]>([]);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const { showError, showSuccess, showWarning } = useToast();
@@ -109,6 +112,37 @@ export function ExamDetailPage() {
     }
   };
 
+
+  const onUploadStudentSubmission = async () => {
+    if (!studentName.trim() || studentFiles.length === 0) {
+      showWarning('Provide student name and at least one file');
+      return;
+    }
+
+    try {
+      const submission = await api.createSubmission(examId, studentName.trim());
+      const { token } = await api.getBlobUploadToken();
+      const uploaded = await Promise.all(
+        studentFiles.map((file) => uploadToBlob(file, `exams/${examId}/submissions/${submission.id}/${crypto.randomUUID()}-${file.name}`, token)),
+      );
+      await api.registerSubmissionFiles(
+        submission.id,
+        uploaded.map((file, index) => ({
+          original_filename: studentFiles[index].name,
+          blob_pathname: file.pathname,
+          content_type: file.contentType,
+          size_bytes: file.size,
+        })),
+      );
+      showSuccess('Student submission uploaded');
+      setStudentName('');
+      setStudentFiles([]);
+      await loadDetail();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to upload student submission');
+    }
+  };
+
   if (!detail) return <p>Loading...</p>;
 
   return (
@@ -138,6 +172,14 @@ export function ExamDetailPage() {
           </ul>
         </section>
       </div>
+
+
+      <section className="card stack" style={{ marginTop: 16 }}>
+        <h2>Upload Student Submission</h2>
+        <input value={studentName} onChange={(event) => setStudentName(event.target.value)} placeholder="Student name" />
+        <input type="file" multiple onChange={(event) => setStudentFiles(Array.from(event.target.files || []))} />
+        <button type="button" className="btn btn-primary" onClick={onUploadStudentSubmission}>Upload Student Files</button>
+      </section>
 
       <section className="card stack" style={{ marginTop: 16 }}>
         <h2>Bulk Upload Student Tests (PDF)</h2>
