@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { NavLink, Route, Routes } from 'react-router-dom';
 
 const ExamsPage = lazy(async () => ({ default: (await import('./pages/ExamsPage')).ExamsPage }));
@@ -11,6 +11,14 @@ const ResultsPage = lazy(async () => ({ default: (await import('./pages/ResultsP
 type Theme = 'light' | 'dark';
 const THEME_STORAGE_KEY = 'supermarks-theme';
 
+function resolveFrontendVersionLabel(): string {
+  const configured = import.meta.env.VITE_APP_VERSION?.trim() || import.meta.env.VITE_BUILD_ID?.trim();
+  if (configured) {
+    return configured;
+  }
+  return `v${import.meta.env.MODE} (build ${new Date(__APP_BUILD_TS__).toISOString()})`;
+}
+
 function getInitialTheme(): Theme {
   const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
   return storedTheme === 'dark' ? 'dark' : 'light';
@@ -18,6 +26,7 @@ function getInitialTheme(): Theme {
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+  const frontendVersion = useMemo(() => resolveFrontendVersionLabel(), []);
 
   useEffect(() => {
     document.body.classList.toggle('theme-dark', theme === 'dark');
@@ -40,14 +49,17 @@ export default function App() {
             </NavLink>
           </nav>
         </div>
-        <button
-          type="button"
-          className="btn btn-secondary btn-sm"
-          onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
-          aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
-        >
-          Theme: {theme}
-        </button>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.25rem' }}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
+            aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+          >
+            Theme: {theme}
+          </button>
+          <small className="subtle-text">{frontendVersion}</small>
+        </div>
       </header>
 
       <main id="main-content" tabIndex={-1}>

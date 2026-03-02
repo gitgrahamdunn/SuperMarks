@@ -18,7 +18,7 @@ import type {
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
-const APP_BUILD_ID = import.meta.env.VITE_BUILD_ID?.trim() || String(__APP_BUILD_TS__);
+const APP_VERSION = import.meta.env.VITE_APP_VERSION?.trim() || import.meta.env.VITE_BUILD_ID?.trim() || `${import.meta.env.MODE} (${new Date(__APP_BUILD_TS__).toISOString()})`;
 const API_BASE_URL = configuredApiBaseUrl;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const EXAM_READ_TIMEOUT_MS = 15_000;
@@ -203,7 +203,7 @@ function buildErrorDetailsFromResponse(url: string, method: string, status: numb
     // ignore parse error
   }
 
-  return new ApiError(status, url, method, responseBodySnippet, `${message} [${status}] ${url}`);
+  return new ApiError(status, url, method, responseBodySnippet, `${message} [${status}] ${method} ${url} body=${responseBodySnippet || '<empty>'}`);
 }
 
 type OpenApiFetchDiagnostics = {
@@ -342,12 +342,42 @@ export function getApiConfigError(): string | null {
   return API_CONFIG_ERROR;
 }
 
-export function getClientDiagnostics(): { apiBaseUrl: string; hasApiKey: boolean; buildId: string } {
+export function getClientDiagnostics(): { apiBaseUrl: string; maskedApiBaseHost: string; hasApiKey: boolean; buildId: string; appVersion: string } {
   return {
     apiBaseUrl: API_BASE_URL || '<missing>',
+    maskedApiBaseHost: maskApiBaseUrl(API_BASE_URL || ''),
     hasApiKey: Boolean(BACKEND_API_KEY),
-    buildId: APP_BUILD_ID,
+    buildId: APP_VERSION,
+    appVersion: APP_VERSION,
   };
+}
+
+export function getBackendVersionUrl(): string {
+  if (API_CONFIG_ERROR) {
+    throw new Error(API_CONFIG_ERROR);
+  }
+  return `${API_BASE_URL.replace(/\/?api\/?$/i, '')}/version`;
+}
+
+export async function getBackendVersion(): Promise<{ status: number; version?: string; bodySnippet: string }> {
+  const url = getBackendVersionUrl();
+  const { response, clear } = await fetchWithTimeout(url, withApiKeyHeader(), DEFAULT_TIMEOUT_MS);
+  try {
+    const bodyText = await response.text();
+    const bodySnippet = bodyText.slice(0, 300);
+    if (!response.ok) {
+      return { status: response.status, bodySnippet };
+    }
+
+    try {
+      const parsed = JSON.parse(bodyText) as { version?: string };
+      return { status: response.status, version: parsed.version, bodySnippet };
+    } catch {
+      return { status: response.status, bodySnippet };
+    }
+  } finally {
+    clear();
+  }
 }
 
 export function resetApiContractCheckCache(): void {
@@ -427,7 +457,7 @@ export const api = {
 
   startExamKeyParse: (examId: number, options?: RequestInit) => request<ParseStartResponse>(`exams/${examId}/key/parse/start`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
   parseExamKeyNext: (examId: number, requestId: string, options?: RequestInit) => request<ParseNextResponse>(`exams/${examId}/key/parse/next?request_id=${encodeURIComponent(requestId)}`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
-  getExamKeyParseStatus: (examId: number, requestId: string, options?: RequestInit) => request<ParseStatusResponse>(`exams/${examId}/key/parse/status?request_id=${encodeURIComponent(requestId)}`, options, EXAM_READ_TIMEOUT_MS),
+  getExamKeyParseStatus: (examId: number, requestId: string, options?: RequestInit) => request<ParseStatusResponse>(`exams/${examId}/key/parse/status?request_id=${encodeURIComponent(requestId)}`, { method: 'GET', ...options }, EXAM_READ_TIMEOUT_MS),
   finishExamKeyParse: (examId: number, requestId: string, options?: RequestInit) => request<ParseFinishResponse>(`exams/${examId}/key/parse/finish?request_id=${encodeURIComponent(requestId)}`, { method: 'POST', ...options }, EXAM_CREATE_TIMEOUT_MS),
   parseExamKeyRaw: async (examId: number, options?: RequestInit) => {
     const path = `exams/${examId}/key/parse`;

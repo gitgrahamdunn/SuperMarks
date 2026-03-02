@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, ApiError, api, buildApiUrl, getClientDiagnostics, maskApiBaseUrl, pingApiHealth } from '../api/client';
+import { API_BASE_URL, ApiError, api, buildApiUrl, getBackendVersion, getClientDiagnostics, maskApiBaseUrl, pingApiHealth } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { FileUploader } from '../components/FileUploader';
 import { Modal } from '../components/Modal';
@@ -134,6 +134,7 @@ export function ExamsPage() {
   const [parseRequestId, setParseRequestId] = useState<string | null>(null);
   const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [backendVersion, setBackendVersion] = useState<string>('loading...');
 
   const parseProgressIntervalRef = useRef<number | null>(null);
   const elapsedIntervalRef = useRef<number | null>(null);
@@ -166,6 +167,23 @@ export function ExamsPage() {
 
   useEffect(() => {
     void loadExams();
+  }, []);
+
+  useEffect(() => {
+    const loadBackendVersion = async () => {
+      try {
+        const result = await getBackendVersion();
+        if (result.version) {
+          setBackendVersion(result.version);
+          return;
+        }
+        setBackendVersion(`unavailable (status ${result.status}) ${result.bodySnippet || ''}`.trim());
+      } catch (error) {
+        setBackendVersion(`unavailable (${error instanceof Error ? error.message : String(error)})`);
+      }
+    };
+
+    void loadBackendVersion();
   }, []);
 
   const clearIntervals = () => {
@@ -329,9 +347,14 @@ export function ExamsPage() {
         setWizardError({ summary: `Step: ${stepName} | Status: network-error`, details, isAbort: isAbortError(err) });
         showError(`Network request failed. Step: ${stepName}. URL: ${stepEndpoint}`);
       } else if (err instanceof ApiError) {
-        const details = err.responseBodySnippet || '<empty>';
+        const details = JSON.stringify({
+          method: err.method,
+          url: err.url,
+          status: err.status,
+          bodySnippet: err.responseBodySnippet || '<empty>',
+        }, null, 2);
         try {
-          const parseDetails = JSON.parse(details) as ParseErrorDetails;
+          const parseDetails = JSON.parse(err.responseBodySnippet || '{}') as ParseErrorDetails;
           if (stepName === 'parsing') {
             markChecklist(stageToChecklistId(parseDetails.stage), 'failed');
             if (parseDetails.page_index && parseDetails.page_count) {
@@ -341,8 +364,8 @@ export function ExamsPage() {
         } catch {
           // no-op
         }
-        setWizardError({ summary: `Step: ${stepName} | Status: ${err.status}`, details });
-        showError(`${stepName} failed (status ${err.status})`);
+        setWizardError({ summary: `Step: ${stepName} | ${err.method} ${err.url} | Status: ${err.status}`, details });
+        showError(`${stepName} failed (status ${err.status}) via ${err.method}`);
       } else {
         setWizardError({ summary: `Step: ${stepName} | Status: unknown`, details: err instanceof Error ? err.message : 'Unknown error' });
         showError(`${stepName} failed (status unknown)`);
@@ -523,6 +546,9 @@ export function ExamsPage() {
               <summary>Show details</summary>
               <div className="subtle-text stack">
                 <p>API base URL: {diagnostics.apiBaseUrl}</p>
+                <p>API base host (masked): {diagnostics.maskedApiBaseHost}</p>
+                <p>Frontend version: {diagnostics.appVersion}</p>
+                <p>Backend version: {backendVersion}</p>
                 <p>hasApiKey: {String(diagnostics.hasApiKey)}</p>
                 <p>buildId: {diagnostics.buildId}</p>
                 <p>Computed create endpoint: {buildApiUrl('exams')}</p>

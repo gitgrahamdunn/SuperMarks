@@ -23,6 +23,7 @@ Set env vars:
 ```bash
 VITE_API_BASE_URL=http://localhost:8000/api
 VITE_BACKEND_API_KEY=<your-backend-api-key>
+VITE_APP_VERSION=<git-sha-or-release-tag>
 ```
 
 ## Vercel deployment

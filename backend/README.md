@@ -38,6 +38,7 @@ Optional environment variables:
 - `SUPERMARKS_VERCEL_ENVIRONMENT=true`
 - `SUPERMARKS_CORS_ORIGINS=https://<frontend-domain>`
 - `SUPERMARKS_CORS_ALLOW_ORIGIN_REGEX=https://.*\.vercel\.app`
+- `APP_VERSION=<git-sha-or-build-id>` (optional; exposed by `GET /version`)
 
 
 Storage notes:
