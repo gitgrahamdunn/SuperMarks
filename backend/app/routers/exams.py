@@ -36,7 +36,8 @@ from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, Ex
 from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
-from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
+from app.storage_provider import get_storage_signed_url, materialize_object_to_path
+from app.blob_store import BlobUploadError, upload_bytes
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 public_router = APIRouter(prefix="/exams", tags=["exams-public"])
@@ -51,6 +52,7 @@ _ALLOWED_TYPES = {
 
 _ALLOWED_KEY_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 _MAX_RENDERED_KEY_PAGES = 10
+_VERCEL_SERVER_UPLOAD_LIMIT_BYTES = 4 * 1024 * 1024
 
 
 def _exam_key_pages_dir(exam_id: int) -> Path:
@@ -288,7 +290,7 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
                 student_name=sub.student_name,
                 status=sub.status,
                 created_at=sub.created_at,
-                files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path) for f in files],
+                files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
                 pages=[],
             )
         )
@@ -686,7 +688,7 @@ def finalize_bulk_submission_preview(
                 student_name=submission.student_name,
                 status=submission.status,
                 created_at=submission.created_at,
-                files=[SubmissionFileRead(id=file_row.id, file_kind="pdf", original_filename=bulk.original_filename, stored_path=bulk.stored_path)],
+                files=[SubmissionFileRead(id=file_row.id, file_kind="pdf", original_filename=bulk.original_filename, stored_path=bulk.stored_path, blob_url=file_row.blob_url, content_type=file_row.content_type, size_bytes=file_row.size_bytes)],
                 pages=page_reads,
             )
         )
@@ -708,8 +710,8 @@ def upload_exam_key_files(
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
-    storage = get_storage_provider()
     uploaded = 0
+    urls: list[str] = []
 
     for idx, upload in enumerate(files, start=1):
         filename = _sanitize_filename(upload.filename or f"key-{idx}")
@@ -719,23 +721,31 @@ def upload_exam_key_files(
 
         content_type = upload.content_type or "application/octet-stream"
         payload = upload.file.read()
+        if len(payload) > _VERCEL_SERVER_UPLOAD_LIMIT_BYTES:
+            raise HTTPException(status_code=413, detail="File too large for server upload on Vercel. Use client upload mode.")
         object_key = f"exams/{exam_id}/key/{uuid.uuid4().hex}_{filename}"
-        stored = _run_async(storage.put_bytes(object_key, payload, content_type=content_type))
+        try:
+            stored = upload_bytes(object_key, payload, content_type)
+        except BlobUploadError as exc:
+            raise HTTPException(status_code=500, detail=f"Blob upload failed: {exc}") from exc
 
         row = ExamKeyFile(
             exam_id=exam_id,
             original_filename=filename,
-            stored_path=stored["key"],
-            content_type=content_type,
+            stored_path=stored["pathname"],
+            blob_url=stored["url"],
+            blob_pathname=stored["pathname"],
+            content_type=stored["contentType"],
             size_bytes=len(payload),
         )
         session.add(row)
         uploaded += 1
+        urls.append(stored["url"])
 
     exam.status = ExamStatus.KEY_UPLOADED
     session.add(exam)
     session.commit()
-    return ExamKeyUploadResponse(uploaded=uploaded)
+    return ExamKeyUploadResponse(uploaded=uploaded, urls=urls)
 
 
 @router.get("/{exam_id}/key/files", response_model=list[StoredFileRead])

@@ -106,8 +106,9 @@ def test_parse_answer_key_builds_pages_from_uploaded_images(tmp_path, monkeypatc
         assert len(questions) == 2
 
 
-def test_upload_exam_key_files_stores_file_and_db_row(tmp_path) -> None:
+def test_upload_exam_key_files_stores_file_and_db_row(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
+    monkeypatch.setenv("BLOB_MOCK", "1")
     settings.sqlite_path = str(tmp_path / "test.db")
 
     db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
@@ -122,19 +123,23 @@ def test_upload_exam_key_files_stores_file_and_db_row(tmp_path) -> None:
         response = client.post(f"/api/exams/{exam_id}/key/upload", files=files)
 
         assert response.status_code == 200
-        assert response.json() == {"uploaded": 1}
+        payload = response.json()
+        assert payload["uploaded"] == 1
+        assert payload["urls"][0].startswith("https://blob.mock.local/exams/")
 
     with Session(db.engine) as session:
         rows = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id)).all()
         assert len(rows) == 1
         assert rows[0].original_filename == "key.png"
         assert rows[0].stored_path.startswith(f"exams/{exam_id}/key/")
+        assert rows[0].blob_url and rows[0].blob_url.startswith("https://blob.mock.local/exams/")
         assert rows[0].content_type == "image/png"
         assert rows[0].size_bytes > 0
 
 
-def test_list_exam_key_files_includes_signed_url(tmp_path) -> None:
+def test_list_exam_key_files_includes_signed_url(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
+    monkeypatch.setenv("BLOB_MOCK", "1")
     settings.sqlite_path = str(tmp_path / "test.db")
 
     db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
@@ -154,7 +159,8 @@ def test_list_exam_key_files_includes_signed_url(tmp_path) -> None:
         assert response.status_code == 200
         payload = response.json()
         assert len(payload) == 1
-        assert payload[0]["signed_url"].startswith("/api/files/local?key=")
+        assert payload[0]["signed_url"].startswith("https://blob.mock.local/exams/")
+        assert payload[0]["blob_url"].startswith("https://blob.mock.local/exams/")
         assert payload[0]["content_type"] == "image/png"
 
 
@@ -598,3 +604,25 @@ def test_parse_answer_key_incremental_flow(tmp_path, monkeypatch) -> None:
     with Session(db.engine) as session:
         questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
         assert len(questions) >= 1
+
+
+def test_upload_exam_key_file_over_4mb_returns_413(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("BLOB_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Big File Exam"})
+        exam_id = exam.json()["id"]
+
+        oversized = b"a" * (4 * 1024 * 1024 + 1)
+        response = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("big.pdf", oversized, "application/pdf"))],
+        )
+
+        assert response.status_code == 413
+        assert response.json()["detail"] == "File too large for server upload on Vercel. Use client upload mode."

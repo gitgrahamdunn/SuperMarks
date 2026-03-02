@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import Headers
 from starlette.responses import PlainTextResponse
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -123,6 +123,12 @@ def deep_health() -> dict[str, bool | str]:
         "db_ok": db_ok,
     }
 
+
+
+
+@app.post("/api/blob/client-upload-token", tags=["blob"], dependencies=[Depends(require_api_key)])
+def client_upload_token_stub() -> Response:
+    return JSONResponse(status_code=501, content={"detail": "Client upload not implemented yet."})
 
 @app.options("/api/{path:path}", include_in_schema=False)
 async def api_preflight(path: str) -> Response:

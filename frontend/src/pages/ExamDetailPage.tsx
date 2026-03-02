@@ -3,13 +3,14 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import { uploadToBlob } from '../blob/upload';
 import { useToast } from '../components/ToastProvider';
-import type { BulkUploadPreview, ExamDetail } from '../types/api';
+import type { BulkUploadPreview, ExamDetail, StoredFileRead } from '../types/api';
 
 export function ExamDetailPage() {
   const params = useParams();
   const examId = Number(params.examId);
   const navigate = useNavigate();
   const [detail, setDetail] = useState<ExamDetail | null>(null);
+  const [keyFiles, setKeyFiles] = useState<StoredFileRead[]>([]);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [rosterText, setRosterText] = useState('');
   const [preview, setPreview] = useState<BulkUploadPreview | null>(null);
@@ -24,7 +25,9 @@ export function ExamDetailPage() {
 
   const loadDetail = async () => {
     try {
-      setDetail(await api.getExamDetail(examId));
+      const [examDetail, uploadedKeyFiles] = await Promise.all([api.getExamDetail(examId), api.listExamKeyFiles(examId)]);
+      setDetail(examDetail);
+      setKeyFiles(uploadedKeyFiles);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Failed to load exam');
     }
@@ -202,7 +205,8 @@ export function ExamDetailPage() {
       </section>
 
       {preview && (
-        <section className="card stack" style={{ marginTop: 16 }}>
+  
+      <section className="card stack" style={{ marginTop: 16 }}>
           <h3>Bulk upload preview</h3>
           {preview.warnings.length > 0 && (
             <ul>
