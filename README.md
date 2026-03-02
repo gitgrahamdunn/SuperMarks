@@ -21,11 +21,13 @@ See `docs/ARCHITECTURE.md` for guardrails.
 
 - `VITE_API_BASE_URL=https://<backend-domain>/api`
 - `VITE_BACKEND_API_KEY=<backend-api-key>` (optional if backend auth is disabled)
+- `VITE_APP_VERSION=<git-sha-or-release-tag>` (optional, shown in UI diagnostics)
 
 ### Backend
 
 - `BACKEND_API_KEY=<backend-api-key>`
 - `CORS_ALLOW_ORIGINS=https://<frontend-domain>`
+- `APP_VERSION=<git-sha-or-build-id>` (optional, served by `GET /version`)
 
 ## Local development
 
@@ -74,3 +76,12 @@ VITE_BACKEND_API_KEY=<your-local-key>
 
 Git-based automatic deployments are disabled for both Vercel projects to avoid Hobby plan deployment-cap limits.
 When you are ready to ship, deploy manually from the Vercel UI using **Redeploy**.
+
+## Versioning on Vercel
+
+For easier deploy verification, set both of these per deployment:
+
+- Frontend: `VITE_APP_VERSION`
+- Backend: `APP_VERSION`
+
+A good value is the same Git SHA (or release tag) in both projects.

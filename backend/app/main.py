@@ -1,6 +1,7 @@
 """FastAPI application entrypoint."""
 
 import os
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import Depends
@@ -39,6 +40,13 @@ class StrategyBCORSMiddleware(CORSMiddleware):
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 
+
+def resolve_app_version() -> str:
+    app_version = os.getenv("APP_VERSION", "").strip()
+    if app_version:
+        return app_version
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
 app.add_middleware(
     StrategyBCORSMiddleware,
     allow_origins=_resolve_cors_origins(),
@@ -75,6 +83,11 @@ def favicon() -> Response:
 def health() -> dict[str, bool]:
     openai_api_key = os.getenv("OPENAI_API_KEY", "")
     return {"ok": True, "openai_configured": bool(openai_api_key.strip())}
+
+
+@app.get("/version", tags=["meta"])
+def version() -> dict[str, bool | str]:
+    return {"ok": True, "version": resolve_app_version()}
 
 
 @app.get("/health/deep", tags=["meta"])
