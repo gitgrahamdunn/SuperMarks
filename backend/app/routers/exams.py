@@ -1027,7 +1027,7 @@ def start_answer_key_parse(exam_id: int, session: Session = Depends(get_session)
     session.commit()
     session.refresh(run)
 
-    return {"request_id": request_id, "parse_run_id": run.id, "page_count": run.page_count}
+    return {"request_id": request_id, "parse_run_id": run.id, "page_count": run.page_count, "pages_done": run.pages_done}
 
 
 @router.post("/{exam_id}/key/parse/next")
@@ -1059,7 +1059,7 @@ def parse_answer_key_next_page(
             "page_number": None,
             "page_count": run.page_count,
             "pages_done": run.pages_done,
-            "done": True,
+            "status": "done",
             "totals": {
                 "cost_total": run.cost_total,
                 "input_tokens_total": run.input_tokens_total,
@@ -1076,7 +1076,7 @@ def parse_answer_key_next_page(
             model_used="none",
             confidence=0.0,
             status="failed",
-            error_json=json.dumps({"detail": "Page image missing"}),
+            error_json={"detail": "Page image missing"},
         )
         session.add(parse_page)
         run.pages_done += 1
@@ -1102,13 +1102,16 @@ def parse_answer_key_next_page(
     output_tokens = 0
     cost = 0.0
     error_payload: dict[str, Any] | None = None
+    tried_models: list[str] = []
+    first_attempt_confidence = 0.0
 
     def _try_model(model_name: str) -> ParseResult:
         return _invoke_parser(parser, [page_path], model_name, request_id)
 
     result: ParseResult | None = None
-    for model_name in [nano_model, nano_model, mini_model]:
+    for model_name in [nano_model, mini_model]:
         used_model = model_name
+        tried_models.append(model_name)
         try:
             result = _try_model(model_name)
             in_t, out_t, cst = _extract_usage(result)
@@ -1116,11 +1119,18 @@ def parse_answer_key_next_page(
             output_tokens += out_t
             cost += cst
             confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
+            if len(tried_models) == 1:
+                first_attempt_confidence = confidence
             if model_name == nano_model and (not questions_payload or confidence < 0.60):
                 warnings.append("Low confidence on nano; escalating")
+                logger.info("nano questions=0 or low confidence -> escalating to mini")
                 continue
             break
-        except (OpenAIRequestError, ValueError) as exc:
+        except (OpenAIRequestError, ValueError, SchemaBuildError) as exc:
+            warnings.append(f"{model_name} failed: {type(exc).__name__}")
+            error_payload = {"detail": str(exc)[:300], "model": model_name}
+            continue
+        except Exception as exc:
             warnings.append(f"{model_name} failed: {type(exc).__name__}")
             error_payload = {"detail": str(exc)[:300], "model": model_name}
             continue
@@ -1141,8 +1151,8 @@ def parse_answer_key_next_page(
         cost=cost,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        result_json=json.dumps({"questions": questions_payload, "warnings": warnings}),
-        error_json=json.dumps(error_payload) if error_payload else None,
+        result_json={"questions": questions_payload, "warnings": warnings},
+        error_json=error_payload,
         updated_at=utcnow(),
     )
     session.add(parse_page)
@@ -1151,9 +1161,6 @@ def parse_answer_key_next_page(
     run.cost_total += cost
     run.input_tokens_total += input_tokens
     run.output_tokens_total += output_tokens
-    usage = json.loads(run.model_usage_json or "{}") if run.model_usage_json else {}
-    usage[used_model] = int(usage.get(used_model, 0)) + 1
-    run.model_usage_json = json.dumps(usage)
     run.updated_at = utcnow()
     if run.pages_done >= run.page_count:
         run.status = "done"
@@ -1167,12 +1174,11 @@ def parse_answer_key_next_page(
         "page_number": target_page.page_number,
         "page_count": run.page_count,
         "pages_done": run.pages_done,
-        "page_result": {"questions": stored_questions, "confidence": confidence, "status": page_status, "warnings": warnings},
+        "page_result": {"questions": stored_questions, "confidence": confidence, "status": page_status, "warnings": warnings, "model_used": used_model, "tried_models": tried_models, "first_attempt_confidence": first_attempt_confidence},
         "totals": {
             "cost_total": run.cost_total,
             "input_tokens_total": run.input_tokens_total,
             "output_tokens_total": run.output_tokens_total,
-            "model_usage": json.loads(run.model_usage_json or "{}"),
         },
     }
 
@@ -1184,14 +1190,17 @@ def get_answer_key_parse_status(exam_id: int, request_id: str, session: Session 
     warnings = [f"Page {p.page_number} failed" for p in pages if p.status == "failed"]
     return {
         "request_id": request_id,
+        "parse_run_id": run.id,
+        "exam_id": run.exam_id,
         "status": run.status,
         "page_count": run.page_count,
         "pages_done": run.pages_done,
+        "created_at": run.created_at.isoformat(),
+        "updated_at": run.updated_at.isoformat(),
         "totals": {
             "cost_total": run.cost_total,
             "input_tokens_total": run.input_tokens_total,
             "output_tokens_total": run.output_tokens_total,
-            "model_usage": json.loads(run.model_usage_json or "{}"),
         },
         "warnings": warnings,
     }
@@ -1210,7 +1219,11 @@ def finish_answer_key_parse(exam_id: int, request_id: str, session: Session = De
 
 @router.post("/{exam_id}/key/parse")
 def parse_answer_key(exam_id: int, session: Session = Depends(get_session), parser: AnswerKeyParser = Depends(get_answer_key_parser)) -> dict[str, object]:
-    started = start_answer_key_parse(exam_id=exam_id, session=session)
+    try:
+        started = start_answer_key_parse(exam_id=exam_id, session=session)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "stage": "build_key_pages", "request_id": str(uuid.uuid4())})
+
     request_id = str(started["request_id"])
     page_count = int(started["page_count"])
     attempts: list[dict[str, object]] = []
@@ -1218,11 +1231,23 @@ def parse_answer_key(exam_id: int, session: Session = Depends(get_session), pars
     for _ in range(page_count):
         last_page = parse_answer_key_next_page(exam_id=exam_id, request_id=request_id, session=session, parser=parser)
         if isinstance(last_page, dict) and isinstance(last_page.get("page_number"), int):
-            attempts.append({
-                "page_index": last_page["page_number"],
-                "model": ((last_page.get("totals") or {}).get("model_usage") or {}),
-                "confidence_score": ((last_page.get("page_result") or {}).get("confidence") or 0.0),
-            })
+            page_result = (last_page.get("page_result") or {})
+            tried = page_result.get("tried_models") if isinstance(page_result, dict) else []
+            final_confidence = page_result.get("confidence") if isinstance(page_result, dict) else 0.0
+            first_confidence = page_result.get("first_attempt_confidence") if isinstance(page_result, dict) else 0.0
+            if isinstance(tried, list) and tried:
+                for idx, model_name in enumerate(tried):
+                    attempts.append({
+                        "page_index": last_page["page_number"],
+                        "model": model_name or "unknown",
+                        "confidence_score": first_confidence if idx == 0 else final_confidence,
+                    })
+            else:
+                attempts.append({
+                    "page_index": last_page["page_number"],
+                    "model": (page_result.get("model_used") if isinstance(page_result, dict) else "unknown") or "unknown",
+                    "confidence_score": final_confidence,
+                })
     final = finish_answer_key_parse(exam_id=exam_id, request_id=request_id, session=session)
     questions = final.get("questions", []) if isinstance(final, dict) else []
     return {

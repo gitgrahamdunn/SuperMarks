@@ -570,6 +570,7 @@ def test_parse_answer_key_incremental_flow(tmp_path, monkeypatch) -> None:
         assert started.status_code == 200
         start_payload = started.json()
         assert start_payload["page_count"] == 2
+        assert start_payload["pages_done"] == 0
         request_id = start_payload["request_id"]
 
         next1 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"request_id": request_id})
@@ -584,6 +585,16 @@ def test_parse_answer_key_incremental_flow(tmp_path, monkeypatch) -> None:
         assert next2.status_code == 200
         assert next2.json()["pages_done"] == 2
 
+        done = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"request_id": request_id})
+        assert done.status_code == 200
+        assert done.json()["status"] == "done"
+
         finished = client.post(f"/api/exams/{exam_id}/key/parse/finish", params={"request_id": request_id})
         assert finished.status_code == 200
-        assert isinstance(finished.json()["questions"], list)
+        finished_payload = finished.json()
+        assert isinstance(finished_payload["questions"], list)
+        assert len(finished_payload["questions"]) >= 1
+
+    with Session(db.engine) as session:
+        questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
+        assert len(questions) >= 1
