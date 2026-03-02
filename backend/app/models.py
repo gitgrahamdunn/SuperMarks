@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 
@@ -131,8 +132,6 @@ class ExamKeyParseRun(SQLModel, table=True):
     cost_total: float = 0.0
     input_tokens_total: int = 0
     output_tokens_total: int = 0
-    model_usage_json: Optional[str] = None
-    error_json: Optional[str] = None
 
 
 class ExamKeyParsePage(SQLModel, table=True):
@@ -145,8 +144,8 @@ class ExamKeyParsePage(SQLModel, table=True):
     cost: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
-    result_json: Optional[str] = None
-    error_json: Optional[str] = None
+    result_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    error_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
