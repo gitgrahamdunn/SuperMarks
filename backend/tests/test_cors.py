@@ -31,7 +31,8 @@ def test_preflight_options_exams_allows_cors(client_app, path: str) -> None:
             },
         )
 
-    assert response.status_code in (200, 204)
+    assert response.status_code == 204
+    assert response.content == b""
     assert "access-control-allow-origin" in response.headers
     assert response.headers["access-control-allow-origin"] in {"*", "https://example.com"}
     assert "access-control-allow-methods" in response.headers
@@ -93,3 +94,12 @@ def test_post_exams_with_api_key_returns_201(tmp_path, monkeypatch) -> None:
         )
 
     assert response.status_code == 201
+
+
+def test_health_endpoint_returns_json() -> None:
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["ok"] is True
