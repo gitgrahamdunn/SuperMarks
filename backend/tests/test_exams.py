@@ -547,3 +547,43 @@ def test_bulk_upload_preview_and_finalize_creates_submissions(tmp_path, monkeypa
         detail = client.get(f"/api/exams/{exam_id}")
         assert detail.status_code == 200
         assert len(detail.json()["submissions"]) == 2
+
+
+def test_parse_answer_key_incremental_flow(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Incremental Parse"})
+        exam_id = exam.json()["id"]
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key1.png", _tiny_png_bytes(), "image/png")), ("files", ("key2.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        started = client.post(f"/api/exams/{exam_id}/key/parse/start")
+        assert started.status_code == 200
+        start_payload = started.json()
+        assert start_payload["page_count"] == 2
+        request_id = start_payload["request_id"]
+
+        next1 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"request_id": request_id})
+        assert next1.status_code == 200
+        assert next1.json()["pages_done"] == 1
+
+        status = client.get(f"/api/exams/{exam_id}/key/parse/status", params={"request_id": request_id})
+        assert status.status_code == 200
+        assert status.json()["pages_done"] == 1
+
+        next2 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"request_id": request_id})
+        assert next2.status_code == 200
+        assert next2.json()["pages_done"] == 2
+
+        finished = client.post(f"/api/exams/{exam_id}/key/parse/finish", params={"request_id": request_id})
+        assert finished.status_code == 200
+        assert isinstance(finished.json()["questions"], list)

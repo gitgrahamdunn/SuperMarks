@@ -123,12 +123,32 @@ class ExamKeyParseRun(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     exam_id: int = Field(foreign_key="exam.id", index=True)
     request_id: str = Field(index=True)
-    model_used: str
     status: str
-    started_at: datetime = Field(default_factory=utcnow)
-    finished_at: Optional[datetime] = None
+    page_count: int = 0
+    pages_done: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    cost_total: float = 0.0
+    input_tokens_total: int = 0
+    output_tokens_total: int = 0
+    model_usage_json: Optional[str] = None
     error_json: Optional[str] = None
-    timings_json: Optional[str] = None
+
+
+class ExamKeyParsePage(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    parse_run_id: int = Field(foreign_key="examkeyparserun.id", index=True)
+    page_number: int
+    model_used: str
+    confidence: float = 0.0
+    status: str
+    cost: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    result_json: Optional[str] = None
+    error_json: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class QuestionParseEvidence(SQLModel, table=True):

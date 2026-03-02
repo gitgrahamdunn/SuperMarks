@@ -120,3 +120,48 @@ export interface BulkFinalizeResponse {
   submissions: SubmissionRead[];
   warnings: string[];
 }
+
+
+export interface ParseTotals {
+  cost_total: number;
+  input_tokens_total: number;
+  output_tokens_total: number;
+  model_usage?: Record<string, number>;
+}
+
+export interface ParseStartResponse {
+  request_id: string;
+  parse_run_id: number;
+  page_count: number;
+}
+
+export interface ParseNextResponse {
+  request_id: string;
+  page_number: number | null;
+  page_count: number;
+  pages_done: number;
+  done?: boolean;
+  warning?: string;
+  page_result?: {
+    questions: Array<{ id: number; label: string; max_marks: number }>;
+    confidence: number;
+    status?: string;
+    warnings?: string[];
+  };
+  totals: ParseTotals;
+}
+
+export interface ParseStatusResponse {
+  request_id: string;
+  status: string;
+  page_count: number;
+  pages_done: number;
+  totals: ParseTotals;
+  warnings: string[];
+}
+
+export interface ParseFinishResponse {
+  request_id: string;
+  status: string;
+  questions: unknown[];
+}
