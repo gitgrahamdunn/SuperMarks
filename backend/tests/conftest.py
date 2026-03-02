@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -17,3 +18,8 @@ def _reset_storage_provider() -> None:
     reset_storage_provider()
     yield
     reset_storage_provider()
+
+
+@pytest.fixture(autouse=True)
+def _blob_mock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BLOB_MOCK", "1")

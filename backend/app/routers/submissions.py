@@ -60,7 +60,7 @@ def get_submission(submission_id: int, session: Session = Depends(get_session)) 
         student_name=submission.student_name,
         status=submission.status,
         created_at=submission.created_at,
-        files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path) for f in files],
+        files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
         pages=[SubmissionPageRead(id=p.id, page_number=p.page_number, image_path=p.image_path, width=p.width, height=p.height) for p in pages],
     )
 
@@ -79,7 +79,8 @@ def list_submission_files(submission_id: int, session: Session = Depends(get_ses
             stored_path=row.stored_path,
             content_type=row.content_type,
             size_bytes=row.size_bytes,
-            signed_url=_run_async(get_storage_signed_url(row.stored_path)),
+            signed_url=row.blob_url or _run_async(get_storage_signed_url(row.stored_path)),
+            blob_url=row.blob_url,
         )
         for row in rows
     ]

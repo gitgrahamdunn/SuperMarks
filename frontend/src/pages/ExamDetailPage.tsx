@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import { useToast } from '../components/ToastProvider';
-import type { BulkUploadPreview, ExamDetail } from '../types/api';
+import type { BulkUploadPreview, ExamDetail, StoredFileRead } from '../types/api';
 
 export function ExamDetailPage() {
   const params = useParams();
   const examId = Number(params.examId);
   const navigate = useNavigate();
   const [detail, setDetail] = useState<ExamDetail | null>(null);
+  const [keyFiles, setKeyFiles] = useState<StoredFileRead[]>([]);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [rosterText, setRosterText] = useState('');
   const [preview, setPreview] = useState<BulkUploadPreview | null>(null);
@@ -21,7 +22,9 @@ export function ExamDetailPage() {
 
   const loadDetail = async () => {
     try {
-      setDetail(await api.getExamDetail(examId));
+      const [examDetail, uploadedKeyFiles] = await Promise.all([api.getExamDetail(examId), api.listExamKeyFiles(examId)]);
+      setDetail(examDetail);
+      setKeyFiles(uploadedKeyFiles);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Failed to load exam');
     }
@@ -139,6 +142,22 @@ export function ExamDetailPage() {
         </section>
       </div>
 
+
+      <section className="card" style={{ marginTop: 16 }}>
+        <h2>Exam Key Files</h2>
+        {keyFiles.length === 0 ? (
+          <p className="subtle-text">No key files uploaded yet.</p>
+        ) : (
+          <ul>
+            {keyFiles.map((file) => (
+              <li key={file.id}>
+                {file.original_filename} - <a href={file.blob_url || file.signed_url} target="_blank" rel="noreferrer">View</a>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       <section className="card stack" style={{ marginTop: 16 }}>
         <h2>Bulk Upload Student Tests (PDF)</h2>
         <input type="file" accept="application/pdf" onChange={(event) => setBulkFile(event.target.files?.[0] || null)} />
@@ -160,7 +179,8 @@ export function ExamDetailPage() {
       </section>
 
       {preview && (
-        <section className="card stack" style={{ marginTop: 16 }}>
+  
+      <section className="card stack" style={{ marginTop: 16 }}>
           <h3>Bulk upload preview</h3>
           {preview.warnings.length > 0 && (
             <ul>

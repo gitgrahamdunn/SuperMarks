@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useToast } from '../components/ToastProvider';
-import type { SubmissionRead } from '../types/api';
+import type { StoredFileRead, SubmissionRead } from '../types/api';
 
 const statusOrder = ['UPLOADED', 'PAGES_READY', 'CROPS_READY', 'TRANSCRIBED', 'GRADED'];
 
@@ -10,11 +10,14 @@ export function SubmissionDetailPage() {
   const params = useParams();
   const submissionId = Number(params.submissionId);
   const [submission, setSubmission] = useState<SubmissionRead | null>(null);
+  const [storedFiles, setStoredFiles] = useState<StoredFileRead[]>([]);
   const { showError, showSuccess } = useToast();
 
   const loadSubmission = async () => {
     try {
-      setSubmission(await api.getSubmission(submissionId));
+      const [submissionDetail, files] = await Promise.all([api.getSubmission(submissionId), api.listSubmissionFiles(submissionId)]);
+      setSubmission(submissionDetail);
+      setStoredFiles(files);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Failed to load submission');
     }
@@ -59,6 +62,18 @@ export function SubmissionDetailPage() {
         <Link to={`/submissions/${submission.id}/template-builder?examId=${submission.exam_id}`}>Template Builder</Link>
         <Link to={`/submissions/${submission.id}/results?examId=${submission.exam_id}`}>Results</Link>
       </div>
+
+      <h2>Student Files</h2>
+      {storedFiles.length === 0 && <p className="subtle-text">No uploaded files.</p>}
+      {storedFiles.length > 0 && (
+        <ul>
+          {storedFiles.map((file) => (
+            <li key={file.id}>
+              {file.original_filename} - <a href={file.blob_url || file.signed_url} target="_blank" rel="noreferrer">Download/View</a>
+            </li>
+          ))}
+        </ul>
+      )}
 
       <h2>Pages</h2>
       {submission.pages.length === 0 && <p>No pages yet. Build pages first.</p>}

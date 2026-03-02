@@ -29,6 +29,9 @@ export interface SubmissionFile {
   file_kind: string;
   original_filename: string;
   stored_path: string;
+  blob_url?: string | null;
+  content_type?: string;
+  size_bytes?: number;
 }
 
 export interface SubmissionPage {
@@ -164,4 +167,15 @@ export interface ParseFinishResponse {
   request_id: string;
   status: string;
   questions: unknown[];
+}
+
+
+export interface StoredFileRead {
+  id: number;
+  original_filename: string;
+  stored_path: string;
+  content_type: string;
+  size_bytes: number;
+  signed_url: string;
+  blob_url?: string | null;
 }
