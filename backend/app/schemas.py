@@ -27,6 +27,9 @@ class SubmissionFileRead(BaseModel):
     file_kind: str
     original_filename: str
     stored_path: str
+    blob_url: str | None = None
+    content_type: str | None = None
+    size_bytes: int | None = None
 
 
 class SubmissionPageRead(BaseModel):
@@ -125,6 +128,7 @@ class ExamKeyPageRead(BaseModel):
 
 class ExamKeyUploadResponse(BaseModel):
     uploaded: int
+    urls: list[str] = Field(default_factory=list)
 
 
 class StoredFileRead(BaseModel):
@@ -134,6 +138,7 @@ class StoredFileRead(BaseModel):
     content_type: str
     size_bytes: int
     signed_url: str
+    blob_url: str | None = None
 
 
 class NameEvidence(BaseModel):

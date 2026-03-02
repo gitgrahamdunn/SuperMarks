@@ -56,6 +56,7 @@ interface WizardParseResult {
 const MB = 1024 * 1024;
 const LARGE_FILE_BYTES = 8 * MB;
 const LARGE_TOTAL_BYTES = 12 * MB;
+const SERVER_UPLOAD_MAX_BYTES = 25 * MB;
 
 const CHECKLIST_ORDER: Array<{ id: ParseChecklistStepId; label: string }> = [
   { id: 'creating_exam', label: 'Creating exam' },
@@ -483,10 +484,15 @@ export function ExamsPage() {
             <FileUploader
               files={modalFiles}
               disabled={isRunning}
-              maxBytesPerFile={LARGE_FILE_BYTES}
+              maxBytesPerFile={SERVER_UPLOAD_MAX_BYTES}
               onChange={(files) => {
                 setModalFiles(files);
                 setAllowLargeUpload(false);
+                const hasLargePdf = files.some((file) => file.type === 'application/pdf' && file.size > LARGE_FILE_BYTES);
+                if (hasLargePdf) {
+                  showWarning('Large PDFs will require direct-to-Blob upload (coming next).');
+                  // TODO(Phase 2): route large PDFs through client upload flow using /api/blob/client-upload-token.
+                }
               }}
               onReject={(message) => showError(message)}
             />

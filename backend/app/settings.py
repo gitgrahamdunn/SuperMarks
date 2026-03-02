@@ -71,6 +71,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("SUPERMARKS_S3_PUBLIC_BASE_URL", "S3_PUBLIC_BASE_URL"),
     )
+    blob_public_access: str = Field(
+        default="public",
+        validation_alias=AliasChoices("SUPERMARKS_BLOB_PUBLIC_ACCESS", "BLOB_PUBLIC_ACCESS"),
+    )
 
     # Deployment toggles
     vercel_environment: bool = False

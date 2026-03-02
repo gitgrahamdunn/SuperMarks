@@ -14,6 +14,7 @@ import type {
   ParseNextResponse,
   ParseStartResponse,
   ParseStatusResponse,
+  StoredFileRead,
 } from '../types/api';
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
@@ -449,6 +450,7 @@ export const api = {
     return examDetail.questions || [];
   },
 
+  listExamKeyFiles: (examId: number) => request<StoredFileRead[]>(`exams/${examId}/key/files`),
   buildExamKeyPages: (examId: number, options?: RequestInit) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST', ...options }, BUILD_PAGES_TIMEOUT_MS),
   listExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/pages`),
   getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),
@@ -493,6 +495,7 @@ export const api = {
     }
   },
   getSubmission: (submissionId: number) => request<SubmissionRead>(`submissions/${submissionId}`),
+  listSubmissionFiles: (submissionId: number) => request<StoredFileRead[]>(`submissions/${submissionId}/files`),
   buildPages: (submissionId: number) => request<SubmissionPage[]>(`submissions/${submissionId}/build-pages`, { method: 'POST' }, BUILD_PAGES_TIMEOUT_MS),
   buildCrops: (submissionId: number) => request<{ message: string }>(`submissions/${submissionId}/build-crops`, { method: 'POST' }),
   transcribe: (submissionId: number) => request<{ message: string }>(`submissions/${submissionId}/transcribe?provider=stub`, { method: 'POST' }),
@@ -500,6 +503,7 @@ export const api = {
   getResults: (submissionId: number) => request<SubmissionResults>(`submissions/${submissionId}/results`),
   getPageImageUrl: (submissionId: number, pageNumber: number) => buildApiUrl(`submissions/${submissionId}/page/${pageNumber}`),
   getCropImageUrl: (submissionId: number, questionId: number) => buildApiUrl(`submissions/${submissionId}/crop/${questionId}`),
+  getClientUploadToken: () => request<{ detail: string }>(`blob/client-upload-token`, { method: 'POST' }), // TODO(Phase 2): use this token for direct-to-Blob uploads.
   getQuestionKeyVisualUrl: (examId: number, questionId: number) => buildApiUrl(`exams/${examId}/questions/${questionId}/key-visual`),
   saveRegions: (questionId: number, regions: Region[]) => request<Region[]>(`questions/${questionId}/regions`, {
     method: 'POST',
