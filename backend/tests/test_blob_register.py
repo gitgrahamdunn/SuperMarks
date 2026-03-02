@@ -64,7 +64,7 @@ def test_blob_mock_endpoints_and_register_rows(tmp_path, monkeypatch) -> None:
 
         signed_url = client.post("/api/blob/signed-url", json={"pathname": "exams/1/key/file-1.pdf"})
         assert signed_url.status_code == 200
-        assert signed_url.json()["url"] == "https://example.com/fake"
+        assert signed_url.json()["url"] == "https://example.com/mock-signed-url"
 
     with Session(db.engine) as session:
         key_rows = session.exec(select(ExamKeyFile)).all()
@@ -73,3 +73,15 @@ def test_blob_mock_endpoints_and_register_rows(tmp_path, monkeypatch) -> None:
         assert key_rows[0].stored_path.endswith("file-1.pdf")
         assert len(submission_rows) == 1
         assert submission_rows[0].stored_path.endswith("file-1.pdf")
+
+
+
+def test_upload_token_returns_501_when_not_configured(monkeypatch) -> None:
+    monkeypatch.delenv("BLOB_MOCK", raising=False)
+    monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
+
+    with TestClient(app) as client:
+        response = client.post("/api/blob/upload-token")
+
+    assert response.status_code == 501
+    assert response.json() == {"detail": "Blob not configured", "missing": ["BLOB_READ_WRITE_TOKEN"]}

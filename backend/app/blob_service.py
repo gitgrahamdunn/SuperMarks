@@ -10,6 +10,14 @@ import httpx
 VERCEL_BLOB_BASE = "https://blob.vercel-storage.com"
 
 
+class BlobConfigError(RuntimeError):
+    """Raised when required blob configuration is missing."""
+
+    def __init__(self, missing: list[str]):
+        self.missing = missing
+        super().__init__("Blob not configured")
+
+
 def blob_mock_enabled() -> bool:
     return os.getenv("BLOB_MOCK", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -19,13 +27,13 @@ def get_blob_token() -> str:
         return "mock-token"
     token = os.getenv("BLOB_READ_WRITE_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("BLOB_READ_WRITE_TOKEN is not configured")
+        raise BlobConfigError(["BLOB_READ_WRITE_TOKEN"])
     return token
 
 
 async def create_signed_blob_url(pathname: str, expires_seconds: int = 600) -> str:
     if blob_mock_enabled():
-        return "https://example.com/fake"
+        return "https://example.com/mock-signed-url"
 
     token = get_blob_token()
     expires_at = int((datetime.now(timezone.utc) + timedelta(seconds=expires_seconds)).timestamp())

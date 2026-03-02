@@ -36,7 +36,7 @@ from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, Ex
 from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
-from app.storage_provider import get_storage_signed_url, materialize_object_to_path
+from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
 from app.blob_store import BlobUploadError, upload_bytes
 
 router = APIRouter(prefix="/exams", tags=["exams"])

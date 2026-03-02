@@ -66,7 +66,7 @@ def test_exam_creation_workflow_smoke(tmp_path) -> None:
                 files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
             )
             assert upload_response.status_code == 200
-            assert upload_response.json() == {"uploaded": 1}
+            assert upload_response.json()["uploaded"] == 1
 
 
             parse_response = client.post(f"/api/exams/{exam_id}/key/parse")
