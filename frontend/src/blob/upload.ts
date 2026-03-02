@@ -9,7 +9,7 @@ export type UploadedBlobMetadata = {
 
 export async function uploadToBlob(file: File, pathname: string, token: string): Promise<UploadedBlobMetadata> {
   const blob = await put(pathname, file, {
-    access: 'private' as unknown as 'public',
+    access: 'private',
     token,
   });
 
