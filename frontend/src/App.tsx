@@ -1,5 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { NavLink, Route, Routes } from 'react-router-dom';
+import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
+import { Modal } from './components/Modal';
+import { clearClientLogs, getClientLogs, hasCapturedClientErrors, subscribeToClientLogs } from './logs/clientLogStore';
 
 const ExamsPage = lazy(async () => ({ default: (await import('./pages/ExamsPage')).ExamsPage }));
 const ExamDetailPage = lazy(async () => ({ default: (await import('./pages/ExamDetailPage')).ExamDetailPage }));
@@ -26,12 +28,21 @@ function getInitialTheme(): Theme {
 
 export default function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [clientLogs, setClientLogs] = useState(() => getClientLogs());
+  const [showClientErrorBanner, setShowClientErrorBanner] = useState(() => hasCapturedClientErrors());
   const frontendVersion = useMemo(() => resolveFrontendVersionLabel(), []);
+  const location = useLocation();
 
   useEffect(() => {
     document.body.classList.toggle('theme-dark', theme === 'dark');
     localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
+
+  useEffect(() => subscribeToClientLogs(() => {
+    setClientLogs(getClientLogs());
+    setShowClientErrorBanner(hasCapturedClientErrors());
+  }), []);
 
   return (
     <div className="layout">
@@ -50,17 +61,32 @@ export default function App() {
           </nav>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.25rem' }}>
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
-            aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
-          >
-            Theme: {theme}
-          </button>
+          <div className="actions-row" style={{ marginTop: 0 }}>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setLogsOpen(true)}
+            >
+              Open Logs ({clientLogs.length})
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
+              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+            >
+              Theme: {theme}
+            </button>
+          </div>
           <small className="subtle-text">{frontendVersion}</small>
         </div>
       </header>
+
+      {location.pathname === '/' && showClientErrorBanner && (
+        <p className="warning-text">
+          A client error occurred. Open Logs for details.
+        </p>
+      )}
 
       <main id="main-content" tabIndex={-1}>
         <Suspense fallback={<p className="subtle-text">Loading page…</p>}>
@@ -74,6 +100,48 @@ export default function App() {
           </Routes>
         </Suspense>
       </main>
+
+      {logsOpen && (
+        <Modal title="Client Logs" onClose={() => setLogsOpen(false)}>
+          <div className="stack">
+            <h2 style={{ margin: 0 }}>Client Logs</h2>
+            <p className="subtle-text" style={{ margin: 0 }}>
+              Captures window errors and unhandled promise rejections for frontend debugging.
+            </p>
+            <div className="actions-row" style={{ marginTop: 0 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  clearClientLogs();
+                  setShowClientErrorBanner(false);
+                }}
+              >
+                Clear logs
+              </button>
+              <button type="button" className="btn btn-primary" onClick={() => setLogsOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div className="client-log-list">
+              {clientLogs.length === 0 && <p className="subtle-text">No client logs captured yet.</p>}
+              {clientLogs.map((entry, index) => (
+                <article key={`${entry.timestamp}-${entry.type}-${index}`} className="client-log-item">
+                  <p><strong>{entry.type}</strong>{entry.count && entry.count > 1 ? ` (x${entry.count})` : ''}</p>
+                  <p>{entry.message}</p>
+                  <p className="subtle-text">{new Date(entry.timestamp).toLocaleString()}</p>
+                  {entry.filename && (
+                    <p className="subtle-text">
+                      {entry.filename}:{entry.lineno ?? '?'}:{entry.colno ?? '?'}
+                    </p>
+                  )}
+                  {entry.stack && <pre>{entry.stack}</pre>}
+                </article>
+              ))}
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

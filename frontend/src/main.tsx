@@ -5,9 +5,30 @@ import App from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
 import { checkBackendApiContract, getApiConfigError } from './api/client';
+import { logEvent } from './logs/clientLogStore';
 import './styles.css';
 
 const apiConfigError = getApiConfigError();
+
+window.addEventListener('error', (event) => {
+  logEvent({
+    type: 'window.error',
+    message: event.message,
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+    stack: event.error?.stack,
+  });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const err = event.reason;
+  logEvent({
+    type: 'unhandledrejection',
+    message: String(err?.message || err),
+    stack: err?.stack,
+  });
+});
 
 console.log('[SuperMarks] API_BASE=', import.meta.env.VITE_API_BASE_URL || '<missing>');
 console.log('[SuperMarks] HAS_API_KEY=', Boolean(import.meta.env.VITE_BACKEND_API_KEY));
