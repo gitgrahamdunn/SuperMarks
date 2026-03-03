@@ -272,3 +272,20 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
 .textarea-large[style*="overflow-y: auto"] {
   overscroll-behavior: contain;
 }
+
+.client-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+}
+
+.client-log-item {
+  border: 1px solid var(--border-soft);
+  border-radius: .5rem;
+  padding: .65rem;
+  background: var(--surface-alt);
+}
+
+.client-log-item p {
+  margin: .2rem 0;
+}
