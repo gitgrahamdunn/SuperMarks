@@ -6,8 +6,6 @@ from uuid import uuid4
 
 from fastapi import Depends
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.datastructures import Headers
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from sqlmodel import Session
@@ -23,19 +21,7 @@ from app.routers.files import router as files_router
 from app.routers.blob import router as blob_router
 from app.settings import settings
 from app.storage import ensure_dir
-
-
-def _resolve_cors_origins() -> list[str]:
-    configured_cors_origins = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
-    if not configured_cors_origins:
-        return ["*"]
-    return [origin.strip() for origin in configured_cors_origins.split(",") if origin.strip()]
-
-
-class StrategyBCORSMiddleware(CORSMiddleware):
-    def preflight_response(self, request_headers: Headers) -> Response:
-        response = super().preflight_response(request_headers)
-        return Response(status_code=204, headers=dict(response.headers))
+from app.cors_safe import SafeCORSMiddleware
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -47,13 +33,7 @@ def resolve_app_version() -> str:
         return app_version
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-app.add_middleware(
-    StrategyBCORSMiddleware,
-    allow_origins=_resolve_cors_origins(),
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(SafeCORSMiddleware)
 
 app.include_router(public_exams_router, prefix="/api")
 app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_api_key)])
@@ -129,7 +109,3 @@ def deep_health() -> dict[str, bool | str]:
 def client_upload_token_stub() -> Response:
     return JSONResponse(status_code=501, content={"detail": "Client upload not implemented yet."})
 
-@app.options("/api/{path:path}", include_in_schema=False)
-async def api_preflight(path: str) -> Response:
-    del path
-    return Response(status_code=204)

@@ -103,3 +103,13 @@ def test_health_endpoint_returns_json() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
     assert response.json()["ok"] is True
+
+
+def test_safe_cors_middleware_handles_options_and_health() -> None:
+    with TestClient(app) as client:
+        options_response = client.options("/api/exams", headers={"Origin": "https://example.com"})
+        health_response = client.get("/health", headers={"Origin": "https://example.com"})
+
+    assert options_response.status_code == 204
+    assert options_response.content == b""
+    assert health_response.status_code == 200
