@@ -43,6 +43,16 @@ type ParseTimings = Record<string, number>;
 type ParseOutcomeData = { timings?: ParseTimings; page_count?: number; page_index?: number };
 type RunningTotals = { cost_total: number; input_tokens_total: number; output_tokens_total: number; model_usage?: Record<string, number> };
 
+type RawFetchProbeResult = {
+  attemptedUrl: string;
+  responseStatus?: number;
+  contentType?: string | null;
+  bodySnippet?: string;
+  finalUrl?: string;
+  errorName?: string;
+  errorMessage?: string;
+};
+
 type ParseChecklistStep = {
   id: ParseChecklistStepId;
   label: string;
@@ -58,6 +68,7 @@ const MB = 1024 * 1024;
 const LARGE_FILE_BYTES = 8 * MB;
 const LARGE_TOTAL_BYTES = 12 * MB;
 const SERVER_UPLOAD_MAX_BYTES = 25 * MB;
+const RAW_FETCH_SNIPPET_LENGTH = 300;
 
 const CHECKLIST_ORDER: Array<{ id: ParseChecklistStepId; label: string }> = [
   { id: 'creating_exam', label: 'Creating exam' },
@@ -123,6 +134,8 @@ export function ExamsPage() {
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
   const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
   const [pingResult, setPingResult] = useState<string>('');
+  const [rawFetchProbeResult, setRawFetchProbeResult] = useState<RawFetchProbeResult | null>(null);
+  const [isRunningRawProbe, setIsRunningRawProbe] = useState(false);
   const [isPingingApi, setIsPingingApi] = useState(false);
   const [allowLargeUpload, setAllowLargeUpload] = useState(false);
   const [parseProgress, setParseProgress] = useState(0);
@@ -406,6 +419,50 @@ export function ExamsPage() {
     }
   };
 
+  const runRawFetchProbe = async (method: 'GET' | 'POST', attemptedUrl: string, options: RequestInit = {}) => {
+    try {
+      setIsRunningRawProbe(true);
+      const response = await fetch(attemptedUrl, { method, ...options });
+      const body = await response.text();
+      setRawFetchProbeResult({
+        attemptedUrl,
+        responseStatus: response.status,
+        contentType: response.headers.get('content-type'),
+        bodySnippet: body.slice(0, RAW_FETCH_SNIPPET_LENGTH),
+        finalUrl: response.url,
+      });
+    } catch (error) {
+      setRawFetchProbeResult({
+        attemptedUrl,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsRunningRawProbe(false);
+    }
+  };
+
+  const onRawHealthProbe = async () => {
+    const configuredBase = import.meta.env.VITE_API_BASE_URL?.trim() || '';
+    const url = `${configuredBase.replace(/\/api\/?$/, '')}/health`;
+    await runRawFetchProbe('GET', url);
+  };
+
+  const onRawGetExamsProbe = async () => {
+    const configuredBase = import.meta.env.VITE_API_BASE_URL?.trim() || '';
+    const url = `${configuredBase}/exams`;
+    await runRawFetchProbe('GET', url);
+  };
+
+  const onRawPostExamsProbe = async () => {
+    const configuredBase = import.meta.env.VITE_API_BASE_URL?.trim() || '';
+    const url = `${configuredBase}/exams`;
+    await runRawFetchProbe('POST', url, {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: `Probe ${Date.now()}` }),
+    });
+  };
+
   return (
     <div className="stack">
       <h1>Exams</h1>
@@ -437,6 +494,29 @@ export function ExamsPage() {
                 {isPingingApi ? 'Pinging...' : 'Ping API'}
               </button>
               {pingResult && <pre className="code-box">{pingResult}</pre>}
+
+              <div className="stack" style={{ marginTop: '0.75rem' }}>
+                <h3 style={{ marginBottom: 0 }}>Raw Fetch Probe</h3>
+                <button type="button" className="btn btn-secondary" onClick={onRawHealthProbe} disabled={isRunningRawProbe}>
+                  Raw GET /health (no headers)
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={onRawGetExamsProbe} disabled={isRunningRawProbe}>
+                  Raw GET /api/exams (no headers)
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={onRawPostExamsProbe} disabled={isRunningRawProbe}>
+                  Raw POST /api/exams (no headers)
+                </button>
+                {rawFetchProbeResult && (
+                  <pre className="code-box">{[
+                    `attempted URL: ${rawFetchProbeResult.attemptedUrl}`,
+                    `response.status: ${rawFetchProbeResult.responseStatus ?? 'n/a'}`,
+                    `response content-type: ${rawFetchProbeResult.contentType ?? 'n/a'}`,
+                    `final URL: ${rawFetchProbeResult.finalUrl ?? 'n/a'}`,
+                    `body (first ${RAW_FETCH_SNIPPET_LENGTH} chars): ${rawFetchProbeResult.bodySnippet ?? '<empty>'}`,
+                    rawFetchProbeResult.errorName ? `fetch error: ${rawFetchProbeResult.errorName} ${rawFetchProbeResult.errorMessage || ''}`.trim() : null,
+                  ].filter(Boolean).join('\n')}</pre>
+                )}
+              </div>
             </div>
           )}
         </section>
