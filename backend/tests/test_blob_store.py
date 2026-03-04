@@ -25,6 +25,18 @@ def test_blob_store_mock_helpers(monkeypatch) -> None:
     assert content_type == "application/pdf"
 
 
+def test_blob_store_mock_helpers_accept_blob_url(monkeypatch) -> None:
+    monkeypatch.setenv("BLOB_MOCK", "1")
+    blob_url = "https://blob.vercel-storage.com/exams/99/key/file.pdf"
+
+    signed = asyncio.run(get_signed_read_url(blob_url))
+    data, content_type = asyncio.run(download_blob_bytes(blob_url))
+
+    assert signed == "https://example.com/mock"
+    assert data.startswith(b"%PDF-1.4")
+    assert content_type == "application/pdf"
+
+
 def _png_bytes() -> bytes:
     image = Image.new("RGB", (16, 16), "white")
     buf = BytesIO()

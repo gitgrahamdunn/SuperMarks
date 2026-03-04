@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -35,6 +35,19 @@ def _require_blob_token() -> str:
 
 def _is_mock_mode() -> bool:
     return os.getenv("BLOB_MOCK", "").strip() == "1"
+
+
+def _normalize_pathname(pathname: str) -> str:
+    value = (pathname or "").strip()
+    if not value:
+        raise ValueError("pathname must be non-empty")
+    if value.startswith("http://") or value.startswith("https://"):
+        parsed = urlparse(value)
+        value = parsed.path
+    normalized = value.lstrip("/")
+    if not normalized:
+        raise ValueError("pathname must include a path")
+    return normalized
 
 
 def _mock_upload(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
@@ -137,6 +150,7 @@ def _upload_with_http(pathname: str, data: bytes, content_type: str) -> dict[str
 
 
 async def get_signed_read_url(pathname: str, expires_seconds: int = 600) -> str:
+    normalized_pathname = _normalize_pathname(pathname)
     if _is_mock_mode():
         return "https://example.com/mock"
 
@@ -145,7 +159,7 @@ async def get_signed_read_url(pathname: str, expires_seconds: int = 600) -> str:
     except Exception as exc:
         raise BlobSignedUrlError("Blob signed URL failed") from exc
     expires_at = int((datetime.now(timezone.utc) + timedelta(seconds=expires_seconds)).timestamp())
-    endpoint = f"https://blob.vercel-storage.com/v1/sign/{quote(pathname, safe='/-_.~')}"
+    endpoint = f"https://blob.vercel-storage.com/v1/sign/{quote(normalized_pathname, safe='/-_.~')}"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.put(
@@ -167,15 +181,16 @@ async def get_signed_read_url(pathname: str, expires_seconds: int = 600) -> str:
 
 
 async def download_blob_bytes(pathname: str) -> tuple[bytes, str]:
+    normalized_pathname = _normalize_pathname(pathname)
     if _is_mock_mode():
         return (b"%PDF-1.4\n%mock blob content\n", "application/pdf")
 
-    signed_url = await get_signed_read_url(pathname)
+    signed_url = await get_signed_read_url(normalized_pathname)
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.get(signed_url)
 
     if response.status_code >= 400:
-        raise BlobDownloadError(f"Blob download failed ({response.status_code}) for pathname {pathname}")
+        raise BlobDownloadError(f"Blob download failed ({response.status_code}) for pathname {normalized_pathname}")
 
     return response.content, response.headers.get("content-type", "")
 
