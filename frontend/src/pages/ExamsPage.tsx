@@ -28,8 +28,14 @@ type StepLog = {
 };
 
 type WizardError = {
+  step: WizardStep;
   summary: string;
   details: unknown;
+  attemptedUrl: string;
+  method: string;
+  status: number | 'network-error' | 'unknown';
+  contentType?: string | null;
+  bodySnippet?: string;
   isAbort?: boolean;
 };
 
@@ -154,6 +160,7 @@ export function ExamsPage() {
   const parseProgressIntervalRef = useRef<number | null>(null);
   const elapsedIntervalRef = useRef<number | null>(null);
   const requestControllerRef = useRef<AbortController | null>(null);
+  const currentStepRef = useRef<WizardStep>('creating');
   const openWizardButtonRef = useRef<HTMLButtonElement>(null);
   const examNameRef = useRef<HTMLInputElement>(null);
 
@@ -218,6 +225,19 @@ export function ExamsPage() {
     setChecklistSteps((prev) => prev.map((item) => (item.id === id ? { ...item, status } : item)));
   };
 
+  const updateCurrentStep = (nextStep: WizardStep) => {
+    currentStepRef.current = nextStep;
+    setStep(nextStep);
+  };
+
+  const endpointForStep = (stepName: WizardStep, examId: number | null) => {
+    if (stepName === 'creating') return buildApiUrl('exams');
+    if (stepName === 'uploading' && examId) return buildApiUrl(`exams/${examId}/key/register`);
+    if (stepName === 'building_pages' && examId) return buildApiUrl(`exams/${examId}/key/build-pages`);
+    if (stepName === 'parsing' && examId) return buildApiUrl(`exams/${examId}/key/parse/start`);
+    return buildApiUrl('unknown');
+  };
+
   const startParseProgress = () => {
     clearIntervals();
     elapsedIntervalRef.current = window.setInterval(() => setElapsedSeconds((prev) => prev + 1), 1000);
@@ -280,7 +300,7 @@ export function ExamsPage() {
 
     try {
       setIsRunning(true);
-      setStep('creating');
+      updateCurrentStep('creating');
       markChecklist('creating_exam', 'active');
       const exam = await api.createExam(modalName.trim(), requestOptions);
       examId = exam.id;
@@ -289,7 +309,7 @@ export function ExamsPage() {
       markChecklist('creating_exam', 'done');
       setParseProgress(14);
 
-      setStep('uploading');
+      updateCurrentStep('uploading');
       markChecklist('uploading_key', 'active');
       const { token } = await api.getBlobUploadToken();
       const uploaded = await Promise.all(
@@ -306,7 +326,7 @@ export function ExamsPage() {
       markChecklist('uploading_key', 'done');
       setParseProgress(28);
 
-      setStep('building_pages');
+      updateCurrentStep('building_pages');
       markChecklist('building_key_pages', 'active');
       const buildPages = await api.buildExamKeyPages(exam.id, requestOptions);
       logStep({ step: 'building_pages', endpointUrl: buildApiUrl(`exams/${exam.id}/key/build-pages`), status: 200, responseSnippet: JSON.stringify(buildPages).slice(0, 500) });
@@ -314,7 +334,7 @@ export function ExamsPage() {
       setParseProgress(42);
       setParsePageCount(buildPages.length);
 
-      setStep('parsing');
+      updateCurrentStep('parsing');
       markChecklist('reading_questions', 'active');
       setParseProgress(50);
       startParseProgress();
@@ -349,7 +369,7 @@ export function ExamsPage() {
       setParseProgress(100);
       const questionCount = extractParsedQuestionCount(finished.questions);
       setParsedQuestionCount(questionCount);
-      setStep('done');
+      updateCurrentStep('done');
       localStorage.setItem(`supermarks:lastParse:${exam.id}`, JSON.stringify(finished));
 
       setIsModalOpen(false);
@@ -357,19 +377,21 @@ export function ExamsPage() {
       await loadExams();
       navigate(`/exams/${exam.id}/review`);
     } catch (err) {
-      const stepName = step;
-      const stepEndpoint =
-        stepName === 'creating'
-          ? buildApiUrl('exams')
-          : stepName === 'uploading' && examId
-            ? buildApiUrl(`exams/${examId}/key/register`)
-            : stepName === 'parsing' && examId
-              ? buildApiUrl(`exams/${examId}/key/parse/start`)
-              : buildApiUrl('unknown');
+      const stepName = currentStepRef.current;
+      const stepEndpoint = endpointForStep(stepName, examId);
 
       if (isNetworkFetchError(err) || isAbortError(err)) {
         const details = err instanceof Error ? err.stack || err.message : String(err);
-        setWizardError({ summary: `Step: ${stepName} | Status: network-error`, details, isAbort: isAbortError(err) });
+        setWizardError({
+          step: stepName,
+          summary: `Step: ${stepName} | Status: network-error`,
+          details,
+          attemptedUrl: stepEndpoint,
+          method: 'UNKNOWN',
+          status: 'network-error',
+          bodySnippet: err instanceof Error ? err.message : String(err),
+          isAbort: isAbortError(err),
+        });
         showError(`Network request failed. Step: ${stepName}. URL: ${stepEndpoint}`);
       } else if (err instanceof ApiError) {
         const details = JSON.stringify({
@@ -389,10 +411,27 @@ export function ExamsPage() {
         } catch {
           // no-op
         }
-        setWizardError({ summary: `Step: ${stepName} | ${err.method} ${err.url} | Status: ${err.status}`, details });
+        setWizardError({
+          step: stepName,
+          summary: `Step: ${stepName} | ${err.method} ${err.url} | Status: ${err.status}`,
+          details,
+          attemptedUrl: err.url,
+          method: err.method,
+          status: err.status,
+          contentType: undefined,
+          bodySnippet: err.responseBodySnippet,
+        });
         showError(`${stepName} failed (status ${err.status}) via ${err.method}`);
       } else {
-        setWizardError({ summary: `Step: ${stepName} | Status: unknown`, details: err instanceof Error ? err.message : 'Unknown error' });
+        setWizardError({
+          step: stepName,
+          summary: `Step: ${stepName} | Status: unknown`,
+          details: err instanceof Error ? err.message : 'Unknown error',
+          attemptedUrl: stepEndpoint,
+          method: 'UNKNOWN',
+          status: 'unknown',
+          bodySnippet: err instanceof Error ? err.message : String(err),
+        });
         showError(`${stepName} failed (status unknown)`);
       }
     } finally {
@@ -405,6 +444,134 @@ export function ExamsPage() {
   const onCreateAndUpload = async (event: FormEvent) => {
     event.preventDefault();
     await runCreateAndUpload();
+  };
+
+  const onRetryFailedStep = async () => {
+    if (!wizardError) return;
+
+    if (wizardError.step === 'creating') {
+      await runCreateAndUpload();
+      return;
+    }
+
+    if (!createdExamId) {
+      showError('Cannot retry this step because exam id is missing.');
+      return;
+    }
+
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
+    const requestOptions = { signal: controller.signal };
+    const logStep = (entry: StepLog) => setStepLogs((prev) => [...prev, entry]);
+
+    try {
+      setIsRunning(true);
+      setWizardError(null);
+
+      if (wizardError.step === 'uploading') {
+        updateCurrentStep('uploading');
+        markChecklist('uploading_key', 'active');
+        const { token } = await api.getBlobUploadToken();
+        const uploaded = await Promise.all(
+          modalFiles.map((file) => uploadToBlob(file, `exams/${createdExamId}/key/${crypto.randomUUID()}-${file.name}`, token)),
+        );
+        const registerPayload = uploaded.map((file, index) => ({
+          original_filename: modalFiles[index].name,
+          blob_pathname: file.pathname,
+          content_type: file.contentType,
+          size_bytes: file.size,
+        }));
+        const uploadResult = await api.registerExamKeyFiles(createdExamId, registerPayload);
+        logStep({ step: 'uploading', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/register`), status: 200, responseSnippet: JSON.stringify(uploadResult).slice(0, 500) });
+        markChecklist('uploading_key', 'done');
+        showSuccess('Upload step retried successfully.');
+        return;
+      }
+
+      if (wizardError.step === 'building_pages') {
+        updateCurrentStep('building_pages');
+        markChecklist('building_key_pages', 'active');
+        const buildPages = await api.buildExamKeyPages(createdExamId, requestOptions);
+        logStep({ step: 'building_pages', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/build-pages`), status: 200, responseSnippet: JSON.stringify(buildPages).slice(0, 500) });
+        markChecklist('building_key_pages', 'done');
+        setParsePageCount(buildPages.length);
+        showSuccess('Build pages step retried successfully.');
+        return;
+      }
+
+      if (wizardError.step === 'parsing') {
+        updateCurrentStep('parsing');
+        markChecklist('reading_questions', 'active');
+        startParseProgress();
+        const started = await api.startExamKeyParse(createdExamId, requestOptions);
+        setParseRequestId(started.request_id);
+        setParsePageCount(started.page_count);
+        logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/start`), status: 200, responseSnippet: JSON.stringify(started).slice(0, 500) });
+
+        for (let index = 0; index < started.page_count; index += 1) {
+          const next = await api.parseExamKeyNext(createdExamId, started.request_id, requestOptions);
+          setParsePageIndex(next.pages_done);
+          setRunningTotals(next.totals);
+          const pct = Math.min(98, 50 + Math.round((next.pages_done / Math.max(1, next.page_count)) * 45));
+          setParseProgress(pct);
+          logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/next?request_id=${started.request_id}`), status: 200, responseSnippet: JSON.stringify(next).slice(0, 500) });
+        }
+
+        const status = await api.getExamKeyParseStatus(createdExamId, started.request_id, requestOptions);
+        setRunningTotals(status.totals);
+        const finished = await api.finishExamKeyParse(createdExamId, started.request_id, requestOptions);
+        logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/finish?request_id=${started.request_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
+
+        markChecklist('reading_questions', 'done');
+        markChecklist('detecting_marks', 'done');
+        markChecklist('drafting_rubric', 'done');
+        markChecklist('finalizing', 'done');
+        setParseProgress(100);
+        setParsedQuestionCount(extractParsedQuestionCount(finished.questions));
+        updateCurrentStep('done');
+        showSuccess('Parsing step retried successfully.');
+      }
+    } catch (err) {
+      const stepName = currentStepRef.current;
+      const stepEndpoint = endpointForStep(stepName, createdExamId);
+      if (isNetworkFetchError(err) || isAbortError(err)) {
+        setWizardError({
+          step: stepName,
+          summary: `Step: ${stepName} | Status: network-error`,
+          details: err instanceof Error ? err.stack || err.message : String(err),
+          attemptedUrl: stepEndpoint,
+          method: 'UNKNOWN',
+          status: 'network-error',
+          bodySnippet: err instanceof Error ? err.message : String(err),
+          isAbort: isAbortError(err),
+        });
+      } else if (err instanceof ApiError) {
+        setWizardError({
+          step: stepName,
+          summary: `Step: ${stepName} | ${err.method} ${err.url} | Status: ${err.status}`,
+          details: JSON.stringify({ method: err.method, url: err.url, status: err.status, bodySnippet: err.responseBodySnippet || '<empty>' }, null, 2),
+          attemptedUrl: err.url,
+          method: err.method,
+          status: err.status,
+          contentType: undefined,
+          bodySnippet: err.responseBodySnippet,
+        });
+      } else {
+        setWizardError({
+          step: stepName,
+          summary: `Step: ${stepName} | Status: unknown`,
+          details: err instanceof Error ? err.message : 'Unknown error',
+          attemptedUrl: stepEndpoint,
+          method: 'UNKNOWN',
+          status: 'unknown',
+          bodySnippet: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } finally {
+      clearIntervals();
+      setIsRunning(false);
+      requestControllerRef.current = null;
+    }
   };
 
   const onPingApi = async () => {
@@ -638,6 +805,11 @@ export function ExamsPage() {
             )}
             {failedPage && <p className="warning-text">Page {failedPage} failed — retry?</p>}
             {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
+            {wizardError && !isRunning && (
+              <button type="button" className="btn btn-secondary" onClick={onRetryFailedStep}>
+                Retry step
+              </button>
+            )}
 
             <details>
               <summary>Show details</summary>
