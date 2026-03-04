@@ -49,9 +49,17 @@ def test_get_exams_includes_cors_header_when_origin_present(client_app, path: st
     assert response.headers["access-control-allow-origin"] == "https://example.com"
 
 
-def test_non_api_options_passthrough() -> None:
+def test_non_api_options_returns_preflight_response() -> None:
     with TestClient(app) as client:
-        options_response = client.options("/health", headers={"Origin": "https://example.com"})
+        options_response = client.options(
+            "/health",
+            headers={
+                "Origin": "https://example.com",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "x-api-key,content-type",
+            },
+        )
 
-    assert options_response.status_code == 405
+    assert options_response.status_code == 204
+    assert options_response.content == b""
     assert options_response.headers["access-control-allow-origin"] == "https://example.com"

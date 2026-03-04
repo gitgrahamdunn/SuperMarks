@@ -58,7 +58,7 @@ class SafeCORSMiddleware:
         origin = _origin_header(scope.get("headers") or [])
         allow_origin = self._allow_origin(origin)
 
-        if method == "OPTIONS" and path.startswith("/api/"):
+        if method == "OPTIONS":
             headers = self._append_cors_headers([(b"content-length", b"0")], allow_origin)
             await send(
                 {
