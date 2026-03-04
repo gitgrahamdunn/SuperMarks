@@ -647,6 +647,7 @@ export function ExamsPage() {
                 <p>Frontend version: {diagnostics.appVersion}</p>
                 <p>Backend version: {backendVersion}</p>
                 <p>hasApiKey: {String(diagnostics.hasApiKey)}</p>
+                <p>Auth header attached: {String(diagnostics.authHeaderAttached)}</p>
                 <p>buildId: {diagnostics.buildId}</p>
                 <p>Computed create endpoint: {buildApiUrl('exams')}</p>
                 {stepLogs.length === 0 && <p>No step details yet.</p>}

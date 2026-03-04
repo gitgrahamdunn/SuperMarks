@@ -18,7 +18,7 @@ import type {
 } from '../types/api';
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
-const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
+const API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
 const APP_VERSION = import.meta.env.VITE_APP_VERSION?.trim() || import.meta.env.VITE_BUILD_ID?.trim() || `${import.meta.env.MODE} (${new Date(__APP_BUILD_TS__).toISOString()})`;
 const API_BASE_URL = configuredApiBaseUrl;
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -92,11 +92,44 @@ type ApiContractCheckResult =
 let openApiPathCache: Set<string> | null = null;
 let openApiFetchErrorMessage: string | null = null;
 
-function withApiKeyHeader(options: RequestInit = {}): RequestInit {
-  if (!BACKEND_API_KEY) return options;
-  const headers = new Headers(options.headers || {});
-  headers.set('X-API-Key', BACKEND_API_KEY);
-  return { ...options, headers };
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra || {}) };
+  if (API_KEY) h['X-API-Key'] = API_KEY;
+  return h;
+}
+
+function normalizeHeaders(headers?: HeadersInit): Record<string, string> {
+  if (!headers) return {};
+  if (headers instanceof Headers) {
+    return Object.fromEntries(headers.entries());
+  }
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(headers);
+  }
+  return { ...headers };
+}
+
+function buildRequestOptions(options: RequestInit = {}): RequestInit {
+  const headerRecord = normalizeHeaders(options.headers);
+  const isFormData = options.body instanceof FormData;
+
+  if (isFormData) {
+    delete headerRecord['Content-Type'];
+    delete headerRecord['content-type'];
+  }
+
+  const headers = isFormData
+    ? authHeaders(headerRecord)
+    : authHeaders({ 'Content-Type': 'application/json', ...headerRecord });
+
+  if (!options.body) {
+    delete headers['Content-Type'];
+  }
+
+  return {
+    ...options,
+    headers,
+  };
 }
 
 function getOpenApiSchemaUrl(): string {
@@ -174,7 +207,7 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = D
 
   const url = buildApiUrl(normalizedPath);
   const method = (options.method || 'GET').toUpperCase();
-  const requestOptions = withApiKeyHeader(options);
+  const requestOptions = buildRequestOptions(options);
   const { response, clear } = await fetchWithTimeout(url, requestOptions, timeoutMs);
 
   try {
@@ -197,10 +230,13 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = D
 
 function buildErrorDetailsFromResponse(url: string, method: string, status: number, responseText: string): ApiError {
   const responseBodySnippet = responseText.slice(0, 300);
-  let message = status === 401 ? 'Unauthorized (check API key config)' : `Request failed (${status})`;
+  let message = status === 401
+    ? `Unauthorized (check VITE_BACKEND_API_KEY / BACKEND_API_KEY match) at ${url}`
+    : `Request failed (${status})`;
+
   try {
     const body = JSON.parse(responseText) as { detail?: string };
-    if (body?.detail) {
+    if (body?.detail && status !== 401) {
       message = body.detail;
     }
   } catch {
@@ -249,7 +285,7 @@ async function getOpenApiPaths(): Promise<Set<string>> {
   });
 
   try {
-    const response = await fetch(openApiUrl, withApiKeyHeader());
+    const response = await fetch(openApiUrl, buildRequestOptions());
     const responseText = await response.text();
     const responseSnippet = stripSnippet(responseText);
     setOpenApiFetchDiagnostics({
@@ -333,7 +369,7 @@ export function getHealthPingUrl(): string {
 
 export async function pingApiHealth(): Promise<{ status: number; body: string }> {
   const url = getHealthPingUrl();
-  const { response, clear } = await fetchWithTimeout(url, withApiKeyHeader(), DEFAULT_TIMEOUT_MS);
+  const { response, clear } = await fetchWithTimeout(url, buildRequestOptions(), DEFAULT_TIMEOUT_MS);
   try {
     const body = await response.text();
     return { status: response.status, body: body.slice(0, 300) };
@@ -346,11 +382,12 @@ export function getApiConfigError(): string | null {
   return API_CONFIG_ERROR;
 }
 
-export function getClientDiagnostics(): { apiBaseUrl: string; maskedApiBaseHost: string; hasApiKey: boolean; buildId: string; appVersion: string } {
+export function getClientDiagnostics(): { apiBaseUrl: string; maskedApiBaseHost: string; hasApiKey: boolean; authHeaderAttached: boolean; buildId: string; appVersion: string } {
   return {
     apiBaseUrl: API_BASE_URL || '<missing>',
     maskedApiBaseHost: maskApiBaseUrl(API_BASE_URL || ''),
-    hasApiKey: Boolean(BACKEND_API_KEY),
+    hasApiKey: Boolean(API_KEY),
+    authHeaderAttached: Boolean(API_KEY),
     buildId: APP_VERSION,
     appVersion: APP_VERSION,
   };
@@ -365,7 +402,7 @@ export function getBackendVersionUrl(): string {
 
 export async function getBackendVersion(): Promise<{ status: number; version?: string; bodySnippet: string }> {
   const url = getBackendVersionUrl();
-  const { response, clear } = await fetchWithTimeout(url, withApiKeyHeader(), DEFAULT_TIMEOUT_MS);
+  const { response, clear } = await fetchWithTimeout(url, buildRequestOptions(), DEFAULT_TIMEOUT_MS);
   try {
     const bodyText = await response.text();
     const bodySnippet = bodyText.slice(0, 300);
@@ -473,7 +510,7 @@ export const api = {
     const path = `exams/${examId}/key/parse`;
     const url = buildApiUrl(path);
     const method = 'POST';
-    const requestOptions = withApiKeyHeader({ method, ...options });
+    const requestOptions = buildRequestOptions({ method, ...options });
     const { response, clear } = await fetchWithTimeout(url, requestOptions, KEY_PARSE_TIMEOUT_MS);
     try {
       const responseText = await response.text();
@@ -552,4 +589,4 @@ export const api = {
   },
 };
 
-export { API_BASE_URL, ApiError, buildApiUrl, checkBackendApiContract, getOpenApiPaths, joinUrl };
+export { API_BASE_URL, ApiError, authHeaders, buildApiUrl, checkBackendApiContract, getOpenApiPaths, joinUrl };
