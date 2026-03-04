@@ -41,4 +41,4 @@ def get_signed_url(payload: SignedUrlRequest) -> SignedUrlResponse:
         url = _run_async(create_signed_blob_url(payload.pathname))
         return SignedUrlResponse(url=url)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail="Failed to create signed URL") from exc
+        raise HTTPException(status_code=500, detail="Blob signed URL failed") from exc

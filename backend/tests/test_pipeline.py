@@ -142,5 +142,5 @@ def test_submission_files_list_includes_signed_url(tmp_path: Path) -> None:
         assert files_resp.status_code == 200
         payload = files_resp.json()
         assert len(payload) == 1
-        assert payload[0]["signed_url"] == "https://example.com/mock-signed-url"
+        assert payload[0]["signed_url"] == "https://example.com/mock"
         assert payload[0]["content_type"] == "image/png"

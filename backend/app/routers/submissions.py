@@ -12,6 +12,7 @@ from sqlmodel import Session, delete, select
 
 from app.db import get_session
 from app.blob_service import create_signed_blob_url
+from app.blob_store import BlobDownloadError, BlobSignedUrlError
 from app.models import (
     AnswerCrop,
     Exam,
@@ -149,7 +150,12 @@ def build_pages(submission_id: int, session: Session = Depends(get_session)) -> 
             converter = Pdf2ImageConverter()
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        source_path = _run_async(materialize_object_to_path(files[0].stored_path, out_dir / "source"))
+        try:
+            source_path = _run_async(materialize_object_to_path(files[0].stored_path, out_dir / "source"))
+        except BlobSignedUrlError as exc:
+            raise HTTPException(status_code=500, detail="Blob signed URL failed") from exc
+        except BlobDownloadError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         page_paths = converter.convert(source_path, out_dir)
         for idx, page_path in enumerate(page_paths, 1):
             w, h = normalize_image_to_png(page_path, page_path)
@@ -160,7 +166,12 @@ def build_pages(submission_id: int, session: Session = Depends(get_session)) -> 
     else:
         for idx, file in enumerate(files, 1):
             out_path = out_dir / f"page_{idx:04d}.png"
-            source_path = _run_async(materialize_object_to_path(file.stored_path, out_dir / "source"))
+            try:
+                source_path = _run_async(materialize_object_to_path(file.stored_path, out_dir / "source"))
+            except BlobSignedUrlError as exc:
+                raise HTTPException(status_code=500, detail="Blob signed URL failed") from exc
+            except BlobDownloadError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
             w, h = normalize_image_to_png(source_path, out_path)
             row = SubmissionPage(submission_id=submission_id, page_number=idx, image_path=str(out_path), width=w, height=h)
             session.add(row)

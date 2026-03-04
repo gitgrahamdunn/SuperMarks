@@ -159,7 +159,7 @@ def test_list_exam_key_files_includes_signed_url(tmp_path, monkeypatch) -> None:
         assert response.status_code == 200
         payload = response.json()
         assert len(payload) == 1
-        assert payload[0]["signed_url"] == "https://example.com/mock-signed-url"
+        assert payload[0]["signed_url"] == "https://example.com/mock"
         assert payload[0]["stored_path"].startswith(f"exams/{exam_id}/key/")
         assert payload[0]["content_type"] == "image/png"
 

@@ -158,7 +158,7 @@ async def materialize_object_to_path(key: str, cache_dir: Path) -> Path:
             use_blob = False
 
     if use_blob:
-        data = await download_blob_bytes(key)
+        data, _content_type = await download_blob_bytes(key)
     else:
         if not hasattr(provider, "get_bytes"):
             raise RuntimeError("Configured storage provider does not support object reads")
