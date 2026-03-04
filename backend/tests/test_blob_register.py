@@ -64,7 +64,7 @@ def test_blob_mock_endpoints_and_register_rows(tmp_path, monkeypatch) -> None:
 
         signed_url = client.post("/api/blob/signed-url", json={"pathname": "exams/1/key/file-1.pdf"})
         assert signed_url.status_code == 200
-        assert signed_url.json()["url"] == "https://example.com/mock-signed-url"
+        assert signed_url.json()["url"] == "https://example.com/mock"
 
     with Session(db.engine) as session:
         key_rows = session.exec(select(ExamKeyFile)).all()
