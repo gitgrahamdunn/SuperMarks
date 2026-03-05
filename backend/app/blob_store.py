@@ -3,23 +3,15 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote, urlparse
 
 import httpx
+
+from app.blob_service import BlobDownloadError, BlobSignedUrlError, download_blob_bytes, get_signed_read_url
 
 
 class BlobUploadError(RuntimeError):
     """Raised when blob upload fails."""
-
-
-class BlobSignedUrlError(RuntimeError):
-    """Raised when a signed read URL cannot be created."""
-
-
-class BlobDownloadError(RuntimeError):
-    """Raised when blob bytes cannot be downloaded."""
 
 
 def _blob_access_value() -> str:
@@ -35,19 +27,6 @@ def _require_blob_token() -> str:
 
 def _is_mock_mode() -> bool:
     return os.getenv("BLOB_MOCK", "").strip() == "1"
-
-
-def _normalize_pathname(pathname: str) -> str:
-    value = (pathname or "").strip()
-    if not value:
-        raise ValueError("pathname must be non-empty")
-    if value.startswith("http://") or value.startswith("https://"):
-        parsed = urlparse(value)
-        value = parsed.path
-    normalized = value.lstrip("/")
-    if not normalized:
-        raise ValueError("pathname must include a path")
-    return normalized
 
 
 def _mock_upload(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
@@ -147,52 +126,6 @@ def _upload_with_http(pathname: str, data: bytes, content_type: str) -> dict[str
         "contentType": str(payload.get("contentType") or content_type),
         "downloadUrl": str(payload.get("downloadUrl") or blob_url),
     }
-
-
-async def get_signed_read_url(pathname: str, expires_seconds: int = 600) -> str:
-    normalized_pathname = _normalize_pathname(pathname)
-    if _is_mock_mode():
-        return "https://example.com/mock"
-
-    try:
-        token = _require_blob_token()
-    except Exception as exc:
-        raise BlobSignedUrlError("Blob signed URL failed") from exc
-    expires_at = int((datetime.now(timezone.utc) + timedelta(seconds=expires_seconds)).timestamp())
-    endpoint = f"https://blob.vercel-storage.com/v1/sign/{quote(normalized_pathname, safe='/-_.~')}"
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.put(
-                endpoint,
-                json={"expiresAt": expires_at, "allowWrite": False},
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            )
-    except Exception as exc:
-        raise BlobSignedUrlError("Blob signed URL failed") from exc
-
-    if response.status_code >= 400:
-        raise BlobSignedUrlError("Blob signed URL failed")
-
-    payload = response.json()
-    signed_url = str(payload.get("url") or "").strip() if isinstance(payload, dict) else ""
-    if not signed_url:
-        raise BlobSignedUrlError("Blob signed URL failed")
-    return signed_url
-
-
-async def download_blob_bytes(pathname: str) -> tuple[bytes, str]:
-    normalized_pathname = _normalize_pathname(pathname)
-    if _is_mock_mode():
-        return (b"%PDF-1.4\n%mock blob content\n", "application/pdf")
-
-    signed_url = await get_signed_read_url(normalized_pathname)
-    async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.get(signed_url)
-
-    if response.status_code >= 400:
-        raise BlobDownloadError(f"Blob download failed ({response.status_code}) for pathname {normalized_pathname}")
-
-    return response.content, response.headers.get("content-type", "")
 
 
 def upload_bytes(pathname: str, data: bytes, content_type: str) -> dict[str, str]:

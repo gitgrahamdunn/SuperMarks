@@ -37,6 +37,25 @@ def test_blob_store_mock_helpers_accept_blob_url(monkeypatch) -> None:
     assert content_type == "application/pdf"
 
 
+
+def test_materialize_object_to_path_normalizes_blob_url(tmp_path: Path, monkeypatch) -> None:
+    from app.storage_provider import materialize_object_to_path
+
+    captured: list[str] = []
+
+    async def _fake_download(pathname: str) -> tuple[bytes, str]:
+        captured.append(pathname)
+        return b"blob-bytes", "image/png"
+
+    monkeypatch.setattr("app.storage_provider.download_blob_bytes", _fake_download)
+    monkeypatch.setenv("BLOB_MOCK", "")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "token")
+
+    asyncio.run(materialize_object_to_path("exams/12/key/sample.png", tmp_path / "cache"))
+    asyncio.run(materialize_object_to_path("https://blob.vercel-storage.com/exams/34/key/from-url.png", tmp_path / "cache"))
+
+    assert captured == ["exams/12/key/sample.png", "exams/34/key/from-url.png"]
+
 def _png_bytes() -> bytes:
     image = Image.new("RGB", (16, 16), "white")
     buf = BytesIO()
