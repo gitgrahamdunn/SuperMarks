@@ -4,6 +4,9 @@ import asyncio
 from io import BytesIO
 from pathlib import Path
 
+import httpx
+import pytest
+
 from fastapi.testclient import TestClient
 from PIL import Image
 from sqlmodel import SQLModel, Session, create_engine
@@ -104,3 +107,63 @@ def test_build_pages_download_uses_stored_pathname_not_blob_url(tmp_path: Path, 
         assert pages.status_code == 200
 
     assert captured["pathname"].endswith("correct-path.png")
+
+
+def test_get_signed_read_url_non_200_includes_context(monkeypatch) -> None:
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def put(self, *args, **kwargs):
+            return httpx.Response(status_code=403, content=b'{"error":"denied"}')
+
+    monkeypatch.setenv("BLOB_MOCK", "")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "token")
+    monkeypatch.setattr("app.blob_service.httpx.AsyncClient", _Client)
+
+    with pytest.raises(Exception) as excinfo:
+        asyncio.run(get_signed_read_url("exams/1/key/file.pdf"))
+
+    message = str(excinfo.value)
+    assert "pathname=exams/1/key/file.pdf" in message
+    assert "url=https://blob.vercel-storage.com/v1/sign/exams/1/key/file.pdf" in message
+    assert "status=403" in message
+    assert "denied" in message
+
+
+def test_download_blob_bytes_non_200_includes_context(monkeypatch) -> None:
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return httpx.Response(status_code=404, content=b"missing")
+
+    monkeypatch.setenv("BLOB_MOCK", "")
+    async def _fake_signed(*_args, **_kwargs):
+        return "https://blob.vercel-storage.com/exams/1/key/file.pdf?token=secret"
+
+    monkeypatch.setattr("app.blob_service.get_signed_read_url", _fake_signed)
+    monkeypatch.setattr("app.blob_service.httpx.AsyncClient", _Client)
+
+    with pytest.raises(Exception) as excinfo:
+        asyncio.run(download_blob_bytes("exams/1/key/file.pdf"))
+
+    message = str(excinfo.value)
+    assert "pathname=exams/1/key/file.pdf" in message
+    assert "url=https://blob.vercel-storage.com/exams/1/key/file.pdf?token=secret" not in message
+    assert "url=https://blob.vercel-storage.com/exams/1/key/file.pdf" in message
+    assert "status=404" in message
+    assert "missing" in message

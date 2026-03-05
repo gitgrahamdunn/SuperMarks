@@ -498,6 +498,39 @@ def test_parse_answer_key_returns_400_when_pdf_render_fails(tmp_path, monkeypatc
         assert payload["request_id"]
 
 
+
+def test_build_key_pages_returns_502_with_request_id_and_stage(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated render blowup")
+
+    monkeypatch.setattr("app.routers.exams._render_pdf_pages", _boom)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Build Error Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.pdf", _tiny_pdf_bytes(), "application/pdf"))],
+        )
+        assert upload.status_code == 200
+
+        response = client.post(f"/api/exams/{exam_id}/key/build-pages")
+        assert response.status_code == 502
+        payload = response.json()
+        assert payload["detail"] == "Build key pages failed"
+        assert payload["request_id"]
+        assert payload["stage"] == "render_pdf"
+        assert "simulated render blowup" in payload["message"]
+
+
 def test_bulk_upload_preview_and_finalize_creates_submissions(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")

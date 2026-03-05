@@ -44,6 +44,14 @@ router = APIRouter(prefix="/exams", tags=["exams"])
 public_router = APIRouter(prefix="/exams", tags=["exams-public"])
 logger = logging.getLogger(__name__)
 
+
+class KeyPageBuildError(RuntimeError):
+    """Raised when building key pages fails at a known stage."""
+
+    def __init__(self, stage: str, cause: Exception):
+        self.stage = stage
+        super().__init__(str(cause))
+
 _ALLOWED_TYPES = {
     "application/pdf": "pdf",
     "image/png": "image",
@@ -134,72 +142,77 @@ def _render_pdf_pages(input_path: Path, output_dir: Path, start_page_number: int
 
 
 def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
-    existing = _load_key_page_images(exam_id, session)
-    if existing:
-        return existing
+    stage = "load_key_files"
+    try:
+        existing = _load_key_page_images(exam_id, session)
+        if existing:
+            return existing
 
-    key_files = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id).order_by(ExamKeyFile.id)).all()
-    if not key_files:
-        raise HTTPException(status_code=400, detail=f"No key files uploaded. Call /api/exams/{exam_id}/key/upload first.")
+        key_files = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id).order_by(ExamKeyFile.id)).all()
+        if not key_files:
+            raise HTTPException(status_code=400, detail=f"No key files uploaded. Call /api/exams/{exam_id}/key/upload first.")
 
-    output_dir = reset_dir(_exam_key_pages_dir(exam_id))
-    session.exec(delete(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id))
+        output_dir = reset_dir(_exam_key_pages_dir(exam_id))
+        session.exec(delete(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id))
 
-    created_paths: list[Path] = []
-    page_num = 1
+        created_paths: list[Path] = []
+        page_num = 1
 
-    for key_file in key_files:
-        try:
+        for key_file in key_files:
+            stage = "materialize_blob"
             source_path = _run_async(materialize_object_to_path(key_file.stored_path, settings.data_path / "cache" / "keys" / str(exam_id)))
-        except BlobSignedUrlError as exc:
-            raise HTTPException(status_code=500, detail="Blob signed URL failed") from exc
-        except BlobDownloadError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        if not source_path.exists():
-            continue
+            if not source_path.exists():
+                continue
 
-        extension = source_path.suffix.lower()
-        if extension in {".png", ".jpg", ".jpeg"}:
-            if page_num > _MAX_RENDERED_KEY_PAGES:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Too many key pages; maximum supported is {_MAX_RENDERED_KEY_PAGES}.",
-                )
-            out_path = output_dir / f"page_{page_num:04d}.png"
-            width, height = _normalize_to_png(source_path, out_path)
-            session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(out_path), width=width, height=height))
-            created_paths.append(out_path)
-            page_num += 1
-            continue
-
-        if extension == ".pdf":
-            remaining_pages = _MAX_RENDERED_KEY_PAGES - (page_num - 1)
-            if remaining_pages <= 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Too many key pages; maximum supported is {_MAX_RENDERED_KEY_PAGES}.",
-                )
-            rendered_paths = _render_pdf_pages(
-                source_path,
-                output_dir,
-                start_page_number=page_num,
-                max_pages=remaining_pages,
-            )
-            for rendered in rendered_paths:
-                width, height = _normalize_to_png(rendered, rendered)
-                session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(rendered), width=width, height=height))
-                created_paths.append(rendered)
+            extension = source_path.suffix.lower()
+            if extension in {".png", ".jpg", ".jpeg"}:
+                if page_num > _MAX_RENDERED_KEY_PAGES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Too many key pages; maximum supported is {_MAX_RENDERED_KEY_PAGES}.",
+                    )
+                out_path = output_dir / f"page_{page_num:04d}.png"
+                stage = "write_pages"
+                width, height = _normalize_to_png(source_path, out_path)
+                session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(out_path), width=width, height=height))
+                created_paths.append(out_path)
                 page_num += 1
+                continue
 
-    session.commit()
+            if extension == ".pdf":
+                remaining_pages = _MAX_RENDERED_KEY_PAGES - (page_num - 1)
+                if remaining_pages <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Too many key pages; maximum supported is {_MAX_RENDERED_KEY_PAGES}.",
+                    )
+                stage = "render_pdf"
+                rendered_paths = _render_pdf_pages(
+                    source_path,
+                    output_dir,
+                    start_page_number=page_num,
+                    max_pages=remaining_pages,
+                )
+                for rendered in rendered_paths:
+                    stage = "write_pages"
+                    width, height = _normalize_to_png(rendered, rendered)
+                    session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(rendered), width=width, height=height))
+                    created_paths.append(rendered)
+                    page_num += 1
 
-    if not created_paths:
-        raise HTTPException(
-            status_code=400,
-            detail="Key files exist, but key pages could not be produced. Upload png/jpg images or ensure PDF rendering support is available.",
-        )
+        session.commit()
 
-    return created_paths
+        if not created_paths:
+            raise HTTPException(
+                status_code=400,
+                detail="Key files exist, but key pages could not be produced. Upload png/jpg images or ensure PDF rendering support is available.",
+            )
+
+        return created_paths
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise KeyPageBuildError(stage=stage, cause=exc) from exc
 
 
 def _validate_parse_payload(payload: dict[str, Any]) -> tuple[float, list[dict[str, Any]], list[str]]:
@@ -787,13 +800,28 @@ def build_exam_key_pages(exam_id: int, session: Session = Depends(get_session)) 
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    build_key_pages_for_exam(exam_id, session)
-    exam.status = ExamStatus.KEY_PAGES_READY
-    session.add(exam)
-    session.commit()
+    stage = "build_key_pages"
+    try:
+        build_key_pages_for_exam(exam_id, session)
+        exam.status = ExamStatus.KEY_PAGES_READY
+        session.add(exam)
+        session.commit()
 
-    rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
-    return [ExamKeyPageRead(id=r.id, exam_id=r.exam_id, page_number=r.page_number, image_path=relative_to_data(Path(r.image_path)), width=r.width, height=r.height) for r in rows]
+        rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
+        return [ExamKeyPageRead(id=r.id, exam_id=r.exam_id, page_number=r.page_number, image_path=relative_to_data(Path(r.image_path)), width=r.width, height=r.height) for r in rows]
+    except Exception as exc:
+        request_id = str(uuid.uuid4())
+        stage = getattr(exc, "stage", stage)
+        logger.exception("build_exam_key_pages failed request_id=%s exam_id=%s stage=%s", request_id, exam_id, stage)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "detail": "Build key pages failed",
+                "request_id": request_id,
+                "stage": stage,
+                "message": str(exc)[:500],
+            },
+        )
 
 
 @router.get("/{exam_id}/key/pages", response_model=list[ExamKeyPageRead])
