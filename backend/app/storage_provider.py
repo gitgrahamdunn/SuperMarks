@@ -9,7 +9,7 @@ from typing import Protocol
 from urllib.parse import quote
 
 from app.settings import settings
-from app.blob_service import blob_mock_enabled, download_blob_bytes, get_blob_token
+from app.blob_service import blob_mock_enabled, download_blob_bytes, get_blob_token, normalize_blob_pathname
 from app.storage import ensure_dir
 
 
@@ -140,13 +140,14 @@ async def get_storage_signed_url(key: str, expires_seconds: int = 3600) -> str:
 
 async def materialize_object_to_path(key: str, cache_dir: Path) -> Path:
     provider = get_storage_provider()
-    suffix = Path(key).suffix
-    target = ensure_dir(cache_dir) / f"{abs(hash(key))}{suffix}"
+    normalized_key = normalize_blob_pathname(key) if key.startswith(("http://", "https://")) else key
+    suffix = Path(normalized_key).suffix
+    target = ensure_dir(cache_dir) / f"{abs(hash(normalized_key))}{suffix}"
     if target.exists():
         return target
 
     if isinstance(provider, LocalDiskProvider):
-        source = provider.resolve_local_path(key)
+        source = provider.resolve_local_path(normalized_key)
         if source.exists():
             return source
 
@@ -158,11 +159,11 @@ async def materialize_object_to_path(key: str, cache_dir: Path) -> Path:
             use_blob = False
 
     if use_blob:
-        data, _content_type = await download_blob_bytes(key)
+        data, _content_type = await download_blob_bytes(normalized_key)
     else:
         if not hasattr(provider, "get_bytes"):
             raise RuntimeError("Configured storage provider does not support object reads")
-        data = await provider.get_bytes(key)  # type: ignore[attr-defined]
+        data = await provider.get_bytes(normalized_key)  # type: ignore[attr-defined]
 
     target.write_bytes(data)
     if not target.suffix:
