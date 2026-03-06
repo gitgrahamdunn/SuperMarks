@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
 
 from app.settings import settings
-from app.blob_service import blob_mock_enabled, download_blob_bytes, get_blob_token, normalize_blob_pathname
+from app.blob_service import download_blob_bytes, normalize_blob_path
 from app.storage import ensure_dir
+
+
+logger = logging.getLogger(__name__)
 
 
 class StorageProvider(Protocol):
@@ -140,7 +144,8 @@ async def get_storage_signed_url(key: str, expires_seconds: int = 3600) -> str:
 
 async def materialize_object_to_path(key: str, cache_dir: Path) -> Path:
     provider = get_storage_provider()
-    normalized_key = normalize_blob_pathname(key)
+    normalized_key = normalize_blob_path(key)
+    logger.info("materialize_object_to_path key=%s", normalized_key)
     suffix = Path(normalized_key).suffix
     target = ensure_dir(cache_dir) / f"{abs(hash(normalized_key))}{suffix}"
     if target.exists():
@@ -151,19 +156,7 @@ async def materialize_object_to_path(key: str, cache_dir: Path) -> Path:
         if source.exists():
             return source
 
-    use_blob = blob_mock_enabled()
-    if not use_blob:
-        try:
-            use_blob = bool(get_blob_token().strip())
-        except RuntimeError:
-            use_blob = False
-
-    if use_blob:
-        data, _content_type = await download_blob_bytes(normalized_key)
-    else:
-        if not hasattr(provider, "get_bytes"):
-            raise RuntimeError("Configured storage provider does not support object reads")
-        data = await provider.get_bytes(normalized_key)  # type: ignore[attr-defined]
+    data, _content_type = await download_blob_bytes(normalized_key)
 
     target.write_bytes(data)
     if not target.suffix:

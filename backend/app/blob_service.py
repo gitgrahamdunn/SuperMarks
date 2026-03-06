@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import logging
+import os
 from urllib.parse import urlsplit
 
 from vercel.blob import AsyncBlobClient
@@ -26,9 +26,6 @@ class BlobSignedUrlError(RuntimeError):
 logger = logging.getLogger(__name__)
 
 
-_MOCK_BYTES = b"%PDF-1.4\n%mock blob content\n"
-
-
 def blob_mock_enabled() -> bool:
     return os.getenv("BLOB_MOCK", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -42,10 +39,13 @@ def get_blob_token() -> str:
     return token
 
 
-def normalize_blob_pathname(pathname: str) -> str:
-    value = (pathname or "").strip()
+def normalize_blob_path(value: str) -> str:
+    value = (value or "").strip()
     if not value:
         raise ValueError("pathname must be non-empty")
+
+    if "blob.vercel-storage.com/v1/sign" in value:
+        raise RuntimeError("Old blob sign path should never be used")
 
     if value.startswith("http://") or value.startswith("https://"):
         parsed = urlsplit(value)
@@ -58,9 +58,8 @@ def normalize_blob_pathname(pathname: str) -> str:
 
 
 async def download_blob_bytes(pathname: str) -> tuple[bytes, str | None]:
-    normalized_pathname = normalize_blob_pathname(pathname)
-    if blob_mock_enabled():
-        return (_MOCK_BYTES, "application/pdf")
+    normalized_pathname = normalize_blob_path(pathname)
+    logger.info("blob_private_read pathname=%s", normalized_pathname)
 
     client = AsyncBlobClient()
     try:
@@ -98,7 +97,7 @@ async def download_blob_bytes(pathname: str) -> tuple[bytes, str | None]:
 
 async def create_signed_blob_url(pathname: str, expires_seconds: int = 600) -> str:
     del expires_seconds
-    normalized_pathname = normalize_blob_pathname(pathname)
+    normalized_pathname = normalize_blob_path(pathname)
     if blob_mock_enabled():
         return "https://example.com/mock"
 
@@ -122,3 +121,6 @@ async def create_signed_blob_url(pathname: str, expires_seconds: int = 600) -> s
 
 async def get_signed_read_url(pathname: str, expires_seconds: int = 600) -> str:
     return await create_signed_blob_url(pathname, expires_seconds=expires_seconds)
+
+
+normalize_blob_pathname = normalize_blob_path
