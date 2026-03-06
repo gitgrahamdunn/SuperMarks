@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
-from urllib.parse import quote, urlsplit, urlunsplit
+import logging
+from urllib.parse import urlsplit
 
-import httpx
+from vercel.blob import AsyncBlobClient
 
 
 class BlobConfigError(RuntimeError):
@@ -15,12 +15,15 @@ class BlobConfigError(RuntimeError):
         super().__init__("Blob not configured")
 
 
-class BlobSignedUrlError(RuntimeError):
-    """Raised when a signed read URL cannot be created."""
-
-
 class BlobDownloadError(RuntimeError):
     """Raised when blob bytes cannot be downloaded."""
+
+
+class BlobSignedUrlError(RuntimeError):
+    """Raised when blob URL for frontend access cannot be created."""
+
+
+logger = logging.getLogger(__name__)
 
 
 _MOCK_BYTES = b"%PDF-1.4\n%mock blob content\n"
@@ -54,77 +57,68 @@ def normalize_blob_pathname(pathname: str) -> str:
     return normalized
 
 
-def _safe_url(url: str) -> str:
-    parsed = urlsplit(url)
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
-
-
-def _snippet(body: bytes, limit: int = 300) -> str:
-    return body.decode("utf-8", errors="replace")[:limit]
-
-
-async def get_signed_read_url(pathname: str, expires_seconds: int = 600) -> str:
-    normalized_pathname = normalize_blob_pathname(pathname)
-    if blob_mock_enabled():
-        return "https://example.com/mock"
-
-    token = get_blob_token()
-
-    expires_at = int((datetime.now(timezone.utc) + timedelta(seconds=expires_seconds)).timestamp())
-    endpoint = f"https://blob.vercel-storage.com/v1/sign/{quote(normalized_pathname, safe='/-_.~')}"
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.put(
-                endpoint,
-                json={"expiresAt": expires_at, "allowWrite": False},
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            )
-    except Exception as exc:
-        raise BlobSignedUrlError(
-            f"Blob signed URL request failed pathname={normalized_pathname} url={_safe_url(endpoint)} error={exc}"
-        ) from exc
-
-    if response.status_code != 200:
-        raise BlobSignedUrlError(
-            "Blob signed URL failed "
-            f"pathname={normalized_pathname} url={_safe_url(endpoint)} status={response.status_code} "
-            f"body={_snippet(response.content)}"
-        )
-
-    payload = response.json() if response.content else {}
-    signed_url = str(payload.get("url") or "").strip() if isinstance(payload, dict) else ""
-    if not signed_url:
-        raise BlobSignedUrlError(
-            f"Blob signed URL failed pathname={normalized_pathname} url={_safe_url(endpoint)} status=200 body=missing url"
-        )
-    return signed_url
-
-
-async def download_blob_bytes(pathname: str) -> tuple[bytes, str]:
+async def download_blob_bytes(pathname: str) -> tuple[bytes, str | None]:
     normalized_pathname = normalize_blob_pathname(pathname)
     if blob_mock_enabled():
         return (_MOCK_BYTES, "application/pdf")
 
-    signed = await get_signed_read_url(normalized_pathname)
-    safe_signed = _safe_url(signed)
+    client = AsyncBlobClient()
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.get(signed)
+        result = await client.get(normalized_pathname, access="private")
     except Exception as exc:
+        logger.exception("Blob SDK get failed pathname=%s", normalized_pathname)
         raise BlobDownloadError(
-            f"Blob download request failed pathname={normalized_pathname} url={safe_signed} error={exc}"
+            f"Blob SDK get failed pathname={normalized_pathname} error={exc}"
         ) from exc
 
-    if response.status_code != 200:
-        raise BlobDownloadError(
-            "Blob download failed "
-            f"pathname={normalized_pathname} url={safe_signed} status={response.status_code} "
-            f"body={_snippet(response.content)}"
-        )
+    if result is None or result.status_code != 200 or result.stream is None:
+        try:
+            raise RuntimeError("blob result missing/invalid")
+        except RuntimeError as exc:
+            logger.exception("Blob not found or unreadable pathname=%s", normalized_pathname)
+            raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}") from exc
 
-    return response.content, response.headers.get("content-type", "")
+    chunks: list[bytes] = []
+    try:
+        async for chunk in result.stream:
+            chunks.append(chunk)
+    except Exception as exc:
+        logger.exception("Blob stream read failed pathname=%s", normalized_pathname)
+        raise BlobDownloadError(
+            f"Blob stream read failed pathname={normalized_pathname} error={exc}"
+        ) from exc
+
+    content_type = None
+    try:
+        content_type = result.blob.content_type
+    except Exception:
+        content_type = None
+    return b"".join(chunks), content_type
 
 
 async def create_signed_blob_url(pathname: str, expires_seconds: int = 600) -> str:
-    return await get_signed_read_url(pathname, expires_seconds=expires_seconds)
+    del expires_seconds
+    normalized_pathname = normalize_blob_pathname(pathname)
+    if blob_mock_enabled():
+        return "https://example.com/mock"
+
+    try:
+        result = await AsyncBlobClient().get(normalized_pathname, access="private")
+    except Exception as exc:
+        logger.exception("Blob signed URL lookup failed pathname=%s", normalized_pathname)
+        raise BlobSignedUrlError(f"Blob signed URL lookup failed pathname={normalized_pathname} error={exc}") from exc
+
+    if result is None or result.status_code != 200:
+        raise BlobSignedUrlError(f"Blob not found or unreadable: {normalized_pathname}")
+
+    candidate = str(getattr(result, "url", "") or "").strip()
+    if candidate:
+        return candidate
+    candidate = str(getattr(result, "download_url", "") or "").strip()
+    if candidate:
+        return candidate
+    raise BlobSignedUrlError(f"Blob URL unavailable for pathname={normalized_pathname}")
+
+
+async def get_signed_read_url(pathname: str, expires_seconds: int = 600) -> str:
+    return await create_signed_blob_url(pathname, expires_seconds=expires_seconds)

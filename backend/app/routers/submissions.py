@@ -11,8 +11,8 @@ from fastapi.responses import FileResponse
 from sqlmodel import Session, delete, select
 
 from app.db import get_session
-from app.blob_service import create_signed_blob_url
-from app.blob_store import BlobDownloadError, BlobSignedUrlError
+from app.blob_service import create_signed_blob_url, normalize_blob_pathname
+from app.blob_store import BlobDownloadError
 from app.models import (
     AnswerCrop,
     Exam,
@@ -119,7 +119,7 @@ def register_submission_files(submission_id: int, payload: BlobRegisterRequest, 
             submission_id=submission_id,
             file_kind=kind,
             original_filename=file.original_filename,
-            stored_path=file.blob_pathname,
+            stored_path=normalize_blob_pathname(file.blob_pathname),
             content_type=file.content_type,
             size_bytes=file.size_bytes,
         )
@@ -152,8 +152,6 @@ def build_pages(submission_id: int, session: Session = Depends(get_session)) -> 
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
             source_path = _run_async(materialize_object_to_path(files[0].stored_path, out_dir / "source"))
-        except BlobSignedUrlError as exc:
-            raise HTTPException(status_code=500, detail="Blob signed URL failed") from exc
         except BlobDownloadError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         page_paths = converter.convert(source_path, out_dir)
@@ -168,8 +166,6 @@ def build_pages(submission_id: int, session: Session = Depends(get_session)) -> 
             out_path = out_dir / f"page_{idx:04d}.png"
             try:
                 source_path = _run_async(materialize_object_to_path(file.stored_path, out_dir / "source"))
-            except BlobSignedUrlError as exc:
-                raise HTTPException(status_code=500, detail="Blob signed URL failed") from exc
             except BlobDownloadError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             w, h = normalize_image_to_png(source_path, out_path)

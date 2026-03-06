@@ -4,15 +4,13 @@ import asyncio
 from io import BytesIO
 from pathlib import Path
 
-import httpx
-import pytest
-
 from fastapi.testclient import TestClient
 from PIL import Image
 from sqlmodel import SQLModel, Session, create_engine
+import pytest
 
 from app import db
-from app.blob_store import download_blob_bytes, get_signed_read_url
+from app.blob_service import BlobDownloadError, download_blob_bytes, normalize_blob_pathname
 from app.main import app
 from app.models import SubmissionFile
 from app.settings import settings
@@ -20,25 +18,52 @@ from app.settings import settings
 
 def test_blob_store_mock_helpers(monkeypatch) -> None:
     monkeypatch.setenv("BLOB_MOCK", "1")
-    signed = asyncio.run(get_signed_read_url("exams/1/key/file.pdf"))
     data, content_type = asyncio.run(download_blob_bytes("exams/1/key/file.pdf"))
 
-    assert signed == "https://example.com/mock"
     assert data.startswith(b"%PDF-1.4")
     assert content_type == "application/pdf"
 
 
-def test_blob_store_mock_helpers_accept_blob_url(monkeypatch) -> None:
-    monkeypatch.setenv("BLOB_MOCK", "1")
-    blob_url = "https://blob.vercel-storage.com/exams/99/key/file.pdf"
+def test_download_blob_bytes_streams_from_async_blob_client(monkeypatch) -> None:
+    monkeypatch.setenv("BLOB_MOCK", "")
 
-    signed = asyncio.run(get_signed_read_url(blob_url))
-    data, content_type = asyncio.run(download_blob_bytes(blob_url))
+    class _FakeStream:
+        def __aiter__(self):
+            self._parts = [b"hello", b"-", b"world"]
+            return self
 
-    assert signed == "https://example.com/mock"
-    assert data.startswith(b"%PDF-1.4")
-    assert content_type == "application/pdf"
+        async def __anext__(self):
+            if not self._parts:
+                raise StopAsyncIteration
+            return self._parts.pop(0)
 
+    class _FakeBlob:
+        content_type = "text/plain"
+
+    class _FakeResult:
+        status_code = 200
+        stream = _FakeStream()
+        blob = _FakeBlob()
+
+    class _FakeClient:
+        async def get(self, pathname: str, access: str):
+            assert pathname == "exams/1/key/file.txt"
+            assert access == "private"
+            return _FakeResult()
+
+    monkeypatch.setattr("app.blob_service.AsyncBlobClient", _FakeClient)
+
+    data, content_type = asyncio.run(download_blob_bytes("exams/1/key/file.txt"))
+    assert data == b"hello-world"
+    assert content_type == "text/plain"
+
+
+def test_normalize_blob_pathname_for_path_and_full_url() -> None:
+    assert normalize_blob_pathname("exams/12/key/sample.png") == "exams/12/key/sample.png"
+    assert (
+        normalize_blob_pathname("https://blob.vercel-storage.com/exams/34/key/from-url.png?foo=1")
+        == "exams/34/key/from-url.png"
+    )
 
 
 def test_materialize_object_to_path_normalizes_blob_url(tmp_path: Path, monkeypatch) -> None:
@@ -46,7 +71,7 @@ def test_materialize_object_to_path_normalizes_blob_url(tmp_path: Path, monkeypa
 
     captured: list[str] = []
 
-    async def _fake_download(pathname: str) -> tuple[bytes, str]:
+    async def _fake_download(pathname: str) -> tuple[bytes, str | None]:
         captured.append(pathname)
         return b"blob-bytes", "image/png"
 
@@ -58,6 +83,7 @@ def test_materialize_object_to_path_normalizes_blob_url(tmp_path: Path, monkeypa
     asyncio.run(materialize_object_to_path("https://blob.vercel-storage.com/exams/34/key/from-url.png", tmp_path / "cache"))
 
     assert captured == ["exams/12/key/sample.png", "exams/34/key/from-url.png"]
+
 
 def _png_bytes() -> bytes:
     image = Image.new("RGB", (16, 16), "white")
@@ -75,7 +101,7 @@ def test_build_pages_download_uses_stored_pathname_not_blob_url(tmp_path: Path, 
 
     captured: dict[str, str] = {}
 
-    async def _fake_download(pathname: str) -> tuple[bytes, str]:
+    async def _fake_download(pathname: str) -> tuple[bytes, str | None]:
         captured["pathname"] = pathname
         return _png_bytes(), "image/png"
 
@@ -109,61 +135,14 @@ def test_build_pages_download_uses_stored_pathname_not_blob_url(tmp_path: Path, 
     assert captured["pathname"].endswith("correct-path.png")
 
 
-def test_get_signed_read_url_non_200_includes_context(monkeypatch) -> None:
-    class _Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def put(self, *args, **kwargs):
-            return httpx.Response(status_code=403, content=b'{"error":"denied"}')
-
+def test_download_blob_bytes_raises_on_missing(monkeypatch) -> None:
     monkeypatch.setenv("BLOB_MOCK", "")
-    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "token")
-    monkeypatch.setattr("app.blob_service.httpx.AsyncClient", _Client)
 
-    with pytest.raises(Exception) as excinfo:
-        asyncio.run(get_signed_read_url("exams/1/key/file.pdf"))
+    class _FakeClient:
+        async def get(self, pathname: str, access: str):
+            return None
 
-    message = str(excinfo.value)
-    assert "pathname=exams/1/key/file.pdf" in message
-    assert "url=https://blob.vercel-storage.com/v1/sign/exams/1/key/file.pdf" in message
-    assert "status=403" in message
-    assert "denied" in message
+    monkeypatch.setattr("app.blob_service.AsyncBlobClient", _FakeClient)
 
-
-def test_download_blob_bytes_non_200_includes_context(monkeypatch) -> None:
-    class _Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, *args, **kwargs):
-            return httpx.Response(status_code=404, content=b"missing")
-
-    monkeypatch.setenv("BLOB_MOCK", "")
-    async def _fake_signed(*_args, **_kwargs):
-        return "https://blob.vercel-storage.com/exams/1/key/file.pdf?token=secret"
-
-    monkeypatch.setattr("app.blob_service.get_signed_read_url", _fake_signed)
-    monkeypatch.setattr("app.blob_service.httpx.AsyncClient", _Client)
-
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(BlobDownloadError):
         asyncio.run(download_blob_bytes("exams/1/key/file.pdf"))
-
-    message = str(excinfo.value)
-    assert "pathname=exams/1/key/file.pdf" in message
-    assert "url=https://blob.vercel-storage.com/exams/1/key/file.pdf?token=secret" not in message
-    assert "url=https://blob.vercel-storage.com/exams/1/key/file.pdf" in message
-    assert "status=404" in message
-    assert "missing" in message

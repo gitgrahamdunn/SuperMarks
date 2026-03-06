@@ -20,8 +20,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, JSONResponse
 from sqlmodel import Session, delete, select
 
-from app.blob_service import create_signed_blob_url
-from app.blob_store import BlobDownloadError, BlobSignedUrlError
+from app.blob_service import create_signed_blob_url, normalize_blob_pathname
+from app.blob_store import BlobDownloadError
 from app.ai.openai_vision import (
     AnswerKeyParser,
     BulkNameDetectionResult,
@@ -427,7 +427,7 @@ def register_exam_key_files(exam_id: int, payload: BlobRegisterRequest, session:
         row = ExamKeyFile(
             exam_id=exam_id,
             original_filename=_sanitize_filename(file.original_filename),
-            stored_path=file.blob_pathname,
+            stored_path=normalize_blob_pathname(file.blob_pathname),
             content_type=file.content_type,
             size_bytes=file.size_bytes,
         )
@@ -566,8 +566,6 @@ def create_bulk_submission_preview(
     output_dir = reset_dir(_bulk_pages_dir(exam_id, bulk.id))
     try:
         source_path = _run_async(materialize_object_to_path(bulk.stored_path, settings.data_path / "cache" / "bulk" / str(exam_id) / str(bulk.id)))
-    except BlobSignedUrlError as exc:
-        raise HTTPException(status_code=500, detail="Blob signed URL failed") from exc
     except BlobDownloadError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     rendered_paths = _render_pdf_pages(source_path, output_dir, start_page_number=1, max_pages=500)
