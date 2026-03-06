@@ -124,11 +124,10 @@ class ExamKeyPage(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
-class ExamKeyParseRun(SQLModel, table=True):
+class ExamKeyParseJob(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     exam_id: int = Field(foreign_key="exam.id", index=True)
-    request_id: str = Field(index=True)
-    status: str
+    status: str = "running"
     page_count: int = 0
     pages_done: int = 0
     created_at: datetime = Field(default_factory=utcnow)
@@ -140,16 +139,16 @@ class ExamKeyParseRun(SQLModel, table=True):
 
 class ExamKeyParsePage(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    parse_run_id: int = Field(foreign_key="examkeyparserun.id", index=True)
+    job_id: int = Field(foreign_key="examkeyparsejob.id", index=True)
     page_number: int
-    model_used: str
+    status: str = "pending"
     confidence: float = 0.0
-    status: str
+    model_used: Optional[str] = None
+    result_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    error_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
     cost: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
-    result_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
-    error_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 

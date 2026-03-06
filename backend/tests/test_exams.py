@@ -605,30 +605,33 @@ def test_parse_answer_key_incremental_flow(tmp_path, monkeypatch) -> None:
         )
         assert upload.status_code == 200
 
+        build_pages = client.post(f"/api/exams/{exam_id}/key/build-pages")
+        assert build_pages.status_code == 200
+
         started = client.post(f"/api/exams/{exam_id}/key/parse/start")
         assert started.status_code == 200
         start_payload = started.json()
         assert start_payload["page_count"] == 2
         assert start_payload["pages_done"] == 0
-        request_id = start_payload["request_id"]
+        job_id = start_payload["job_id"]
 
-        next1 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"request_id": request_id})
+        next1 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"job_id": job_id})
         assert next1.status_code == 200
         assert next1.json()["pages_done"] == 1
 
-        status = client.get(f"/api/exams/{exam_id}/key/parse/status", params={"request_id": request_id})
+        status = client.get(f"/api/exams/{exam_id}/key/parse/status", params={"job_id": job_id})
         assert status.status_code == 200
         assert status.json()["pages_done"] == 1
 
-        next2 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"request_id": request_id})
+        next2 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"job_id": job_id})
         assert next2.status_code == 200
         assert next2.json()["pages_done"] == 2
 
-        done = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"request_id": request_id})
+        done = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"job_id": job_id})
         assert done.status_code == 200
         assert done.json()["status"] == "done"
 
-        finished = client.post(f"/api/exams/{exam_id}/key/parse/finish", params={"request_id": request_id})
+        finished = client.post(f"/api/exams/{exam_id}/key/parse/finish", params={"job_id": job_id})
         assert finished.status_code == 200
         finished_payload = finished.json()
         assert isinstance(finished_payload["questions"], list)

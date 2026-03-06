@@ -503,9 +503,10 @@ export const api = {
   parseExamKey: (examId: number, options?: RequestInit) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
 
   startExamKeyParse: (examId: number, options?: RequestInit) => request<ParseStartResponse>(`exams/${examId}/key/parse/start`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
-  parseExamKeyNext: (examId: number, requestId: string, options?: RequestInit) => request<ParseNextResponse>(`exams/${examId}/key/parse/next?request_id=${encodeURIComponent(requestId)}`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
-  getExamKeyParseStatus: (examId: number, requestId: string, options?: RequestInit) => request<ParseStatusResponse>(`exams/${examId}/key/parse/status?request_id=${encodeURIComponent(requestId)}`, { method: 'GET', ...options }, EXAM_READ_TIMEOUT_MS),
-  finishExamKeyParse: (examId: number, requestId: string, options?: RequestInit) => request<ParseFinishResponse>(`exams/${examId}/key/parse/finish?request_id=${encodeURIComponent(requestId)}`, { method: 'POST', ...options }, EXAM_CREATE_TIMEOUT_MS),
+  parseExamKeyNext: (examId: number, jobId: number, options?: RequestInit) => request<ParseNextResponse>(`exams/${examId}/key/parse/next?job_id=${jobId}`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
+  getExamKeyParseStatus: (examId: number, jobId: number, options?: RequestInit) => request<ParseStatusResponse>(`exams/${examId}/key/parse/status?job_id=${jobId}`, { method: 'GET', ...options }, EXAM_READ_TIMEOUT_MS),
+  retryExamKeyParsePage: (examId: number, jobId: number, pageNumber: number, options?: RequestInit) => request<ParseNextResponse>(`exams/${examId}/key/parse/retry?job_id=${jobId}&page_number=${pageNumber}`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
+  finishExamKeyParse: (examId: number, jobId: number, options?: RequestInit) => request<ParseFinishResponse>(`exams/${examId}/key/parse/finish?job_id=${jobId}`, { method: 'POST', ...options }, EXAM_CREATE_TIMEOUT_MS),
   parseExamKeyRaw: async (examId: number, options?: RequestInit) => {
     const path = `exams/${examId}/key/parse`;
     const url = buildApiUrl(path);
