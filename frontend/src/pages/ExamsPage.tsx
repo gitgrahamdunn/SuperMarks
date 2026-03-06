@@ -152,7 +152,7 @@ export function ExamsPage() {
   const [parseTimings, setParseTimings] = useState<ParseTimings | null>(null);
   const [runningTotals, setRunningTotals] = useState<RunningTotals | null>(null);
   const [failedPage, setFailedPage] = useState<number | null>(null);
-  const [parseRequestId, setParseRequestId] = useState<string | null>(null);
+  const [parseJobId, setParseJobId] = useState<number | null>(null);
   const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [backendVersion, setBackendVersion] = useState<string>('loading...');
@@ -189,6 +189,20 @@ export function ExamsPage() {
 
   useEffect(() => {
     void loadExams();
+  }, []);
+
+  useEffect(() => {
+    const raw = localStorage.getItem('supermarks:parseJob');
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as { examId?: number; jobId?: number };
+      if (parsed.examId && parsed.jobId) {
+        setCreatedExamId(parsed.examId);
+        setParseJobId(parsed.jobId);
+      }
+    } catch {
+      localStorage.removeItem('supermarks:parseJob');
+    }
   }, []);
 
   useEffect(() => {
@@ -258,7 +272,7 @@ export function ExamsPage() {
     setParseTimings(null);
     setRunningTotals(null);
     setFailedPage(null);
-    setParseRequestId(null);
+    setParseJobId(null);
     setChecklistSteps(initChecklist());
   };
 
@@ -267,6 +281,63 @@ export function ExamsPage() {
     setModalFiles([]);
     setAllowLargeUpload(false);
     resetWizardProgress();
+  };
+
+
+
+  const resumeParseJob = async () => {
+    if (!createdExamId || !parseJobId) return;
+    try {
+      setIsRunning(true);
+      updateCurrentStep('parsing');
+      startParseProgress();
+      let status = await api.getExamKeyParseStatus(createdExamId, parseJobId);
+      setParsePageCount(status.page_count);
+      setParsePageIndex(status.pages_done);
+      while (status.status === 'running') {
+        const next = await api.parseExamKeyNext(createdExamId, parseJobId);
+        setParsePageIndex(next.pages_done);
+        if (next.status === 'failed' && next.page_number) {
+          setFailedPage(next.page_number);
+          break;
+        }
+        status = await api.getExamKeyParseStatus(createdExamId, parseJobId);
+      }
+      if (status.status === 'done') {
+        setIsModalOpen(false);
+        resetWizardState();
+        await loadExams();
+        navigate(`/exams/${createdExamId}/review`);
+      }
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to resume parse job');
+    } finally {
+      setIsRunning(false);
+      clearIntervals();
+    }
+  };
+
+  const retryFailedParsePage = async () => {
+    if (!createdExamId || !parseJobId || !failedPage) return;
+    try {
+      await api.retryExamKeyParsePage(createdExamId, parseJobId, failedPage);
+      const next = await api.parseExamKeyNext(createdExamId, parseJobId);
+      setParsePageIndex(next.pages_done);
+      if (next.status === 'failed') {
+        showWarning(`Page ${failedPage} failed again. Retry when ready.`);
+        return;
+      }
+      setFailedPage(null);
+      const status = await api.getExamKeyParseStatus(createdExamId, parseJobId);
+      if (status.status === 'done') {
+        setIsModalOpen(false);
+        resetWizardState();
+        await loadExams();
+        navigate(`/exams/${createdExamId}/review`);
+      }
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to retry parse page');
+    }
   };
 
   const closeModal = () => {
@@ -339,17 +410,18 @@ export function ExamsPage() {
       setParseProgress(50);
       startParseProgress();
       const started = await api.startExamKeyParse(exam.id, requestOptions);
-      setParseRequestId(started.request_id);
+      setParseJobId(started.job_id);
+      localStorage.setItem(`supermarks:parseJob`, JSON.stringify({ examId: exam.id, jobId: started.job_id }));
       setParsePageCount(started.page_count);
       logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/start`), status: 200, responseSnippet: JSON.stringify(started).slice(0, 500) });
 
       for (let index = 0; index < started.page_count; index += 1) {
-        const next = await api.parseExamKeyNext(exam.id, started.request_id, requestOptions);
+        const next = await api.parseExamKeyNext(exam.id, started.job_id, requestOptions);
         setParsePageIndex(next.pages_done);
-        setRunningTotals(next.totals);
+        if (next.totals) setRunningTotals(next.totals);
         const pct = Math.min(98, 50 + Math.round((next.pages_done / Math.max(1, next.page_count)) * 45));
         setParseProgress(pct);
-        logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/next?request_id=${started.request_id}`), status: 200, responseSnippet: JSON.stringify(next).slice(0, 500) });
+        logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/next?job_id=${started.job_id}`), status: 200, responseSnippet: JSON.stringify(next).slice(0, 500) });
 
         if (next.page_result?.status === 'failed' && next.page_number) {
           setFailedPage(next.page_number);
@@ -357,10 +429,10 @@ export function ExamsPage() {
         }
       }
 
-      const status = await api.getExamKeyParseStatus(exam.id, started.request_id, requestOptions);
-      setRunningTotals(status.totals);
-      const finished = await api.finishExamKeyParse(exam.id, started.request_id, requestOptions);
-      logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/finish?request_id=${started.request_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
+      const status = await api.getExamKeyParseStatus(exam.id, started.job_id, requestOptions);
+      if (status.totals) setRunningTotals(status.totals);
+      const finished = await api.finishExamKeyParse(exam.id, started.job_id, requestOptions);
+      logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/finish?job_id=${started.job_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
 
       markChecklist('reading_questions', 'done');
       markChecklist('detecting_marks', 'done');
@@ -504,23 +576,24 @@ export function ExamsPage() {
         markChecklist('reading_questions', 'active');
         startParseProgress();
         const started = await api.startExamKeyParse(createdExamId, requestOptions);
-        setParseRequestId(started.request_id);
+        setParseJobId(started.job_id);
+        localStorage.setItem(`supermarks:parseJob`, JSON.stringify({ examId: createdExamId, jobId: started.job_id }));
         setParsePageCount(started.page_count);
         logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/start`), status: 200, responseSnippet: JSON.stringify(started).slice(0, 500) });
 
         for (let index = 0; index < started.page_count; index += 1) {
-          const next = await api.parseExamKeyNext(createdExamId, started.request_id, requestOptions);
+          const next = await api.parseExamKeyNext(createdExamId, started.job_id, requestOptions);
           setParsePageIndex(next.pages_done);
-          setRunningTotals(next.totals);
+          if (next.totals) setRunningTotals(next.totals);
           const pct = Math.min(98, 50 + Math.round((next.pages_done / Math.max(1, next.page_count)) * 45));
           setParseProgress(pct);
-          logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/next?request_id=${started.request_id}`), status: 200, responseSnippet: JSON.stringify(next).slice(0, 500) });
+          logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/next?job_id=${started.job_id}`), status: 200, responseSnippet: JSON.stringify(next).slice(0, 500) });
         }
 
-        const status = await api.getExamKeyParseStatus(createdExamId, started.request_id, requestOptions);
-        setRunningTotals(status.totals);
-        const finished = await api.finishExamKeyParse(createdExamId, started.request_id, requestOptions);
-        logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/finish?request_id=${started.request_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
+        const status = await api.getExamKeyParseStatus(createdExamId, started.job_id, requestOptions);
+        if (status.totals) setRunningTotals(status.totals);
+        const finished = await api.finishExamKeyParse(createdExamId, started.job_id, requestOptions);
+        logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/finish?job_id=${started.job_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
 
         markChecklist('reading_questions', 'done');
         markChecklist('detecting_marks', 'done');
@@ -804,6 +877,16 @@ export function ExamsPage() {
               <pre className="code-box">{`cost_total: $${runningTotals.cost_total.toFixed(6)}\ninput_tokens_total: ${runningTotals.input_tokens_total}\noutput_tokens_total: ${runningTotals.output_tokens_total}\nmodel_usage: ${JSON.stringify(runningTotals.model_usage || {})}`}</pre>
             )}
             {failedPage && <p className="warning-text">Page {failedPage} failed — retry?</p>}
+            {failedPage && (
+              <button type="button" className="btn btn-secondary" onClick={() => void retryFailedParsePage()}>
+                Retry failed page
+              </button>
+            )}
+            {parseJobId && createdExamId && (
+              <button type="button" className="btn btn-secondary" onClick={() => void resumeParseJob()} disabled={isRunning}>
+                Resume parsing
+              </button>
+            )}
             {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
             {wizardError && !isRunning && (
               <button type="button" className="btn btn-secondary" onClick={onRetryFailedStep}>

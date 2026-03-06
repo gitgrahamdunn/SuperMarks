@@ -125,46 +125,39 @@ export interface BulkFinalizeResponse {
 }
 
 
-export interface ParseTotals {
-  cost_total: number;
-  input_tokens_total: number;
-  output_tokens_total: number;
-  model_usage?: Record<string, number>;
-}
-
 export interface ParseStartResponse {
-  request_id: string;
-  parse_run_id: number;
+  job_id: number;
   page_count: number;
+  pages_done: number;
 }
 
 export interface ParseNextResponse {
-  request_id: string;
+  job_id: number;
   page_number: number | null;
   page_count: number;
   pages_done: number;
-  done?: boolean;
-  warning?: string;
-  page_result?: {
-    questions: Array<{ id: number; label: string; max_marks: number }>;
-    confidence: number;
-    status?: string;
-    warnings?: string[];
-  };
-  totals: ParseTotals;
+  status: 'running' | 'done' | 'failed';
+  page_result?: { status?: 'pending' | 'running' | 'done' | 'failed' };
+  totals?: { cost_total: number; input_tokens_total: number; output_tokens_total: number }
+}
+
+export interface ParseStatusPage {
+  page_number: number;
+  status: 'pending' | 'running' | 'done' | 'failed';
 }
 
 export interface ParseStatusResponse {
-  request_id: string;
-  status: string;
+  job_id: number;
+  status: 'running' | 'done' | 'failed';
   page_count: number;
   pages_done: number;
-  totals: ParseTotals;
-  warnings: string[];
+  pages: ParseStatusPage[];
+  totals?: { cost_total: number; input_tokens_total: number; output_tokens_total: number };
+  warnings?: string[];
 }
 
 export interface ParseFinishResponse {
-  request_id: string;
+  job_id: number;
   status: string;
   questions: unknown[];
 }
