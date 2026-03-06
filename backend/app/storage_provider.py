@@ -140,7 +140,7 @@ async def get_storage_signed_url(key: str, expires_seconds: int = 3600) -> str:
 
 async def materialize_object_to_path(key: str, cache_dir: Path) -> Path:
     provider = get_storage_provider()
-    normalized_key = normalize_blob_pathname(key) if key.startswith(("http://", "https://")) else key
+    normalized_key = normalize_blob_pathname(key)
     suffix = Path(normalized_key).suffix
     target = ensure_dir(cache_dir) / f"{abs(hash(normalized_key))}{suffix}"
     if target.exists():
