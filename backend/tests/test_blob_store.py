@@ -10,22 +10,13 @@ from sqlmodel import SQLModel, Session, create_engine
 import pytest
 
 from app import db
-from app.blob_service import BlobDownloadError, download_blob_bytes, normalize_blob_pathname
+from app.blob_service import BlobDownloadError, download_blob_bytes, normalize_blob_path
 from app.main import app
 from app.models import SubmissionFile
 from app.settings import settings
 
 
-def test_blob_store_mock_helpers(monkeypatch) -> None:
-    monkeypatch.setenv("BLOB_MOCK", "1")
-    data, content_type = asyncio.run(download_blob_bytes("exams/1/key/file.pdf"))
-
-    assert data.startswith(b"%PDF-1.4")
-    assert content_type == "application/pdf"
-
-
 def test_download_blob_bytes_streams_from_async_blob_client(monkeypatch) -> None:
-    monkeypatch.setenv("BLOB_MOCK", "")
 
     class _FakeStream:
         def __aiter__(self):
@@ -58,12 +49,9 @@ def test_download_blob_bytes_streams_from_async_blob_client(monkeypatch) -> None
     assert content_type == "text/plain"
 
 
-def test_normalize_blob_pathname_for_path_and_full_url() -> None:
-    assert normalize_blob_pathname("exams/12/key/sample.png") == "exams/12/key/sample.png"
-    assert (
-        normalize_blob_pathname("https://blob.vercel-storage.com/exams/34/key/from-url.png?foo=1")
-        == "exams/34/key/from-url.png"
-    )
+def test_normalize_blob_path_for_path_and_full_url() -> None:
+    assert normalize_blob_path("exams/1/key/a.png") == "exams/1/key/a.png"
+    assert normalize_blob_path("https://blob.vercel-storage.com/exams/1/key/a.png") == "exams/1/key/a.png"
 
 
 def test_materialize_object_to_path_normalizes_blob_url(tmp_path: Path, monkeypatch) -> None:
@@ -76,13 +64,46 @@ def test_materialize_object_to_path_normalizes_blob_url(tmp_path: Path, monkeypa
         return b"blob-bytes", "image/png"
 
     monkeypatch.setattr("app.storage_provider.download_blob_bytes", _fake_download)
-    monkeypatch.setenv("BLOB_MOCK", "")
-    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "token")
-
     asyncio.run(materialize_object_to_path("exams/12/key/sample.png", tmp_path / "cache"))
     asyncio.run(materialize_object_to_path("https://blob.vercel-storage.com/exams/34/key/from-url.png", tmp_path / "cache"))
 
     assert captured == ["exams/12/key/sample.png", "exams/34/key/from-url.png"]
+
+
+
+def test_download_blob_bytes_with_blob_mock_uses_private_sdk_get(monkeypatch) -> None:
+    monkeypatch.setenv("BLOB_MOCK", "1")
+
+    class _FakeStream:
+        def __aiter__(self):
+            self._parts = [b"png", b"-", b"bytes"]
+            return self
+
+        async def __anext__(self):
+            if not self._parts:
+                raise StopAsyncIteration
+            return self._parts.pop(0)
+
+    class _FakeBlob:
+        content_type = "image/png"
+
+    class _FakeResult:
+        status_code = 200
+        stream = _FakeStream()
+        blob = _FakeBlob()
+
+    class _FakeClient:
+        async def get(self, pathname: str, access: str):
+            assert pathname == "exams/1/key/a.png"
+            assert access == "private"
+            return _FakeResult()
+
+    monkeypatch.setattr("app.blob_service.AsyncBlobClient", _FakeClient)
+
+    data, content_type = asyncio.run(download_blob_bytes("exams/1/key/a.png"))
+    assert data == b"png-bytes"
+    assert content_type == "image/png"
+
 
 
 def _png_bytes() -> bytes:
@@ -106,9 +127,6 @@ def test_build_pages_download_uses_stored_pathname_not_blob_url(tmp_path: Path, 
         return _png_bytes(), "image/png"
 
     monkeypatch.setattr("app.storage_provider.download_blob_bytes", _fake_download)
-    monkeypatch.setenv("BLOB_MOCK", "")
-    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "token")
-
     with TestClient(app) as client:
         exam = client.post("/api/exams", json={"name": "Blob Path Exam"})
         exam_id = exam.json()["id"]

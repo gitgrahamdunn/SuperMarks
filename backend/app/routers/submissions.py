@@ -11,8 +11,8 @@ from fastapi.responses import FileResponse
 from sqlmodel import Session, delete, select
 
 from app.db import get_session
-from app.blob_service import create_signed_blob_url, normalize_blob_pathname
-from app.blob_store import BlobDownloadError
+from app.blob_service import create_signed_blob_url, normalize_blob_path
+from app.blob_service import BlobDownloadError
 from app.models import (
     AnswerCrop,
     Exam,
@@ -119,7 +119,7 @@ def register_submission_files(submission_id: int, payload: BlobRegisterRequest, 
             submission_id=submission_id,
             file_kind=kind,
             original_filename=file.original_filename,
-            stored_path=normalize_blob_pathname(file.blob_pathname),
+            stored_path=normalize_blob_path(file.blob_pathname),
             content_type=file.content_type,
             size_bytes=file.size_bytes,
         )

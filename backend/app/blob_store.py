@@ -7,16 +7,11 @@ from typing import Any
 
 import httpx
 
-from app.blob_service import BlobDownloadError, BlobSignedUrlError, download_blob_bytes, get_signed_read_url
-
-
 class BlobUploadError(RuntimeError):
     """Raised when blob upload fails."""
 
-
 def _blob_access_value() -> str:
     return os.getenv("BLOB_PUBLIC_ACCESS", "public").strip() or "public"
-
 
 def _require_blob_token() -> str:
     token = os.getenv("BLOB_READ_WRITE_TOKEN", "").strip()
@@ -24,10 +19,8 @@ def _require_blob_token() -> str:
         raise BlobUploadError("Missing BLOB_READ_WRITE_TOKEN")
     return token
 
-
 def _is_mock_mode() -> bool:
     return os.getenv("BLOB_MOCK", "").strip() == "1"
-
 
 def _mock_upload(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
     from app.settings import settings
@@ -43,7 +36,6 @@ def _mock_upload(pathname: str, data: bytes, content_type: str) -> dict[str, str
         "contentType": content_type,
         "downloadUrl": url,
     }
-
 
 def _upload_with_sdk(pathname: str, data: bytes, content_type: str) -> dict[str, str] | None:
     try:
@@ -99,7 +91,6 @@ def _upload_with_sdk(pathname: str, data: bytes, content_type: str) -> dict[str,
         "downloadUrl": download_url,
     }
 
-
 def _upload_with_http(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
     token = _require_blob_token()
     access = _blob_access_value()
@@ -126,7 +117,6 @@ def _upload_with_http(pathname: str, data: bytes, content_type: str) -> dict[str
         "contentType": str(payload.get("contentType") or content_type),
         "downloadUrl": str(payload.get("downloadUrl") or blob_url),
     }
-
 
 def upload_bytes(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
     if _is_mock_mode():

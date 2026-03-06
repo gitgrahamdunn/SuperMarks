@@ -20,8 +20,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, JSONResponse
 from sqlmodel import Session, delete, select
 
-from app.blob_service import create_signed_blob_url, normalize_blob_pathname
-from app.blob_store import BlobDownloadError
+from app.blob_service import create_signed_blob_url, normalize_blob_path
+from app.blob_service import BlobDownloadError
 from app.ai.openai_vision import (
     AnswerKeyParser,
     BulkNameDetectionResult,
@@ -427,7 +427,7 @@ def register_exam_key_files(exam_id: int, payload: BlobRegisterRequest, session:
         row = ExamKeyFile(
             exam_id=exam_id,
             original_filename=_sanitize_filename(file.original_filename),
-            stored_path=normalize_blob_pathname(file.blob_pathname),
+            stored_path=normalize_blob_path(file.blob_pathname),
             content_type=file.content_type,
             size_bytes=file.size_bytes,
         )
