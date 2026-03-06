@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
+from typing import Any
 from urllib.parse import urlsplit
 
 from vercel.blob import AsyncBlobClient
@@ -70,29 +72,95 @@ async def download_blob_bytes(pathname: str) -> tuple[bytes, str | None]:
             f"Blob SDK get failed pathname={normalized_pathname} error={exc}"
         ) from exc
 
-    if result is None or result.status_code != 200 or result.stream is None:
+    if result is None:
         try:
             raise RuntimeError("blob result missing/invalid")
         except RuntimeError as exc:
             logger.exception("Blob not found or unreadable pathname=%s", normalized_pathname)
             raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}") from exc
 
-    chunks: list[bytes] = []
+    public_attrs = sorted(name for name in dir(result) if not name.startswith("_"))
+    logger.info(
+        "blob_private_read_result_shape type=%s attrs=%s pathname=%s",
+        type(result).__name__,
+        public_attrs,
+        normalized_pathname,
+    )
+
+    status_code = getattr(result, "status_code", None)
+    if isinstance(status_code, int) and status_code != 200:
+        raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}")
+
     try:
-        async for chunk in result.stream:
-            chunks.append(chunk)
+        content_bytes = await _read_blob_result_bytes(result)
     except Exception as exc:
-        logger.exception("Blob stream read failed pathname=%s", normalized_pathname)
+        logger.exception("Blob read failed pathname=%s", normalized_pathname)
         raise BlobDownloadError(
-            f"Blob stream read failed pathname={normalized_pathname} error={exc}"
+            f"Blob read failed pathname={normalized_pathname} error={exc}"
         ) from exc
 
-    content_type = None
-    try:
-        content_type = result.blob.content_type
-    except Exception:
-        content_type = None
-    return b"".join(chunks), content_type
+    content_type = _extract_content_type(result)
+    return content_bytes, content_type
+
+
+def _extract_content_type(result: Any) -> str | None:
+    content_type = getattr(result, "content_type", None)
+    if isinstance(content_type, str):
+        return content_type
+    blob = getattr(result, "blob", None)
+    blob_content_type = getattr(blob, "content_type", None)
+    if isinstance(blob_content_type, str):
+        return blob_content_type
+    return None
+
+
+async def _read_blob_result_bytes(result: Any) -> bytes:
+    direct = _coerce_bytes(getattr(result, "content", None))
+    if direct is not None:
+        return direct
+
+    direct = _coerce_bytes(getattr(result, "body", None))
+    if direct is not None:
+        return direct
+
+    read_fn = getattr(result, "read", None)
+    if callable(read_fn):
+        read_value = read_fn()
+        if hasattr(read_value, "__await__"):
+            read_value = await read_value
+        direct = _coerce_bytes(read_value)
+        if direct is not None:
+            return direct
+
+    response = getattr(result, "response", None)
+    if response is not None:
+        response_content = _coerce_bytes(getattr(response, "content", None))
+        if response_content is not None:
+            return response_content
+
+        aiter_bytes = getattr(response, "aiter_bytes", None)
+        if callable(aiter_bytes):
+            chunks: list[bytes] = []
+            iterator = aiter_bytes()
+            if isinstance(iterator, AsyncIterator):
+                async for chunk in iterator:
+                    chunks.append(bytes(chunk))
+                return b"".join(chunks)
+
+    public_attrs = sorted(name for name in dir(result) if not name.startswith("_"))
+    raise RuntimeError(
+        f"Unsupported blob result type={type(result).__name__} attrs={public_attrs}"
+    )
+
+
+def _coerce_bytes(value: Any) -> bytes | None:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray | memoryview):
+        return bytes(value)
+    return None
 
 
 async def create_signed_blob_url(pathname: str, expires_seconds: int = 600) -> str:

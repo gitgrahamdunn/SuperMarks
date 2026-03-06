@@ -16,25 +16,12 @@ from app.models import SubmissionFile
 from app.settings import settings
 
 
-def test_download_blob_bytes_streams_from_async_blob_client(monkeypatch) -> None:
-
-    class _FakeStream:
-        def __aiter__(self):
-            self._parts = [b"hello", b"-", b"world"]
-            return self
-
-        async def __anext__(self):
-            if not self._parts:
-                raise StopAsyncIteration
-            return self._parts.pop(0)
-
-    class _FakeBlob:
-        content_type = "text/plain"
+def test_download_blob_bytes_reads_content_from_get_blob_result(monkeypatch) -> None:
 
     class _FakeResult:
         status_code = 200
-        stream = _FakeStream()
-        blob = _FakeBlob()
+        content = b"hello-world"
+        content_type = "text/plain"
 
     class _FakeClient:
         async def get(self, pathname: str, access: str):
@@ -74,22 +61,12 @@ def test_materialize_object_to_path_normalizes_blob_url(tmp_path: Path, monkeypa
 def test_download_blob_bytes_with_blob_mock_uses_private_sdk_get(monkeypatch) -> None:
     monkeypatch.setenv("BLOB_MOCK", "1")
 
-    class _FakeStream:
-        def __aiter__(self):
-            self._parts = [b"png", b"-", b"bytes"]
-            return self
-
-        async def __anext__(self):
-            if not self._parts:
-                raise StopAsyncIteration
-            return self._parts.pop(0)
-
     class _FakeBlob:
         content_type = "image/png"
 
     class _FakeResult:
         status_code = 200
-        stream = _FakeStream()
+        content = b"png-bytes"
         blob = _FakeBlob()
 
     class _FakeClient:
@@ -164,3 +141,42 @@ def test_download_blob_bytes_raises_on_missing(monkeypatch) -> None:
 
     with pytest.raises(BlobDownloadError):
         asyncio.run(download_blob_bytes("exams/1/key/file.pdf"))
+
+
+def test_download_blob_bytes_reads_from_response_aiter_bytes(monkeypatch) -> None:
+
+    class _FakeResponse:
+        async def aiter_bytes(self):
+            for part in [b"a", b"b", b"c"]:
+                yield part
+
+    class _FakeResult:
+        status_code = 200
+        response = _FakeResponse()
+        content_type = "application/octet-stream"
+
+    class _FakeClient:
+        async def get(self, pathname: str, access: str):
+            return _FakeResult()
+
+    monkeypatch.setattr("app.blob_service.AsyncBlobClient", _FakeClient)
+
+    data, content_type = asyncio.run(download_blob_bytes("exams/1/key/fallback.bin"))
+    assert data == b"abc"
+    assert content_type == "application/octet-stream"
+
+
+def test_download_blob_bytes_raises_on_unsupported_shape(monkeypatch) -> None:
+
+    class _FakeResult:
+        status_code = 200
+        pathname = "exams/1/key/odd.bin"
+
+    class _FakeClient:
+        async def get(self, pathname: str, access: str):
+            return _FakeResult()
+
+    monkeypatch.setattr("app.blob_service.AsyncBlobClient", _FakeClient)
+
+    with pytest.raises(BlobDownloadError, match="Unsupported blob result type"):
+        asyncio.run(download_blob_bytes("exams/1/key/odd.bin"))
