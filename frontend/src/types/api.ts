@@ -133,11 +133,18 @@ export interface ParseStartResponse {
 
 export interface ParseNextResponse {
   job_id: number;
-  page_number: number | null;
+  pages_processed: number[];
   page_count: number;
   pages_done: number;
   status: 'running' | 'done' | 'failed';
-  page_result?: { status?: 'pending' | 'running' | 'done' | 'failed' };
+  page_results?: Array<{
+    page_number: number;
+    status?: 'pending' | 'running' | 'done' | 'failed';
+    tried_models?: string[];
+    first_attempt_confidence?: number;
+    confidence?: number;
+    model_used?: string;
+  }>;
   totals?: { cost_total: number; input_tokens_total: number; output_tokens_total: number }
 }
 
@@ -148,6 +155,8 @@ export interface ParseStatusPage {
 
 export interface ParseStatusResponse {
   job_id: number;
+  exam_exists: boolean;
+  job_exists: boolean;
   status: 'running' | 'done' | 'failed';
   page_count: number;
   pages_done: number;
@@ -160,6 +169,17 @@ export interface ParseFinishResponse {
   job_id: number;
   status: string;
   questions: unknown[];
+}
+
+export interface ParseLatestResponse {
+  exam_exists: boolean;
+  job: {
+    job_id: number;
+    request_id: string;
+    status: 'running' | 'done' | 'failed';
+    page_count: number;
+    pages_done: number;
+  } | null;
 }
 
 

@@ -615,13 +615,21 @@ def test_parse_answer_key_incremental_flow(tmp_path, monkeypatch) -> None:
         assert start_payload["pages_done"] == 0
         job_id = start_payload["job_id"]
 
-        next1 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"job_id": job_id})
+        latest = client.get(f"/api/exams/{exam_id}/key/parse/latest")
+        assert latest.status_code == 200
+        assert latest.json()["exam_exists"] is True
+        assert latest.json()["job"]["job_id"] == job_id
+
+        next1 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"job_id": job_id, "batch_size": 3})
         assert next1.status_code == 200
-        assert next1.json()["pages_done"] == 1
+        assert next1.json()["pages_done"] == 2
+        assert next1.json()["pages_processed"] == [1, 2]
 
         status = client.get(f"/api/exams/{exam_id}/key/parse/status", params={"job_id": job_id})
         assert status.status_code == 200
-        assert status.json()["pages_done"] == 1
+        assert status.json()["pages_done"] == 2
+        assert status.json()["exam_exists"] is True
+        assert status.json()["job_exists"] is True
 
         next2 = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"job_id": job_id})
         assert next2.status_code == 200
@@ -642,6 +650,30 @@ def test_parse_answer_key_incremental_flow(tmp_path, monkeypatch) -> None:
         assert len(questions) >= 1
 
 
+def test_parse_status_job_exam_mismatch(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_a = client.post("/api/exams", json={"name": "Exam A"}).json()["id"]
+        exam_b = client.post("/api/exams", json={"name": "Exam B"}).json()["id"]
+        client.post(
+            f"/api/exams/{exam_a}/key/upload",
+            files=[("files", ("key1.png", _tiny_png_bytes(), "image/png"))],
+        )
+        client.post(f"/api/exams/{exam_a}/key/build-pages")
+        started = client.post(f"/api/exams/{exam_a}/key/parse/start")
+        job_id = started.json()["job_id"]
+
+        mismatch = client.get(f"/api/exams/{exam_b}/key/parse/status", params={"job_id": job_id})
+        assert mismatch.status_code == 409
+        assert mismatch.json()["detail"]["detail"] == "Parse job does not belong to this exam"
+        assert mismatch.json()["detail"]["exam_exists"] is True
+        assert mismatch.json()["detail"]["job_exists"] is True
 def test_upload_exam_key_file_over_4mb_returns_413(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
