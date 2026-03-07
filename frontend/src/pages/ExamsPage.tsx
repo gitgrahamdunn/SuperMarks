@@ -6,7 +6,7 @@ import { FileUploader } from '../components/FileUploader';
 import { uploadToBlob } from '../blob/upload';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/ToastProvider';
-import type { ExamRead } from '../types/api';
+import type { ExamRead, QuestionRead } from '../types/api';
 
 type WizardStep = 'creating' | 'uploading' | 'building_pages' | 'parsing' | 'done';
 type ParseChecklistStepId =
@@ -18,6 +18,7 @@ type ParseChecklistStepId =
   | 'drafting_rubric'
   | 'finalizing';
 type ParseChecklistStatus = 'pending' | 'active' | 'done' | 'failed';
+type WizardParseStatus = 'idle' | 'running' | 'done' | 'failed';
 
 type StepLog = {
   step: WizardStep;
@@ -118,6 +119,14 @@ function extractParsedQuestionCount(parseResult: unknown): number {
   return 0;
 }
 
+
+const toParsePageUiStatus = (status: 'pending' | 'running' | 'done' | 'failed' | undefined): ParseChecklistStatus => {
+  if (status === 'running') return 'active';
+  if (status === 'done') return 'done';
+  if (status === 'failed') return 'failed';
+  return 'pending';
+};
+
 const isNetworkFetchError = (error: unknown) =>
   error instanceof Error && (error instanceof TypeError || /load failed|failed to fetch|network/i.test(error.message));
 
@@ -149,6 +158,12 @@ export function ExamsPage() {
   const [failedSummary, setFailedSummary] = useState<string | null>(null);
   const [parsePageCount, setParsePageCount] = useState(0);
   const [parsePageIndex, setParsePageIndex] = useState(0);
+  const [currentParsingPageNumber, setCurrentParsingPageNumber] = useState(1);
+  const [parseJobStatus, setParseJobStatus] = useState<WizardParseStatus>('idle');
+  const [pageStatuses, setPageStatuses] = useState<Record<number, ParseChecklistStatus>>({});
+  const [liveParsedQuestions, setLiveParsedQuestions] = useState<QuestionRead[]>([]);
+  const [emptyPageNotes, setEmptyPageNotes] = useState<number[]>([]);
+  const [activityMessageIndex, setActivityMessageIndex] = useState(0);
   const [parseTimings, setParseTimings] = useState<ParseTimings | null>(null);
   const [runningTotals, setRunningTotals] = useState<RunningTotals | null>(null);
   const [failedPage, setFailedPage] = useState<number | null>(null);
@@ -163,6 +178,7 @@ export function ExamsPage() {
   const currentStepRef = useRef<WizardStep>('creating');
   const openWizardButtonRef = useRef<HTMLButtonElement>(null);
   const examNameRef = useRef<HTMLInputElement>(null);
+  const liveQuestionsBottomRef = useRef<HTMLDivElement | null>(null);
 
   const { showError, showSuccess, showWarning } = useToast();
   const navigate = useNavigate();
@@ -175,6 +191,50 @@ export function ExamsPage() {
   );
   const diagnostics = getClientDiagnostics();
   const estimatedParsingPage = parsePageCount > 0 ? Math.min(parsePageCount, Math.max(1, Math.floor(elapsedSeconds / 3) + 1)) : 0;
+  const parseActivityMessages = [
+    `Reading page ${Math.max(1, currentParsingPageNumber)}…`,
+    'Extracting questions…',
+    'Drafting rubric…',
+  ];
+  const currentParsePageForDisplay = Math.max(1, currentParsingPageNumber || parsePageIndex || estimatedParsingPage || 1);
+  const currentExamId = createdExamId || 0;
+  const keyPageImageUrl = currentExamId
+    ? `${api.getExamKeyPageUrl(currentExamId, currentParsePageForDisplay)}?v=${currentExamId}-${currentParsePageForDisplay}-${parsePageIndex}`
+    : '';
+
+  const getQuestionPageNumber = (question: QuestionRead) => {
+    const pageFromRubric = Number(question.rubric_json?.key_page_number || 0);
+    if (Number.isFinite(pageFromRubric) && pageFromRubric > 0) return pageFromRubric;
+    const firstRegion = Array.isArray(question.regions) ? question.regions[0] : null;
+    const pageFromRegion = Number(firstRegion?.page_number || 0);
+    if (Number.isFinite(pageFromRegion) && pageFromRegion > 0) return pageFromRegion;
+    return 1;
+  };
+
+  const syncLiveQuestions = async (examId: number) => {
+    const fetched = await api.getExamQuestionsForReview(examId);
+    const mapped = fetched.map((item) => ({ ...item, rubric_json: item.rubric_json || {} }));
+    const previousIds = new Set(liveParsedQuestions.map((item) => item.id));
+    const fresh = mapped.filter((item) => !previousIds.has(item.id));
+    setLiveParsedQuestions(mapped.sort((a, b) => a.id - b.id));
+    return { total: mapped.length, newCount: fresh.length };
+  };
+
+  const markPageStatus = (pageNumber: number, status: ParseChecklistStatus) => {
+    setPageStatuses((prev) => ({ ...prev, [pageNumber]: status }));
+  };
+
+  const initializePageStatuses = (count: number) => {
+    if (!count) {
+      setPageStatuses({});
+      return;
+    }
+    const initial: Record<number, ParseChecklistStatus> = {};
+    for (let page = 1; page <= count; page += 1) {
+      initial[page] = 'pending';
+    }
+    setPageStatuses(initial);
+  };
 
   const loadExams = async () => {
     try {
@@ -221,6 +281,24 @@ export function ExamsPage() {
 
     void loadBackendVersion();
   }, []);
+
+  useEffect(() => {
+    if (step !== 'parsing' || !isRunning) return;
+    const interval = window.setInterval(() => setActivityMessageIndex((prev) => (prev + 1) % parseActivityMessages.length), 1200);
+    return () => window.clearInterval(interval);
+  }, [isRunning, step, parseActivityMessages.length]);
+
+  useEffect(() => {
+    liveQuestionsBottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [liveParsedQuestions.length]);
+
+  useEffect(() => {
+    if (!createdExamId || step !== 'parsing' || parsePageCount <= 0) return;
+    const nextPage = currentParsePageForDisplay + 1;
+    if (nextPage > parsePageCount) return;
+    const preloadImage = new Image();
+    preloadImage.src = `${api.getExamKeyPageUrl(createdExamId, nextPage)}?v=${createdExamId}-${nextPage}-${parsePageIndex}`;
+  }, [createdExamId, currentParsePageForDisplay, parsePageCount, parsePageIndex, step]);
 
   const clearIntervals = () => {
     if (parseProgressIntervalRef.current !== null) {
@@ -269,6 +347,12 @@ export function ExamsPage() {
     setFailedSummary(null);
     setParsePageCount(0);
     setParsePageIndex(0);
+    setCurrentParsingPageNumber(1);
+    setParseJobStatus('idle');
+    setPageStatuses({});
+    setLiveParsedQuestions([]);
+    setEmptyPageNotes([]);
+    setActivityMessageIndex(0);
     setParseTimings(null);
     setRunningTotals(null);
     setFailedPage(null);
@@ -294,14 +378,28 @@ export function ExamsPage() {
       let status = await api.getExamKeyParseStatus(createdExamId, parseJobId);
       setParsePageCount(status.page_count);
       setParsePageIndex(status.pages_done);
+      setParseJobStatus(status.status === 'running' ? 'running' : status.status);
+      initializePageStatuses(status.page_count);
+      status.pages.forEach((page) => markPageStatus(page.page_number, toParsePageUiStatus(page.status)));
       while (status.status === 'running') {
+        const nextPageNumber = Math.min(status.page_count, status.pages_done + 1);
+        setCurrentParsingPageNumber(nextPageNumber);
+        markPageStatus(nextPageNumber, 'active');
         const next = await api.parseExamKeyNext(createdExamId, parseJobId);
         setParsePageIndex(next.pages_done);
+        setParsePageCount(next.page_count);
+        if (next.page_number) {
+          setCurrentParsingPageNumber(next.page_number);
+          markPageStatus(next.page_number, toParsePageUiStatus(next.page_result?.status || 'done'));
+        }
+        setParseJobStatus(next.status === 'running' ? 'running' : next.status);
+        await syncLiveQuestions(createdExamId);
         if (next.status === 'failed' && next.page_number) {
           setFailedPage(next.page_number);
           break;
         }
         status = await api.getExamKeyParseStatus(createdExamId, parseJobId);
+        status.pages.forEach((page) => markPageStatus(page.page_number, toParsePageUiStatus(page.status)));
       }
       if (status.status === 'done') {
         setIsModalOpen(false);
@@ -323,12 +421,19 @@ export function ExamsPage() {
       await api.retryExamKeyParsePage(createdExamId, parseJobId, failedPage);
       const next = await api.parseExamKeyNext(createdExamId, parseJobId);
       setParsePageIndex(next.pages_done);
+      setParsePageCount(next.page_count);
+      if (next.page_number) {
+        setCurrentParsingPageNumber(next.page_number);
+        markPageStatus(next.page_number, toParsePageUiStatus(next.page_result?.status || 'done'));
+      }
+      await syncLiveQuestions(createdExamId);
       if (next.status === 'failed') {
         showWarning(`Page ${failedPage} failed again. Retry when ready.`);
         return;
       }
       setFailedPage(null);
       const status = await api.getExamKeyParseStatus(createdExamId, parseJobId);
+      setParseJobStatus(status.status === 'running' ? 'running' : status.status);
       if (status.status === 'done') {
         setIsModalOpen(false);
         resetWizardState();
@@ -413,11 +518,27 @@ export function ExamsPage() {
       setParseJobId(started.job_id);
       localStorage.setItem(`supermarks:parseJob`, JSON.stringify({ examId: exam.id, jobId: started.job_id }));
       setParsePageCount(started.page_count);
+      setCurrentParsingPageNumber(1);
+      initializePageStatuses(started.page_count);
+      setParseJobStatus('running');
       logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/start`), status: 200, responseSnippet: JSON.stringify(started).slice(0, 500) });
 
       for (let index = 0; index < started.page_count; index += 1) {
+        const pageNumber = index + 1;
+        setCurrentParsingPageNumber(pageNumber);
+        markPageStatus(pageNumber, 'active');
         const next = await api.parseExamKeyNext(exam.id, started.job_id, requestOptions);
         setParsePageIndex(next.pages_done);
+        setParsePageCount(next.page_count);
+        if (next.page_number) {
+          setCurrentParsingPageNumber(next.page_number);
+          markPageStatus(next.page_number, toParsePageUiStatus(next.page_result?.status || 'done'));
+        }
+        setParseJobStatus(next.status === 'running' ? 'running' : next.status);
+        const liveSync = await syncLiveQuestions(exam.id);
+        if (next.page_number && next.page_result?.status === 'done' && liveSync.newCount === 0) {
+          setEmptyPageNotes((prev) => (prev.includes(next.page_number as number) ? prev : [...prev, next.page_number as number]));
+        }
         if (next.totals) setRunningTotals(next.totals);
         const pct = Math.min(98, 50 + Math.round((next.pages_done / Math.max(1, next.page_count)) * 45));
         setParseProgress(pct);
@@ -431,6 +552,7 @@ export function ExamsPage() {
 
       const status = await api.getExamKeyParseStatus(exam.id, started.job_id, requestOptions);
       if (status.totals) setRunningTotals(status.totals);
+      setParseJobStatus(status.status === 'running' ? 'running' : status.status);
       const finished = await api.finishExamKeyParse(exam.id, started.job_id, requestOptions);
       logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/finish?job_id=${started.job_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
 
@@ -579,11 +701,24 @@ export function ExamsPage() {
         setParseJobId(started.job_id);
         localStorage.setItem(`supermarks:parseJob`, JSON.stringify({ examId: createdExamId, jobId: started.job_id }));
         setParsePageCount(started.page_count);
+        setCurrentParsingPageNumber(1);
+        initializePageStatuses(started.page_count);
+        setParseJobStatus('running');
         logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/start`), status: 200, responseSnippet: JSON.stringify(started).slice(0, 500) });
 
         for (let index = 0; index < started.page_count; index += 1) {
+          const pageNumber = index + 1;
+          setCurrentParsingPageNumber(pageNumber);
+          markPageStatus(pageNumber, 'active');
           const next = await api.parseExamKeyNext(createdExamId, started.job_id, requestOptions);
           setParsePageIndex(next.pages_done);
+          setParsePageCount(next.page_count);
+          if (next.page_number) {
+            setCurrentParsingPageNumber(next.page_number);
+            markPageStatus(next.page_number, toParsePageUiStatus(next.page_result?.status || 'done'));
+          }
+          setParseJobStatus(next.status === 'running' ? 'running' : next.status);
+          await syncLiveQuestions(createdExamId);
           if (next.totals) setRunningTotals(next.totals);
           const pct = Math.min(98, 50 + Math.round((next.pages_done / Math.max(1, next.page_count)) * 45));
           setParseProgress(pct);
@@ -851,9 +986,31 @@ export function ExamsPage() {
                 <span>Elapsed: {formatElapsed(elapsedSeconds)}</span>
               </div>
               {step === 'parsing' && parsePageCount > 0 && (
-                <p className="subtle-text">
-                  Parsing page {parsePageIndex || estimatedParsingPage}/{parsePageCount}…
-                </p>
+                <div className="stack" style={{ gap: 8 }}>
+                  <p className="subtle-text">Currently parsing page {currentParsePageForDisplay} of {parsePageCount}</p>
+                  <p className="subtle-text">Parse job: {parseJobStatus}</p>
+                  <p className="subtle-text wizard-activity-text">{parseActivityMessages[activityMessageIndex]}</p>
+                  <div className="wizard-page-row" aria-label="Page parsing status">
+                    {Array.from({ length: parsePageCount }, (_, idx) => {
+                      const pageNumber = idx + 1;
+                      const status = pageStatuses[pageNumber] || 'pending';
+                      const label = status === 'done' ? 'done' : status === 'active' ? 'current' : status;
+                      return (
+                        <span key={pageNumber} className={`wizard-page-pill status-${status}`}>
+                          {pageNumber} {label}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  {keyPageImageUrl && (
+                    <img
+                      key={currentParsePageForDisplay}
+                      className="wizard-key-page-preview"
+                      src={keyPageImageUrl}
+                      alt={`Key page ${currentParsePageForDisplay}`}
+                    />
+                  )}
+                </div>
               )}
               <div className="wizard-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={parseProgress}>
                 <div className="wizard-progress-fill" style={{ width: `${parseProgress}%` }} />
@@ -876,6 +1033,24 @@ export function ExamsPage() {
             {runningTotals && (
               <pre className="code-box">{`cost_total: $${runningTotals.cost_total.toFixed(6)}\ninput_tokens_total: ${runningTotals.input_tokens_total}\noutput_tokens_total: ${runningTotals.output_tokens_total}\nmodel_usage: ${JSON.stringify(runningTotals.model_usage || {})}`}</pre>
             )}
+            {step === 'parsing' && liveParsedQuestions.length > 0 && (
+              <div className="stack wizard-live-questions" style={{ gap: 6 }}>
+                <strong>Live parsed questions ({liveParsedQuestions.length})</strong>
+                {liveParsedQuestions.map((question) => {
+                  const parsedFromPage = getQuestionPageNumber(question);
+                  return (
+                    <div key={question.id} className="wizard-live-question-row">
+                      <span>{question.label}</span>
+                      <span className="wizard-page-badge">Parsed from page {parsedFromPage}</span>
+                    </div>
+                  );
+                })}
+                <div ref={liveQuestionsBottomRef} />
+              </div>
+            )}
+            {step === 'parsing' && emptyPageNotes.map((page) => (
+              <p key={page} className="subtle-text">No questions detected on page {page}</p>
+            ))}
             {failedPage && <p className="warning-text">Page {failedPage} failed — retry?</p>}
             {failedPage && (
               <button type="button" className="btn btn-secondary" onClick={() => void retryFailedParsePage()}>
