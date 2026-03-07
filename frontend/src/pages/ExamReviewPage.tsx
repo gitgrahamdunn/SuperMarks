@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError, getOpenApiPaths } from '../api/client';
 import { EvidenceOverlayCanvas, type EvidenceBox } from '../components/EvidenceOverlayCanvas';
@@ -36,6 +36,7 @@ export function ExamReviewPage() {
   const [previewError, setPreviewError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
+  const [manualPageNumber, setManualPageNumber] = useState<number | null>(null);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
 
@@ -93,19 +94,32 @@ export function ExamReviewPage() {
   useEffect(() => {
     setPreviewError(false);
     setImageLoaded(false);
+    setManualPageNumber(null);
   }, [currentIndex]);
 
   const currentQuestion = questions[currentIndex];
-  const currentPageNumber = Math.max(1, Number((currentQuestion?.rubric_json?.key_page_number as number) || currentQuestion?.evidence?.[0]?.page_number || 1));
-  const evidenceCount = currentQuestion?.evidence?.filter((box) => Number(box.page_number || 1) === currentPageNumber).length ?? 0;
-  const keyVisualUrl = `${api.getQuestionKeyVisualUrl(examId, currentQuestion?.id || 0)}?v=${examId}-${currentQuestion?.id || 0}-${currentPageNumber}`;
+  const derivedPageNumber = getCurrentPageNumber(currentQuestion);
+  const currentPageNumber = manualPageNumber ?? derivedPageNumber;
+  const overlayEvidence = useMemo(
+    () => currentQuestion?.evidence?.filter((box) => Number(box.page_number || 1) === currentPageNumber) ?? [],
+    [currentQuestion, currentPageNumber],
+  );
+  const overlayCountOnPage = overlayEvidence.length;
+  const activeQuestionIdForVersion = currentQuestion?.id || currentIndex;
+  const keyVisualUrl = `${api.getQuestionKeyVisualUrl(examId, currentQuestion?.id || 0)}?v=${examId}-${currentPageNumber}-${activeQuestionIdForVersion}`;
   const keyPageUrlFromRubric = currentQuestion?.rubric_json?.key_page_url || currentQuestion?.rubric_json?.key_page_image_url;
+  const questionLabelText = formatQuestionLabel(currentQuestion?.label);
   const fallbackKeyPageUrl = typeof keyPageUrlFromRubric === 'string' && keyPageUrlFromRubric.trim().length > 0
     ? keyPageUrlFromRubric
     : api.getExamKeyPageUrl(examId, currentPageNumber);
 
   const updateCurrentQuestion = (updater: (question: EditableQuestion) => EditableQuestion) => {
     setQuestions((prev) => prev.map((question, index) => (index === currentIndex ? updater(question) : question)));
+  };
+
+  const setCurrentQuestionPage = (pageNumber: number) => {
+    const nextPageNumber = Math.max(1, Math.floor(pageNumber));
+    setManualPageNumber(nextPageNumber);
   };
 
   const onFieldChange = (field: keyof EditableQuestion, value: string | number) => {
@@ -243,22 +257,44 @@ export function ExamReviewPage() {
       <p>Question {currentIndex + 1} of {questions.length}</p>
 
       <div className="stack" style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: 10, background: '#f8fafc' }}>
+        <p style={{ fontWeight: 600, margin: 0 }}>
+          {questionLabelText
+            ? `Question ${questionLabelText} · page ${currentPageNumber}`
+            : `Reviewing page ${currentPageNumber}`}
+        </p>
+
+        <div className="actions-row" style={{ marginTop: 4 }}>
+          <button
+            type="button"
+            onClick={() => setCurrentQuestionPage(currentPageNumber - 1)}
+            disabled={currentPageNumber <= 1}
+          >
+            Prev page
+          </button>
+          <button
+            type="button"
+            onClick={() => setCurrentQuestionPage(currentPageNumber + 1)}
+          >
+            Next page
+          </button>
+        </div>
         {previewError && (
           <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', color: '#78350f', borderRadius: 8, padding: 10 }}>
             Key page preview not available for this question (PDF/image not rendered).
           </div>
         )}
-        {imageLoaded && !previewError && evidenceCount === 0 && (
+        {imageLoaded && !previewError && overlayCountOnPage === 0 && (
           <div style={{ background: '#e0f2fe', border: '1px solid #38bdf8', color: '#0c4a6e', borderRadius: 8, padding: 10 }}>
-            No overlay evidence was produced. You can still review the rubric below.
+            No overlay evidence was produced for this page. You can still review the rubric below.
           </div>
         )}
 
         {!previewError ? (
           <EvidenceOverlayCanvas
+            imageKey={currentPageNumber}
             imageUrl={keyVisualUrl}
-            evidence={currentQuestion.evidence || []}
-            visible={showOverlay && evidenceCount > 0}
+            evidence={overlayEvidence}
+            visible={showOverlay && overlayCountOnPage > 0}
             pageNumber={currentPageNumber}
             onImageError={() => {
               setPreviewError(true);
@@ -277,13 +313,13 @@ export function ExamReviewPage() {
           </div>
         )}
 
-        {evidenceCount > 0 && !previewError && (
+        {overlayCountOnPage > 0 && !previewError && (
           <label>
             <input type="checkbox" checked={showOverlay} onChange={(e) => setShowOverlay(e.target.checked)} /> Show overlays
           </label>
         )}
         <p className="subtle-text" style={{ margin: 0 }}>
-          Overlay diagnostics: imageLoaded: {String(imageLoaded && !previewError)} | evidenceCount: {evidenceCount} | pageNumber: {currentPageNumber}
+          Overlay diagnostics: currentQuestionIndex: {currentIndex} | currentPageNumber: {currentPageNumber} | overlayCountOnPage: {overlayCountOnPage} | manualPage: {manualPageNumber ?? 'auto'} | imageLoaded: {String(imageLoaded && !previewError)}
         </p>
       </div>
 
@@ -479,6 +515,28 @@ function getMarksSuggestion(question: EditableQuestion): { value: number; confid
     guess = 4;
   }
   return { value: guess, confidence: 0.3, source: 'unknown' };
+}
+
+function getCurrentPageNumber(question: EditableQuestion | undefined): number {
+  if (!question) return 1;
+
+  const rubric = question.rubric_json as Record<string, unknown> | undefined;
+  const evidence = Array.isArray(question.evidence) ? question.evidence : [];
+  const firstEvidencePage = evidence.length > 0 ? Number(evidence[0]?.page_number || 0) : 0;
+  const questionLevelPage = Number(rubric?.page_number || rubric?.key_page_number || 0);
+
+  if (firstEvidencePage > 0) {
+    return Math.max(1, Math.floor(firstEvidencePage));
+  }
+
+  return Math.max(1, Number.isFinite(questionLevelPage) ? Math.floor(questionLevelPage) : 1);
+}
+
+function formatQuestionLabel(label: string | undefined): ReactNode | null {
+  if (!label) return null;
+  const match = label.match(/Q\s*([0-9]+)/i) || label.match(/Question\s*([0-9]+)/i);
+  if (match) return `Q${match[1]}`;
+  return null;
 }
 
 function normalizeCriteria(criteriaSource: unknown): Criterion[] {

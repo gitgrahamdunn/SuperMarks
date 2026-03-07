@@ -17,6 +17,7 @@ const COLORS: Record<string, string> = {
 };
 
 interface EvidenceOverlayCanvasProps {
+  imageKey?: string | number;
   imageUrl: string;
   evidence: EvidenceBox[];
   visible: boolean;
@@ -26,6 +27,7 @@ interface EvidenceOverlayCanvasProps {
 }
 
 export function EvidenceOverlayCanvas({
+  imageKey,
   imageUrl,
   evidence,
   visible,
@@ -74,6 +76,7 @@ export function EvidenceOverlayCanvas({
     <div className="stack" style={{ gap: 8 }}>
       <div style={{ position: 'relative', display: 'inline-block', width: '100%' }}>
         <img
+          key={imageKey}
           ref={imageRef}
           src={imageUrl}
           alt="Key page"
