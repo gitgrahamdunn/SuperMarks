@@ -37,6 +37,7 @@ export function ExamReviewPage() {
   const [imageLoaded, setImageLoaded] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [manualPageNumber, setManualPageNumber] = useState<number | null>(null);
+  const [examUnavailable, setExamUnavailable] = useState(false);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
 
@@ -50,6 +51,7 @@ export function ExamReviewPage() {
 
       try {
         setLoading(true);
+        setExamUnavailable(false);
         const [fetchedQuestions, paths] = await Promise.all([
           api.getExamQuestionsForReview(examId),
           getOpenApiPaths(),
@@ -66,6 +68,11 @@ export function ExamReviewPage() {
         showSuccess(`Loaded ${mapped.length} questions for review.`);
       } catch (error) {
         console.error('Failed to fetch questions for review', error);
+        if (error instanceof ApiError && error.status === 404) {
+          setExamUnavailable(true);
+          setQuestions([]);
+          return;
+        }
         const storageKey = `supermarks:lastParse:${examId}`;
         const storedParse = localStorage.getItem(storageKey);
         if (storedParse) {
@@ -239,6 +246,15 @@ export function ExamReviewPage() {
 
   if (loading) {
     return <p>Loading review...</p>;
+  }
+
+  if (examUnavailable) {
+    return (
+      <div className="card stack">
+        <p>This exam record is unavailable.</p>
+        <p><Link className="btn btn-secondary" to="/">Back to Exams</Link></p>
+      </div>
+    );
   }
 
   if (!currentQuestion) {

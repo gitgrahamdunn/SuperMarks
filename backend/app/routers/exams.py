@@ -864,10 +864,12 @@ def create_question(exam_id: int, payload: QuestionCreate, session: Session = De
 
 
 @router.get("/{exam_id}/questions", response_model=list[QuestionRead])
-def list_questions(exam_id: int, session: Session = Depends(get_session)) -> list[QuestionRead]:
+def list_questions(exam_id: int, session: Session = Depends(get_session), job_id: int | None = None) -> list[QuestionRead]:
     exam = session.get(Exam, exam_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
+    if job_id is not None:
+        _get_job_for_exam_or_error(exam_id, job_id, session)
 
     questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
     result: list[QuestionRead] = []
@@ -1078,104 +1080,62 @@ def _upsert_questions_for_page(exam_id: int, page_number: int, questions_payload
     return stored
 
 
-def _get_job_or_404(exam_id: int, job_id: int, session: Session) -> ExamKeyParseJob:
+def _raise_parse_validation_error(*, status_code: int, detail: str, exam_exists: bool, job_exists: bool, job_exam_id: int | None = None) -> None:
+    payload: dict[str, Any] = {
+        "detail": detail,
+        "exam_exists": exam_exists,
+        "job_exists": job_exists,
+    }
+    if job_exam_id is not None:
+        payload["job_exam_id"] = job_exam_id
+    raise HTTPException(status_code=status_code, detail=payload)
+
+
+def _get_exam_or_404(exam_id: int, session: Session) -> Exam:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        _raise_parse_validation_error(status_code=404, detail="Exam not found", exam_exists=False, job_exists=False)
+    return exam
+
+
+def _get_job_for_exam_or_error(exam_id: int, job_id: int, session: Session) -> ExamKeyParseJob:
     job = session.get(ExamKeyParseJob, job_id)
-    if not job or job.exam_id != exam_id:
-        raise HTTPException(status_code=404, detail="Parse job not found")
+    if not job:
+        _raise_parse_validation_error(status_code=404, detail="Parse job not found", exam_exists=True, job_exists=False)
+    if job.exam_id != exam_id:
+        _raise_parse_validation_error(
+            status_code=409,
+            detail="Parse job does not belong to this exam",
+            exam_exists=True,
+            job_exists=True,
+            job_exam_id=job.exam_id,
+        )
     return job
 
 
-@router.post("/{exam_id}/key/parse/start")
-def start_answer_key_parse(exam_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
-    exam = session.get(Exam, exam_id)
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-
-    page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
-    if not page_rows:
-        raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
-
-    job = ExamKeyParseJob(
-        exam_id=exam_id,
-        status="running",
-        page_count=len(page_rows),
-        pages_done=0,
-        created_at=utcnow(),
-        updated_at=utcnow(),
-    )
-    exam.status = ExamStatus.KEY_PAGES_READY
-    session.add(exam)
-    session.add(job)
-    session.flush()
-
-    for page in page_rows:
-        session.add(ExamKeyParsePage(job_id=job.id, page_number=page.page_number, status="pending", updated_at=utcnow()))
-
-    session.commit()
-    session.refresh(job)
-
-    return {"job_id": job.id, "request_id": str(job.id), "page_count": job.page_count, "pages_done": job.pages_done}
-
-
-@router.post("/{exam_id}/key/parse/next")
-def parse_answer_key_next_page(
+def _process_single_parse_page(
+    *,
     exam_id: int,
-    job_id: int | None = None,
-    request_id: str | None = None,
-    session: Session = Depends(get_session),
-    parser: AnswerKeyParser = Depends(get_answer_key_parser),
-) -> dict[str, object]:
-    exam = session.get(Exam, exam_id)
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-
-    resolved_job_id = job_id or (int(request_id) if request_id and request_id.isdigit() else None)
-    if not resolved_job_id:
-        raise HTTPException(status_code=422, detail="job_id is required")
-    job = _get_job_or_404(exam_id, resolved_job_id, session)
-    page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
-    if not page_rows:
-        raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
-
-    target_parse_page = session.exec(
-        select(ExamKeyParsePage)
-        .where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "pending")
-        .order_by(ExamKeyParsePage.page_number)
-    ).first()
-
-    if target_parse_page is None:
-        failed_pages = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "failed")).all()
-        job.status = "failed" if failed_pages else "done"
-        job.updated_at = utcnow()
-        if job.status == "done":
-            exam.status = ExamStatus.REVIEWING
-            session.add(exam)
-        session.add(job)
-        session.commit()
-        return {
-            "job_id": job.id,
-            "request_id": str(job.id),
-            "page_number": None,
-            "page_count": job.page_count,
-            "pages_done": job.pages_done,
-            "status": job.status,
-            "totals": {"cost_total": job.cost_total, "input_tokens_total": job.input_tokens_total, "output_tokens_total": job.output_tokens_total},
-        }
-
+    exam: Exam,
+    job: ExamKeyParseJob,
+    target_parse_page: ExamKeyParsePage,
+    page_rows_by_number: dict[int, ExamKeyPage],
+    session: Session,
+    parser: AnswerKeyParser,
+) -> dict[str, Any]:
     target_parse_page.status = "running"
     target_parse_page.updated_at = utcnow()
     session.add(target_parse_page)
     session.commit()
 
     page_number = target_parse_page.page_number
-    key_page = next((row for row in page_rows if row.page_number == page_number), None)
+    key_page = page_rows_by_number.get(page_number)
     if key_page is None:
         target_parse_page.status = "failed"
         target_parse_page.error_json = {"detail": "Key page not found"}
         target_parse_page.updated_at = utcnow()
         session.add(target_parse_page)
-        session.commit()
-        return {"job_id": job.id, "request_id": str(job.id), "page_number": page_number, "pages_done": job.pages_done, "page_count": job.page_count, "status": "failed", "page_result": {"status": "failed"}, "totals": {"cost_total": job.cost_total, "input_tokens_total": job.input_tokens_total, "output_tokens_total": job.output_tokens_total}}
+        return {"page_number": page_number, "status": "failed", "cost": 0.0, "input_tokens": 0, "output_tokens": 0}
 
     nano_model, mini_model = _resolve_models()
     page_path = Path(key_page.image_path)
@@ -1184,8 +1144,7 @@ def parse_answer_key_next_page(
         target_parse_page.error_json = {"detail": "Page image missing"}
         target_parse_page.updated_at = utcnow()
         session.add(target_parse_page)
-        session.commit()
-        return {"job_id": job.id, "request_id": str(job.id), "page_number": page_number, "pages_done": job.pages_done, "page_count": job.page_count, "status": "failed", "page_result": {"status": "failed"}, "totals": {"cost_total": job.cost_total, "input_tokens_total": job.input_tokens_total, "output_tokens_total": job.output_tokens_total}}
+        return {"page_number": page_number, "status": "failed", "cost": 0.0, "input_tokens": 0, "output_tokens": 0}
 
     warnings: list[str] = []
     used_model = nano_model
@@ -1198,7 +1157,6 @@ def parse_answer_key_next_page(
     tried_models: list[str] = []
     first_attempt_confidence = 0.0
 
-    result: ParseResult | None = None
     for model_name in [nano_model, mini_model]:
         tried_models.append(model_name)
         used_model = model_name
@@ -1256,26 +1214,138 @@ def parse_answer_key_next_page(
         job.status = "running"
     job.updated_at = utcnow()
     session.add(job)
+
+    return {
+        "page_number": page_number,
+        "status": page_status,
+        "tried_models": tried_models,
+        "first_attempt_confidence": first_attempt_confidence,
+        "confidence": confidence,
+        "model_used": used_model,
+        "cost": cost,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+
+
+@router.post("/{exam_id}/key/parse/start")
+def start_answer_key_parse(exam_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    exam = _get_exam_or_404(exam_id, session)
+
+    page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
+    if not page_rows:
+        raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
+
+    job = ExamKeyParseJob(
+        exam_id=exam_id,
+        status="running",
+        page_count=len(page_rows),
+        pages_done=0,
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    exam.status = ExamStatus.KEY_PAGES_READY
+    session.add(exam)
+    session.add(job)
+    session.flush()
+
+    for page in page_rows:
+        session.add(ExamKeyParsePage(job_id=job.id, page_number=page.page_number, status="pending", updated_at=utcnow()))
+
     session.commit()
+    session.refresh(job)
+
+    return {"job_id": job.id, "request_id": str(job.id), "page_count": job.page_count, "pages_done": job.pages_done}
+
+
+@router.post("/{exam_id}/key/parse/next")
+def parse_answer_key_next_page(
+    exam_id: int,
+    job_id: int | None = None,
+    request_id: str | None = None,
+    batch_size: int = 3,
+    session: Session = Depends(get_session),
+    parser: AnswerKeyParser = Depends(get_answer_key_parser),
+) -> dict[str, object]:
+    exam = _get_exam_or_404(exam_id, session)
+
+    resolved_job_id = job_id or (int(request_id) if request_id and request_id.isdigit() else None)
+    if not resolved_job_id:
+        raise HTTPException(status_code=422, detail="job_id is required")
+    job = _get_job_for_exam_or_error(exam_id, resolved_job_id, session)
+    page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
+    if not page_rows:
+        raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
+    page_rows_by_number = {row.page_number: row for row in page_rows}
+    capped_batch_size = max(1, min(batch_size, 5))
+
+    target_parse_pages = session.exec(
+        select(ExamKeyParsePage)
+        .where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "pending")
+        .order_by(ExamKeyParsePage.page_number)
+        .limit(capped_batch_size)
+    ).all()
+
+    if not target_parse_pages:
+        failed_pages = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "failed")).all()
+        job.status = "failed" if failed_pages else "done"
+        job.updated_at = utcnow()
+        if job.status == "done":
+            exam.status = ExamStatus.REVIEWING
+            session.add(exam)
+        session.add(job)
+        session.commit()
+        return {
+            "job_id": job.id,
+            "request_id": str(job.id),
+            "pages_processed": [],
+            "page_count": job.page_count,
+            "pages_done": job.pages_done,
+            "status": job.status,
+            "totals": {"cost_total": job.cost_total, "input_tokens_total": job.input_tokens_total, "output_tokens_total": job.output_tokens_total},
+        }
+
+    pages_processed: list[int] = []
+    page_results: list[dict[str, Any]] = []
+    for target_parse_page in target_parse_pages:
+        page_result = _process_single_parse_page(
+            exam_id=exam_id,
+            exam=exam,
+            job=job,
+            target_parse_page=target_parse_page,
+            page_rows_by_number=page_rows_by_number,
+            session=session,
+            parser=parser,
+        )
+        page_results.append(page_result)
+        pages_processed.append(page_result["page_number"])
+        session.commit()
 
     return {
         "job_id": job.id,
         "request_id": str(job.id),
-        "page_number": page_number,
+        "pages_processed": pages_processed,
         "pages_done": job.pages_done,
         "page_count": job.page_count,
-        "status": page_status,
-        "page_result": {"status": page_status, "tried_models": tried_models, "first_attempt_confidence": first_attempt_confidence, "confidence": confidence, "model_used": used_model},
+        "status": job.status,
+        "page_results": page_results,
         "totals": {"cost_total": job.cost_total, "input_tokens_total": job.input_tokens_total, "output_tokens_total": job.output_tokens_total},
     }
 
 
 @router.get("/{exam_id}/key/parse/status")
 def get_answer_key_parse_status(exam_id: int, job_id: int | None = None, request_id: str | None = None, session: Session = Depends(get_session)) -> dict[str, object]:
+    exam = session.get(Exam, exam_id)
     resolved_job_id = job_id or (int(request_id) if request_id and request_id.isdigit() else None)
     if not resolved_job_id:
         raise HTTPException(status_code=422, detail="job_id is required")
-    job = _get_job_or_404(exam_id, resolved_job_id, session)
+    if not exam:
+        _raise_parse_validation_error(status_code=404, detail="Exam not found", exam_exists=False, job_exists=False)
+    job = session.get(ExamKeyParseJob, resolved_job_id)
+    if not job:
+        _raise_parse_validation_error(status_code=404, detail="Parse job not found", exam_exists=True, job_exists=False)
+    if job.exam_id != exam_id:
+        _raise_parse_validation_error(status_code=409, detail="Parse job does not belong to this exam", exam_exists=True, job_exists=True, job_exam_id=job.exam_id)
     pages = session.exec(
         select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id).order_by(ExamKeyParsePage.page_number)
     ).all()
@@ -1283,6 +1353,8 @@ def get_answer_key_parse_status(exam_id: int, job_id: int | None = None, request
     return {
         "job_id": job.id,
         "request_id": str(job.id),
+        "exam_exists": True,
+        "job_exists": True,
         "page_count": job.page_count,
         "pages_done": job.pages_done,
         "status": job.status,
@@ -1297,7 +1369,8 @@ def retry_answer_key_parse_page(exam_id: int, job_id: int | None = None, page_nu
     resolved_job_id = job_id or (int(request_id) if request_id and request_id.isdigit() else None)
     if not resolved_job_id:
         raise HTTPException(status_code=422, detail="job_id is required")
-    _get_job_or_404(exam_id, resolved_job_id, session)
+    _get_exam_or_404(exam_id, session)
+    _get_job_for_exam_or_error(exam_id, resolved_job_id, session)
     parse_page = session.exec(
         select(ExamKeyParsePage).where(
             ExamKeyParsePage.job_id == resolved_job_id,
@@ -1323,7 +1396,8 @@ def finish_answer_key_parse(exam_id: int, job_id: int | None = None, request_id:
     resolved_job_id = job_id or (int(request_id) if request_id and request_id.isdigit() else None)
     if not resolved_job_id:
         raise HTTPException(status_code=422, detail="job_id is required")
-    job = _get_job_or_404(exam_id, resolved_job_id, session)
+    _get_exam_or_404(exam_id, session)
+    job = _get_job_for_exam_or_error(exam_id, resolved_job_id, session)
     pending = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "pending")).all()
     failed = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "failed")).all()
     job.status = "running" if pending else ("failed" if failed else "done")
@@ -1332,6 +1406,39 @@ def finish_answer_key_parse(exam_id: int, job_id: int | None = None, request_id:
     session.commit()
     questions = list_questions(exam_id, session)
     return {"job_id": job.id, "request_id": str(job.id), "status": job.status, "questions": [q.model_dump() for q in questions]}
+
+
+@router.get("/{exam_id}/key/parse/latest")
+def get_latest_parse_job(exam_id: int, session: Session = Depends(get_session)) -> dict[str, object]:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        return {"exam_exists": False, "job": None}
+
+    latest_job = session.exec(
+        select(ExamKeyParseJob)
+        .where(ExamKeyParseJob.exam_id == exam_id)
+        .order_by(ExamKeyParseJob.created_at.desc(), ExamKeyParseJob.id.desc())
+    ).first()
+    if not latest_job:
+        return {"exam_exists": True, "job": None}
+
+    return {
+        "exam_exists": True,
+        "job": {
+            "job_id": latest_job.id,
+            "request_id": str(latest_job.id),
+            "status": latest_job.status,
+            "page_count": latest_job.page_count,
+            "pages_done": latest_job.pages_done,
+            "totals": {
+                "cost_total": latest_job.cost_total,
+                "input_tokens_total": latest_job.input_tokens_total,
+                "output_tokens_total": latest_job.output_tokens_total,
+            },
+            "created_at": latest_job.created_at.isoformat(),
+            "updated_at": latest_job.updated_at.isoformat(),
+        },
+    }
 
 
 @router.post("/{exam_id}/key/parse")
@@ -1350,14 +1457,17 @@ def parse_answer_key(exam_id: int, session: Session = Depends(get_session), pars
     attempts: list[dict[str, object]] = []
     for _ in range(page_count):
         next_result = parse_answer_key_next_page(exam_id=exam_id, job_id=job_id, session=session, parser=parser)
-        if next_result.get("page_number") is None:
+        pages_processed = next_result.get("pages_processed") if isinstance(next_result.get("pages_processed"), list) else []
+        if not pages_processed:
             break
-        page_result = next_result.get("page_result") if isinstance(next_result, dict) else None
-        if isinstance(page_result, dict):
+        all_page_results = next_result.get("page_results") if isinstance(next_result.get("page_results"), list) else []
+        for page_result in all_page_results:
+            if not isinstance(page_result, dict):
+                continue
             tried = page_result.get("tried_models") if isinstance(page_result.get("tried_models"), list) else []
             first_conf = float(page_result.get("first_attempt_confidence") or 0.0)
             final_conf = float(page_result.get("confidence") or 0.0)
-            page_number = int(next_result.get("page_number") or 0)
+            page_number = int(page_result.get("page_number") or 0)
             for idx, model in enumerate(tried):
                 attempts.append({"page_index": page_number, "model": model, "confidence_score": first_conf if idx == 0 else final_conf})
 
