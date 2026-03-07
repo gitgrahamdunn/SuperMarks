@@ -1,5 +1,6 @@
 """FastAPI application entrypoint."""
 
+import logging
 import os
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -12,7 +13,7 @@ from sqlmodel import Session
 
 from app.auth import require_api_key
 from app import db
-from app.db import create_db_and_tables
+from app.db import create_db_and_tables, get_database_backend_name, get_redacted_database_url
 from app.routers.exams import public_router as public_exams_router
 from app.routers.exams import router as exams_router
 from app.routers.questions import router as questions_router
@@ -25,6 +26,10 @@ from app.cors_safe import SafeCORSMiddleware
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
+
+
+logger = logging.getLogger(__name__)
+
 
 
 def resolve_app_version() -> str:
@@ -46,6 +51,11 @@ app.include_router(blob_router, prefix="/api", dependencies=[Depends(require_api
 @app.on_event("startup")
 def on_startup() -> None:
     ensure_dir(settings.data_path)
+    logger.info(
+        "Database backend: %s (%s)",
+        get_database_backend_name(),
+        get_redacted_database_url(),
+    )
     create_db_and_tables()
 
 
