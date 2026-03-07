@@ -158,7 +158,7 @@ export function ExamsPage() {
   const [failedSummary, setFailedSummary] = useState<string | null>(null);
   const [parsePageCount, setParsePageCount] = useState(0);
   const [parsePageIndex, setParsePageIndex] = useState(0);
-  const [currentParsingPageNumber, setCurrentParsingPageNumber] = useState(1);
+  const [currentParsingPageNumber, setCurrentParsingPageNumber] = useState(0);
   const [parseJobStatus, setParseJobStatus] = useState<WizardParseStatus>('idle');
   const [pageStatuses, setPageStatuses] = useState<Record<number, ParseChecklistStatus>>({});
   const [liveParsedQuestions, setLiveParsedQuestions] = useState<QuestionRead[]>([]);
@@ -196,11 +196,24 @@ export function ExamsPage() {
     'Extracting questions…',
     'Drafting rubric…',
   ];
-  const currentParsePageForDisplay = Math.max(1, currentParsingPageNumber || parsePageIndex || estimatedParsingPage || 1);
+  const currentParsePageForDisplay = currentParsingPageNumber > 0
+    ? currentParsingPageNumber
+    : Math.max(1, parsePageIndex || estimatedParsingPage || 1);
   const currentExamId = createdExamId || 0;
+  const pagesDone = Math.max(0, parsePageIndex);
   const keyPageImageUrl = currentExamId
-    ? `${api.getExamKeyPageUrl(currentExamId, currentParsePageForDisplay)}?v=${currentExamId}-${currentParsePageForDisplay}-${parsePageIndex}`
+    ? `${api.getExamKeyPageUrl(currentExamId, currentParsePageForDisplay)}?v=${currentExamId}-${currentParsePageForDisplay}-${pagesDone}`
     : '';
+
+  const setCurrentParsingPageFromNext = (pageNumber: number | null, pageCount: number, pagesDoneCount: number) => {
+    if (typeof pageNumber === 'number' && pageNumber > 0) {
+      setCurrentParsingPageNumber(pageNumber);
+      return pageNumber;
+    }
+    const fallbackPage = Math.min(Math.max(1, pageCount), Math.max(1, pagesDoneCount + 1));
+    setCurrentParsingPageNumber(fallbackPage);
+    return fallbackPage;
+  };
 
   const getQuestionPageNumber = (question: QuestionRead) => {
     const pageFromRubric = Number(question.rubric_json?.key_page_number || 0);
@@ -347,7 +360,7 @@ export function ExamsPage() {
     setFailedSummary(null);
     setParsePageCount(0);
     setParsePageIndex(0);
-    setCurrentParsingPageNumber(1);
+    setCurrentParsingPageNumber(0);
     setParseJobStatus('idle');
     setPageStatuses({});
     setLiveParsedQuestions([]);
@@ -388,10 +401,8 @@ export function ExamsPage() {
         const next = await api.parseExamKeyNext(createdExamId, parseJobId);
         setParsePageIndex(next.pages_done);
         setParsePageCount(next.page_count);
-        if (next.page_number) {
-          setCurrentParsingPageNumber(next.page_number);
-          markPageStatus(next.page_number, toParsePageUiStatus(next.page_result?.status || 'done'));
-        }
+        const parsedPageNumber = setCurrentParsingPageFromNext(next.page_number, next.page_count, next.pages_done);
+        markPageStatus(parsedPageNumber, toParsePageUiStatus(next.page_result?.status || 'done'));
         setParseJobStatus(next.status === 'running' ? 'running' : next.status);
         await syncLiveQuestions(createdExamId);
         if (next.status === 'failed' && next.page_number) {
@@ -422,10 +433,8 @@ export function ExamsPage() {
       const next = await api.parseExamKeyNext(createdExamId, parseJobId);
       setParsePageIndex(next.pages_done);
       setParsePageCount(next.page_count);
-      if (next.page_number) {
-        setCurrentParsingPageNumber(next.page_number);
-        markPageStatus(next.page_number, toParsePageUiStatus(next.page_result?.status || 'done'));
-      }
+      const parsedPageNumber = setCurrentParsingPageFromNext(next.page_number, next.page_count, next.pages_done);
+      markPageStatus(parsedPageNumber, toParsePageUiStatus(next.page_result?.status || 'done'));
       await syncLiveQuestions(createdExamId);
       if (next.status === 'failed') {
         showWarning(`Page ${failedPage} failed again. Retry when ready.`);
@@ -518,7 +527,7 @@ export function ExamsPage() {
       setParseJobId(started.job_id);
       localStorage.setItem(`supermarks:parseJob`, JSON.stringify({ examId: exam.id, jobId: started.job_id }));
       setParsePageCount(started.page_count);
-      setCurrentParsingPageNumber(1);
+      setCurrentParsingPageNumber(0);
       initializePageStatuses(started.page_count);
       setParseJobStatus('running');
       logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${exam.id}/key/parse/start`), status: 200, responseSnippet: JSON.stringify(started).slice(0, 500) });
@@ -530,10 +539,8 @@ export function ExamsPage() {
         const next = await api.parseExamKeyNext(exam.id, started.job_id, requestOptions);
         setParsePageIndex(next.pages_done);
         setParsePageCount(next.page_count);
-        if (next.page_number) {
-          setCurrentParsingPageNumber(next.page_number);
-          markPageStatus(next.page_number, toParsePageUiStatus(next.page_result?.status || 'done'));
-        }
+        const parsedPageNumber = setCurrentParsingPageFromNext(next.page_number, next.page_count, next.pages_done);
+        markPageStatus(parsedPageNumber, toParsePageUiStatus(next.page_result?.status || 'done'));
         setParseJobStatus(next.status === 'running' ? 'running' : next.status);
         const liveSync = await syncLiveQuestions(exam.id);
         if (next.page_number && next.page_result?.status === 'done' && liveSync.newCount === 0) {
@@ -701,7 +708,7 @@ export function ExamsPage() {
         setParseJobId(started.job_id);
         localStorage.setItem(`supermarks:parseJob`, JSON.stringify({ examId: createdExamId, jobId: started.job_id }));
         setParsePageCount(started.page_count);
-        setCurrentParsingPageNumber(1);
+        setCurrentParsingPageNumber(0);
         initializePageStatuses(started.page_count);
         setParseJobStatus('running');
         logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${createdExamId}/key/parse/start`), status: 200, responseSnippet: JSON.stringify(started).slice(0, 500) });
@@ -713,10 +720,8 @@ export function ExamsPage() {
           const next = await api.parseExamKeyNext(createdExamId, started.job_id, requestOptions);
           setParsePageIndex(next.pages_done);
           setParsePageCount(next.page_count);
-          if (next.page_number) {
-            setCurrentParsingPageNumber(next.page_number);
-            markPageStatus(next.page_number, toParsePageUiStatus(next.page_result?.status || 'done'));
-          }
+          const parsedPageNumber = setCurrentParsingPageFromNext(next.page_number, next.page_count, next.pages_done);
+          markPageStatus(parsedPageNumber, toParsePageUiStatus(next.page_result?.status || 'done'));
           setParseJobStatus(next.status === 'running' ? 'running' : next.status);
           await syncLiveQuestions(createdExamId);
           if (next.totals) setRunningTotals(next.totals);
@@ -1004,7 +1009,7 @@ export function ExamsPage() {
                   </div>
                   {keyPageImageUrl && (
                     <img
-                      key={currentParsePageForDisplay}
+                      key={currentParsingPageNumber}
                       className="wizard-key-page-preview"
                       src={keyPageImageUrl}
                       alt={`Key page ${currentParsePageForDisplay}`}
