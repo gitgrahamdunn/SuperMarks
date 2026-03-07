@@ -129,6 +129,8 @@ export interface ParseStartResponse {
   job_id: number;
   page_count: number;
   pages_done: number;
+  request_id?: string;
+  reused?: boolean;
 }
 
 export interface ParseNextResponse {
@@ -179,6 +181,12 @@ export interface ParseLatestResponse {
     status: 'running' | 'done' | 'failed';
     page_count: number;
     pages_done: number;
+    has_remaining_work: boolean;
+    failed_pages: number[];
+    pending_pages: number[];
+    totals: { cost_total: number; input_tokens_total: number; output_tokens_total: number };
+    created_at: string;
+    updated_at: string;
   } | null;
 }
 
