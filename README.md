@@ -28,6 +28,7 @@ See `docs/ARCHITECTURE.md` for guardrails.
 - `BACKEND_API_KEY=<backend-api-key>`
 - `CORS_ALLOW_ORIGINS=https://<frontend-domain>`
 - `APP_VERSION=<git-sha-or-build-id>` (optional, served by `GET /version`)
+- `DATABASE_URL=<postgres-connection-url>` (**required in production** for metadata persistence)
 
 ## Local development
 
@@ -85,3 +86,9 @@ For easier deploy verification, set both of these per deployment:
 - Backend: `APP_VERSION`
 
 A good value is the same Git SHA (or release tag) in both projects.
+
+## Persistence requirements
+
+- Blob storage stores uploaded files/binaries.
+- `DATABASE_URL` stores all metadata (exams, questions, key files, submissions, pages, parse jobs).
+- In production, both Blob storage and `DATABASE_URL` must be configured for full persistence.

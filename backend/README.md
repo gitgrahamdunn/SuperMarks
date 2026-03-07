@@ -39,6 +39,7 @@ Optional environment variables:
 - `SUPERMARKS_CORS_ORIGINS=https://<frontend-domain>`
 - `SUPERMARKS_CORS_ALLOW_ORIGIN_REGEX=https://.*\.vercel\.app`
 - `APP_VERSION=<git-sha-or-build-id>` (optional; exposed by `GET /version`)
+- `DATABASE_URL=<postgres-connection-url>` (**required in production**; stores all metadata)
 
 
 Storage notes:
@@ -47,3 +48,6 @@ Storage notes:
 - On Vercel (`VERCEL`/`VERCEL_ENV` detected), runtime files are written to `/tmp/supermarks`.
 - `/tmp` on Vercel is ephemeral and not persistent across deployments/invocations. Use external storage (S3, Vercel Blob, etc.) for durable file persistence.
 
+
+
+Persistence note: Blob stores files; DATABASE_URL stores metadata. Both are required for persistence in production.

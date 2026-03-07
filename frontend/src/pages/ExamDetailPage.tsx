@@ -10,6 +10,8 @@ export function ExamDetailPage() {
   const examId = Number(params.examId);
   const navigate = useNavigate();
   const [detail, setDetail] = useState<ExamDetail | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
   const [keyFiles, setKeyFiles] = useState<StoredFileRead[]>([]);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [rosterText, setRosterText] = useState('');
@@ -24,12 +26,21 @@ export function ExamDetailPage() {
   const { showError, showSuccess, showWarning } = useToast();
 
   const loadDetail = async () => {
+    setIsLoading(true);
     try {
       const [examDetail, uploadedKeyFiles] = await Promise.all([api.getExamDetail(examId), api.listExamKeyFiles(examId)]);
       setDetail(examDetail);
       setKeyFiles(uploadedKeyFiles);
+      setNotFound(false);
     } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        setNotFound(true);
+        setDetail(null);
+        return;
+      }
       showError(error instanceof Error ? error.message : 'Failed to load exam');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -146,7 +157,21 @@ export function ExamDetailPage() {
     }
   };
 
-  if (!detail) return <p>Loading...</p>;
+  if (isLoading) return <p>Loading...</p>;
+
+  if (notFound) {
+    return (
+      <div className="card stack">
+        <h1>Exam unavailable</h1>
+        <p>This exam record is unavailable. It may have been created on non-persistent storage before database persistence was configured.</p>
+        <p>
+          <Link className="btn btn-secondary" to="/">Back to Exams</Link>
+        </p>
+      </div>
+    );
+  }
+
+  if (!detail) return <p>Unable to load exam details.</p>;
 
   return (
     <div>

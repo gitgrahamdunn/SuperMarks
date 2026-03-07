@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.settings import Settings
 
 
@@ -44,3 +46,37 @@ def test_cors_allow_origins_from_env(monkeypatch) -> None:
         "https://frontend-a.vercel.app",
         "https://frontend-b.vercel.app",
     ]
+
+
+def test_database_url_defaults_to_sqlite_locally(monkeypatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("VERCEL_ENV", raising=False)
+    monkeypatch.delenv("SUPERMARKS_VERCEL_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("SUPERMARKS_ENV", raising=False)
+    monkeypatch.delenv("ENV", raising=False)
+    monkeypatch.delenv("SUPERMARKS_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    settings = Settings()
+
+    assert settings.effective_database_url.startswith("sqlite:///")
+
+
+def test_database_url_required_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERMARKS_VERCEL_ENVIRONMENT", "1")
+    monkeypatch.delenv("SUPERMARKS_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    settings = Settings()
+
+    with pytest.raises(RuntimeError, match="DATABASE_URL is required in production"):
+        _ = settings.effective_database_url
+
+
+def test_database_url_uses_database_url_when_present(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERMARKS_ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:secret@localhost:5432/supermarks")
+
+    settings = Settings()
+
+    assert settings.effective_database_url == "postgresql://user:secret@localhost:5432/supermarks"

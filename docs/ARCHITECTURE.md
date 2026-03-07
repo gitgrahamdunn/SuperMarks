@@ -34,3 +34,10 @@ SuperMarks is locked to **Strategy B**:
 - Frontend API base validation blocks production boot when invalid.
 - Frontend diagnostics card can ping backend health endpoint.
 - Backend tests validate preflight behavior and API-key-protected exam creation.
+
+
+## Persistence model
+
+- Blob storage persists file content (exam keys, submission uploads, page images).
+- `DATABASE_URL` persists metadata (exams, questions, key files, submissions, pages, parse jobs).
+- Both systems are required in production for durable end-to-end exam data persistence.

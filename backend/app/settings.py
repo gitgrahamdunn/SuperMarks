@@ -42,6 +42,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("SUPERMARKS_SQLITE_PATH", "SQLITE_PATH"),
     )
+    database_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_DATABASE_URL", "DATABASE_URL"),
+    )
     max_upload_mb: int = 25
     storage_backend: str = Field(
         default="local",
@@ -77,7 +81,10 @@ class Settings(BaseSettings):
     )
 
     # Deployment toggles
-    vercel_environment: bool = False
+    vercel_environment: bool = Field(
+        default_factory=lambda: _running_on_vercel(),
+        validation_alias=AliasChoices("SUPERMARKS_VERCEL_ENVIRONMENT", "VERCEL_ENVIRONMENT"),
+    )
 
     # CORS configuration
     cors_allow_origins: str = Field(
@@ -94,6 +101,23 @@ class Settings(BaseSettings):
     @property
     def sqlite_url(self) -> str:
         return f"sqlite:///{self.sqlite_path}"
+
+    @property
+    def is_production(self) -> bool:
+        env = os.getenv("SUPERMARKS_ENV", os.getenv("ENV", "")).strip().lower()
+        return self.vercel_environment or env in {"prod", "production"}
+
+    @property
+    def effective_database_url(self) -> str:
+        if self.is_production:
+            if self.database_url and self.database_url.strip():
+                return self.database_url.strip()
+            raise RuntimeError(
+                "DATABASE_URL is required in production for durable exam metadata persistence."
+            )
+        if self.database_url and self.database_url.strip():
+            return self.database_url.strip()
+        return self.sqlite_url
 
     @property
     def data_path(self) -> Path:
