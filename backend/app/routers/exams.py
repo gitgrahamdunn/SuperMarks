@@ -1113,6 +1113,24 @@ def _get_job_for_exam_or_error(exam_id: int, job_id: int, session: Session) -> E
     return job
 
 
+def _get_latest_job_for_exam(exam_id: int, session: Session) -> ExamKeyParseJob | None:
+    return session.exec(
+        select(ExamKeyParseJob)
+        .where(ExamKeyParseJob.exam_id == exam_id)
+        .order_by(ExamKeyParseJob.created_at.desc(), ExamKeyParseJob.id.desc())
+    ).first()
+
+
+def _job_has_remaining_work(job_id: int, session: Session) -> bool:
+    remaining = session.exec(
+        select(ExamKeyParsePage.id).where(
+            ExamKeyParsePage.job_id == job_id,
+            ExamKeyParsePage.status.in_(["pending", "running", "failed"]),
+        )
+    ).first()
+    return remaining is not None
+
+
 def _process_single_parse_page(
     *,
     exam_id: int,
@@ -1236,6 +1254,18 @@ def start_answer_key_parse(exam_id: int, session: Session = Depends(get_session)
     if not page_rows:
         raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
 
+    latest_job = _get_latest_job_for_exam(exam_id, session)
+    if latest_job and (latest_job.status == "running" or _job_has_remaining_work(latest_job.id, session)):
+        reused = True
+        logger.info("parse_start exam_id=%s reused_job=%s job_id=%s", exam_id, reused, latest_job.id)
+        return {
+            "job_id": latest_job.id,
+            "request_id": str(latest_job.id),
+            "page_count": latest_job.page_count,
+            "pages_done": latest_job.pages_done,
+            "reused": reused,
+        }
+
     job = ExamKeyParseJob(
         exam_id=exam_id,
         status="running",
@@ -1255,7 +1285,10 @@ def start_answer_key_parse(exam_id: int, session: Session = Depends(get_session)
     session.commit()
     session.refresh(job)
 
-    return {"job_id": job.id, "request_id": str(job.id), "page_count": job.page_count, "pages_done": job.pages_done}
+    reused = False
+    logger.info("parse_start exam_id=%s reused_job=%s job_id=%s", exam_id, reused, job.id)
+
+    return {"job_id": job.id, "request_id": str(job.id), "page_count": job.page_count, "pages_done": job.pages_done, "reused": reused}
 
 
 @router.post("/{exam_id}/key/parse/next")
@@ -1414,13 +1447,18 @@ def get_latest_parse_job(exam_id: int, session: Session = Depends(get_session)) 
     if not exam:
         return {"exam_exists": False, "job": None}
 
-    latest_job = session.exec(
-        select(ExamKeyParseJob)
-        .where(ExamKeyParseJob.exam_id == exam_id)
-        .order_by(ExamKeyParseJob.created_at.desc(), ExamKeyParseJob.id.desc())
-    ).first()
+    latest_job = _get_latest_job_for_exam(exam_id, session)
     if not latest_job:
         return {"exam_exists": True, "job": None}
+
+    pages = session.exec(
+        select(ExamKeyParsePage)
+        .where(ExamKeyParsePage.job_id == latest_job.id)
+        .order_by(ExamKeyParsePage.page_number)
+    ).all()
+    failed_pages = [p.page_number for p in pages if p.status == "failed"]
+    pending_pages = [p.page_number for p in pages if p.status in {"pending", "running"}]
+    has_remaining_work = latest_job.status == "running" or bool(pending_pages or failed_pages)
 
     return {
         "exam_exists": True,
@@ -1430,6 +1468,9 @@ def get_latest_parse_job(exam_id: int, session: Session = Depends(get_session)) 
             "status": latest_job.status,
             "page_count": latest_job.page_count,
             "pages_done": latest_job.pages_done,
+            "has_remaining_work": has_remaining_work,
+            "failed_pages": failed_pages,
+            "pending_pages": pending_pages,
             "totals": {
                 "cost_total": latest_job.cost_total,
                 "input_tokens_total": latest_job.input_tokens_total,

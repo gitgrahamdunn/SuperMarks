@@ -17,7 +17,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from app import db
 from app.ai.openai_vision import OpenAIAnswerKeyParser
 from app.main import app
-from app.models import ExamKeyFile, ExamKeyPage, Question
+from app.models import ExamKeyFile, ExamKeyPage, ExamKeyParsePage, Question
 from app.settings import settings
 
 def _tiny_png_bytes() -> bytes:
@@ -694,3 +694,97 @@ def test_upload_exam_key_file_over_4mb_returns_413(tmp_path, monkeypatch) -> Non
 
         assert response.status_code == 413
         assert response.json()["detail"] == "File too large for server upload on Vercel. Use client upload mode."
+
+
+def test_parse_start_reuses_unfinished_job(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_id = client.post("/api/exams", json={"name": "Reuse Parse Job"}).json()["id"]
+        client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key1.png", _tiny_png_bytes(), "image/png")), ("files", ("key2.png", _tiny_png_bytes(), "image/png"))],
+        )
+        client.post(f"/api/exams/{exam_id}/key/build-pages")
+
+        first = client.post(f"/api/exams/{exam_id}/key/parse/start")
+        second = client.post(f"/api/exams/{exam_id}/key/parse/start")
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["job_id"] == second.json()["job_id"]
+        assert second.json()["reused"] is True
+
+
+def test_parse_latest_has_remaining_work_for_pending_or_failed_pages(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_id = client.post("/api/exams", json={"name": "Latest Parse Metadata"}).json()["id"]
+        client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key1.png", _tiny_png_bytes(), "image/png")), ("files", ("key2.png", _tiny_png_bytes(), "image/png"))],
+        )
+        client.post(f"/api/exams/{exam_id}/key/build-pages")
+        started = client.post(f"/api/exams/{exam_id}/key/parse/start")
+        job_id = started.json()["job_id"]
+
+        with Session(db.engine) as session:
+            page_two = session.exec(
+                select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job_id, ExamKeyParsePage.page_number == 2)
+            ).first()
+            assert page_two is not None
+            page_two.status = "failed"
+            session.add(page_two)
+            session.commit()
+
+        latest = client.get(f"/api/exams/{exam_id}/key/parse/latest")
+        assert latest.status_code == 200
+        payload = latest.json()["job"]
+        assert payload["has_remaining_work"] is True
+        assert payload["failed_pages"] == [2]
+        assert 1 in payload["pending_pages"]
+
+
+def test_retry_parse_page_does_not_create_new_job(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_id = client.post("/api/exams", json={"name": "Retry Same Job"}).json()["id"]
+        client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key1.png", _tiny_png_bytes(), "image/png")), ("files", ("key2.png", _tiny_png_bytes(), "image/png"))],
+        )
+        client.post(f"/api/exams/{exam_id}/key/build-pages")
+        started = client.post(f"/api/exams/{exam_id}/key/parse/start")
+        job_id = started.json()["job_id"]
+
+        with Session(db.engine) as session:
+            parse_page = session.exec(
+                select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job_id, ExamKeyParsePage.page_number == 1)
+            ).first()
+            assert parse_page is not None
+            parse_page.status = "failed"
+            session.add(parse_page)
+            session.commit()
+
+        retry = client.post(f"/api/exams/{exam_id}/key/parse/retry", params={"job_id": job_id, "page_number": 1})
+        assert retry.status_code == 200
+        latest = client.get(f"/api/exams/{exam_id}/key/parse/latest")
+        assert latest.status_code == 200
+        assert latest.json()["job"]["job_id"] == job_id
