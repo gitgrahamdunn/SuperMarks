@@ -1067,3 +1067,72 @@ def test_list_questions_orders_by_parse_order_then_source_page(tmp_path) -> None
         labels = [item["label"] for item in listed.json()]
         assert labels == ["Q-early", "Q-late", "Q-no-parse-order"]
 
+
+def test_list_key_pages_reports_exists_on_disk(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Metadata Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        build = client.post(f"/api/exams/{exam_id}/key/build-pages")
+        assert build.status_code == 200
+
+        pages = client.get(f"/api/exams/{exam_id}/key/pages")
+        assert pages.status_code == 200
+        payload = pages.json()
+        assert len(payload) == 1
+        assert payload[0]["page_number"] == 1
+        assert payload[0]["exists_on_disk"] is True
+        assert payload[0]["image_path"]
+
+
+def test_key_page_image_route_returns_debug_detail_when_file_missing(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Missing Image Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        build = client.post(f"/api/exams/{exam_id}/key/build-pages")
+        assert build.status_code == 200
+
+        rows = build.json()
+        image_path = Path(settings.data_dir) / rows[0]["image_path"]
+        image_path.unlink()
+
+        missing_image = client.get(f"/api/exams/{exam_id}/key/page/1")
+        assert missing_image.status_code == 404
+        detail = missing_image.json()["detail"]
+        assert detail["message"] == "Key page image missing"
+        assert detail["exam_id"] == exam_id
+        assert detail["page_number"] == 1
+        assert detail["image_path"].endswith("page_0001.png")
+
+        missing_row = client.get(f"/api/exams/{exam_id}/key/page/2")
+        assert missing_row.status_code == 404
+        assert missing_row.json()["detail"] == "Key page not found"
