@@ -106,19 +106,19 @@ export function ExamReviewPage() {
 
   const currentQuestion = questions[currentIndex];
   const derivedPageNumber = getCurrentPageNumber(currentQuestion);
-  const currentPageNumber = manualPageNumber ?? derivedPageNumber;
+  const currentKeyPageNumber = manualPageNumber ?? derivedPageNumber;
   const overlayEvidence = useMemo(
-    () => currentQuestion?.evidence?.filter((box) => Number(box.page_number || 1) === currentPageNumber) ?? [],
-    [currentQuestion, currentPageNumber],
+    () => currentQuestion?.evidence?.filter((box) => Number(box.page_number || 1) === currentKeyPageNumber) ?? [],
+    [currentQuestion, currentKeyPageNumber],
   );
-  const overlayCountOnPage = overlayEvidence.length;
+  const regionCountOnPage = overlayEvidence.length;
   const activeQuestionIdForVersion = currentQuestion?.id || currentIndex;
-  const keyVisualUrl = `${api.getQuestionKeyVisualUrl(examId, currentQuestion?.id || 0)}?v=${examId}-${currentPageNumber}-${activeQuestionIdForVersion}`;
+  const keyVisualUrl = `${api.getExamKeyPageUrl(examId, currentKeyPageNumber)}?v=${examId}-${currentKeyPageNumber}-${activeQuestionIdForVersion}`;
   const keyPageUrlFromRubric = currentQuestion?.rubric_json?.key_page_url || currentQuestion?.rubric_json?.key_page_image_url;
   const questionLabelText = formatQuestionLabel(currentQuestion?.label);
   const fallbackKeyPageUrl = typeof keyPageUrlFromRubric === 'string' && keyPageUrlFromRubric.trim().length > 0
     ? keyPageUrlFromRubric
-    : api.getExamKeyPageUrl(examId, currentPageNumber);
+    : api.getExamKeyPageUrl(examId, currentKeyPageNumber);
 
   const updateCurrentQuestion = (updater: (question: EditableQuestion) => EditableQuestion) => {
     setQuestions((prev) => prev.map((question, index) => (index === currentIndex ? updater(question) : question)));
@@ -275,21 +275,22 @@ export function ExamReviewPage() {
       <div className="stack" style={{ border: '1px solid #d1d5db', borderRadius: 10, padding: 10, background: '#f8fafc' }}>
         <p style={{ fontWeight: 600, margin: 0 }}>
           {questionLabelText
-            ? `Question ${questionLabelText} · page ${currentPageNumber}`
-            : `Reviewing page ${currentPageNumber}`}
+            ? `Question ${questionLabelText} · page ${currentKeyPageNumber}`
+            : `Reviewing key page ${currentKeyPageNumber}`}
         </p>
+        <p className="subtle-text" style={{ margin: 0 }}>Reviewing key page {currentKeyPageNumber}</p>
 
         <div className="actions-row" style={{ marginTop: 4 }}>
           <button
             type="button"
-            onClick={() => setCurrentQuestionPage(currentPageNumber - 1)}
-            disabled={currentPageNumber <= 1}
+            onClick={() => setCurrentQuestionPage(currentKeyPageNumber - 1)}
+            disabled={currentKeyPageNumber <= 1}
           >
             Prev page
           </button>
           <button
             type="button"
-            onClick={() => setCurrentQuestionPage(currentPageNumber + 1)}
+            onClick={() => setCurrentQuestionPage(currentKeyPageNumber + 1)}
           >
             Next page
           </button>
@@ -299,7 +300,7 @@ export function ExamReviewPage() {
             Key page preview not available for this question (PDF/image not rendered).
           </div>
         )}
-        {imageLoaded && !previewError && overlayCountOnPage === 0 && (
+        {imageLoaded && !previewError && regionCountOnPage === 0 && (
           <div style={{ background: '#e0f2fe', border: '1px solid #38bdf8', color: '#0c4a6e', borderRadius: 8, padding: 10 }}>
             No overlay evidence was produced for this page. You can still review the rubric below.
           </div>
@@ -307,11 +308,11 @@ export function ExamReviewPage() {
 
         {!previewError ? (
           <EvidenceOverlayCanvas
-            imageKey={currentPageNumber}
+            imageKey={currentKeyPageNumber}
             imageUrl={keyVisualUrl}
             evidence={overlayEvidence}
-            visible={showOverlay && overlayCountOnPage > 0}
-            pageNumber={currentPageNumber}
+            visible={showOverlay && regionCountOnPage > 0}
+            pageNumber={currentKeyPageNumber}
             onImageError={() => {
               setPreviewError(true);
               setImageLoaded(false);
@@ -329,13 +330,13 @@ export function ExamReviewPage() {
           </div>
         )}
 
-        {overlayCountOnPage > 0 && !previewError && (
+        {regionCountOnPage > 0 && !previewError && (
           <label>
             <input type="checkbox" checked={showOverlay} onChange={(e) => setShowOverlay(e.target.checked)} /> Show overlays
           </label>
         )}
         <p className="subtle-text" style={{ margin: 0 }}>
-          Overlay diagnostics: currentQuestionIndex: {currentIndex} | currentPageNumber: {currentPageNumber} | overlayCountOnPage: {overlayCountOnPage} | manualPage: {manualPageNumber ?? 'auto'} | imageLoaded: {String(imageLoaded && !previewError)}
+          Overlay diagnostics: currentQuestionId: {currentQuestion.id} | currentKeyPageNumber: {currentKeyPageNumber} | regionCountOnPage: {regionCountOnPage} | manualPage: {manualPageNumber ?? 'auto'} | imageLoaded: {String(imageLoaded && !previewError)}
         </p>
       </div>
 
@@ -538,14 +539,25 @@ function getCurrentPageNumber(question: EditableQuestion | undefined): number {
 
   const rubric = question.rubric_json as Record<string, unknown> | undefined;
   const evidence = Array.isArray(question.evidence) ? question.evidence : [];
-  const firstEvidencePage = evidence.length > 0 ? Number(evidence[0]?.page_number || 0) : 0;
-  const questionLevelPage = Number(rubric?.page_number || rubric?.key_page_number || 0);
+  const firstEvidencePage = evidence
+    .map((item) => Number(item?.page_number || 0))
+    .find((pageNumber) => Number.isFinite(pageNumber) && pageNumber > 0) || 0;
+  const keyPageNumber = Number(rubric?.key_page_number || 0);
+  const sourcePageNumber = Number(rubric?.source_page_number || 0);
 
   if (firstEvidencePage > 0) {
     return Math.max(1, Math.floor(firstEvidencePage));
   }
 
-  return Math.max(1, Number.isFinite(questionLevelPage) ? Math.floor(questionLevelPage) : 1);
+  if (Number.isFinite(keyPageNumber) && keyPageNumber > 0) {
+    return Math.max(1, Math.floor(keyPageNumber));
+  }
+
+  if (Number.isFinite(sourcePageNumber) && sourcePageNumber > 0) {
+    return Math.max(1, Math.floor(sourcePageNumber));
+  }
+
+  return 1;
 }
 
 function formatQuestionLabel(label: string | undefined): ReactNode | null {

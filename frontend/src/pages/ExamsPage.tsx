@@ -137,6 +137,23 @@ const isAbortError = (error: unknown) => {
 
 const PARSE_BATCH_SIZE = 3;
 
+const hasMeaningfulTotals = (totals: RunningTotals | null | undefined): totals is RunningTotals => Boolean(
+  totals
+  && (totals.cost_total > 0 || totals.input_tokens_total > 0 || totals.output_tokens_total > 0),
+);
+
+const pickPreferredTotals = (
+  previous: RunningTotals | null,
+  incoming: RunningTotals | null | undefined,
+): RunningTotals | null => {
+  if (!incoming) return previous;
+  if (!previous) return incoming;
+  if (hasMeaningfulTotals(incoming)) return incoming;
+  if (hasMeaningfulTotals(previous) && !hasMeaningfulTotals(incoming)) return previous;
+  return incoming;
+};
+
+
 export function ExamsPage() {
   const [exams, setExams] = useState<ExamRead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -239,7 +256,7 @@ export function ExamsPage() {
       setFailedPage(failedInBatch[0]);
     }
     setParseJobStatus(next.status === 'running' ? 'running' : next.status);
-    if (next.totals) setRunningTotals(next.totals);
+    setRunningTotals((prev) => pickPreferredTotals(prev, next.totals));
     const pct = Math.min(98, 50 + Math.round((next.pages_done / Math.max(1, next.page_count)) * 45));
     setParseProgress(pct);
     return processed;
@@ -648,9 +665,10 @@ export function ExamsPage() {
       }
 
       const status = await api.getExamKeyParseStatus(activeExamId, started.job_id, requestOptions);
-      if (status.totals) setRunningTotals(status.totals);
+      setRunningTotals((prev) => pickPreferredTotals(prev, status.totals));
       setParseJobStatus(status.status === 'running' ? 'running' : status.status);
       const finished = await api.finishExamKeyParse(activeExamId, started.job_id, requestOptions);
+      setRunningTotals((prev) => pickPreferredTotals(prev, finished.totals));
       logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${activeExamId}/key/parse/finish?job_id=${started.job_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
 
       markChecklist('reading_questions', 'done');
@@ -834,8 +852,9 @@ export function ExamsPage() {
         }
 
         const status = await api.getExamKeyParseStatus(activeExamId, activeJobId, requestOptions);
-        if (status.totals) setRunningTotals(status.totals);
+        setRunningTotals((prev) => pickPreferredTotals(prev, status.totals));
         const finished = await api.finishExamKeyParse(activeExamId, activeJobId, requestOptions);
+        setRunningTotals((prev) => pickPreferredTotals(prev, finished.totals));
         logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${activeExamId}/key/parse/finish?job_id=${activeJobId}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
 
         markChecklist('reading_questions', 'done');
