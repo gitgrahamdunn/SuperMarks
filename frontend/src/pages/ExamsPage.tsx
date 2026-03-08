@@ -214,6 +214,9 @@ export function ExamsPage() {
     ? `${api.getExamKeyPageUrl(currentExamId, currentParsePageForDisplay)}?v=${currentExamId}-${currentParsePageForDisplay}-${pagesDone}`
     : '';
   const parseStartUrl = currentExamId ? buildApiUrl(`exams/${currentExamId}/key/parse/start`) : 'n/a';
+  const parseHasFailedPages = lastFailedPages.length > 0 || failedPage !== null;
+  const parseIsDone = step === 'done' || parseJobStatus === 'done';
+  const canReviewCriteria = Boolean(currentExamId && parseIsDone && (parsedQuestionCount || liveParsedQuestions.length) > 0);
 
   const applyParseBatchResult = (next: ParseNextResponse) => {
     setParsePageIndex(next.pages_done);
@@ -489,10 +492,10 @@ export function ExamsPage() {
         status.pages.forEach((page) => markPageStatus(page.page_number, toParsePageUiStatus(page.status)));
       }
       if (status.status === 'done') {
-        setIsModalOpen(false);
-        resetWizardState();
-        await loadExams();
-        navigate(`/exams/${examId}/review`);
+        const latestQuestions = await syncLiveQuestions(examId);
+        setParsedQuestionCount(latestQuestions.total);
+        setParseProgress(100);
+        updateCurrentStep('done');
       }
     } catch (error) {
       if (isExamUnavailableError(error)) {
@@ -523,10 +526,10 @@ export function ExamsPage() {
       const status = await api.getExamKeyParseStatus(examId, jobId);
       setParseJobStatus(status.status === 'running' ? 'running' : status.status);
       if (status.status === 'done') {
-        setIsModalOpen(false);
-        resetWizardState();
-        await loadExams();
-        navigate(`/exams/${examId}/review`);
+        const latestQuestions = await syncLiveQuestions(examId);
+        setParsedQuestionCount(latestQuestions.total);
+        setParseProgress(100);
+        updateCurrentStep('done');
       }
     } catch (error) {
       if (isExamUnavailableError(error)) {
@@ -660,10 +663,8 @@ export function ExamsPage() {
       updateCurrentStep('done');
       localStorage.setItem(`supermarks:lastParse:${activeExamId}`, JSON.stringify(finished));
 
-      setIsModalOpen(false);
-      resetWizardState();
       await loadExams();
-      navigate(`/exams/${activeExamId}/review`);
+      showSuccess('This exam is saved. You can safely leave and come back later.');
     } catch (err) {
       const stepName = currentStepRef.current;
       const stepEndpoint = endpointForStep(stepName, examId);
@@ -1168,6 +1169,12 @@ export function ExamsPage() {
             {step === 'parsing' && emptyPageNotes.map((page) => (
               <p key={page} className="subtle-text">No questions detected on page {page}</p>
             ))}
+            {currentExamId && (step === 'parsing' || parseIsDone) && (
+              <p className="subtle-text">This exam is saved. You can safely leave and come back later.</p>
+            )}
+            {isRunning && step === 'parsing' && (
+              <p className="subtle-text">You can safely close this and return later from the exam page.</p>
+            )}
             {failedPage && <p className="warning-text">Page {failedPage} failed — retry?</p>}
             {failedPage && (
               <button type="button" className="btn btn-secondary" onClick={() => void retryFailedParsePage()}>
@@ -1221,9 +1228,30 @@ export function ExamsPage() {
             </details>
 
             <div className="actions-row">
-              <button type="submit" className="btn btn-primary" disabled={isRunning || (totalTooLarge && !allowLargeUpload)}>
-                {isRunning ? 'Working...' : 'Enter exam & parse'}
-              </button>
+              {!parseIsDone && (
+                <button type="submit" className="btn btn-primary" disabled={isRunning || (totalTooLarge && !allowLargeUpload)}>
+                  {isRunning ? 'Working...' : 'Enter exam & parse'}
+                </button>
+              )}
+              {currentExamId && (step === 'parsing' || parseIsDone) && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => navigate(`/exams/${currentExamId}`)}
+                >
+                  Open Exam
+                </button>
+              )}
+              {parseHasFailedPages && parseJobId && currentExamId && (
+                <button type="button" className="btn btn-secondary" onClick={() => void retryFailedParsePage()} disabled={isRunning}>
+                  Retry failed pages
+                </button>
+              )}
+              {canReviewCriteria && currentExamId && (
+                <button type="button" className="btn btn-secondary" onClick={() => navigate(`/exams/${currentExamId}/review`)}>
+                  Review Criteria
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-secondary"
