@@ -28,6 +28,8 @@ uvicorn app.main:app --reload --port 8000
 
 ## Vercel deployment
 
+Dependency source: Vercel installs Python dependencies from `pyproject.toml` for this backend project root; keep `requirements.txt` aligned only if used for local/manual installs.
+
 Create a Vercel project with Root Directory set to `backend`.
 
 - Entrypoint: `api/index.py`
