@@ -79,4 +79,26 @@ def test_database_url_uses_database_url_when_present(monkeypatch) -> None:
 
     settings = Settings()
 
-    assert settings.effective_database_url == "postgresql://user:secret@localhost:5432/supermarks"
+    assert settings.effective_database_url == "postgresql+psycopg://user:secret@localhost:5432/supermarks"
+
+
+def test_database_url_normalizes_postgres_scheme(monkeypatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgres://user:secret@localhost:5432/supermarks")
+
+    settings = Settings()
+
+    assert settings.effective_database_url == "postgresql+psycopg://user:secret@localhost:5432/supermarks"
+
+
+def test_database_url_normalizes_postgresql_scheme_and_preserves_query(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://user:secret@localhost:5432/supermarks?sslmode=require&connect_timeout=10",
+    )
+
+    settings = Settings()
+
+    assert (
+        settings.effective_database_url
+        == "postgresql+psycopg://user:secret@localhost:5432/supermarks?sslmode=require&connect_timeout=10"
+    )
