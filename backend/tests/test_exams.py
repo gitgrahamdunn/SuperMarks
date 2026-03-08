@@ -105,6 +105,13 @@ def test_parse_answer_key_builds_pages_from_uploaded_images(tmp_path, monkeypatc
         assert key_pages[0].page_number == 1
         assert Path(key_pages[0].image_path).exists()
         assert len(questions) == 2
+        for question in questions:
+            rubric = json.loads(question.rubric_json)
+            assert rubric["source_page_number"] == 1
+            assert rubric["key_page_number"] == 1
+            assert isinstance(rubric.get("original_label"), str)
+            assert int(rubric["parse_order"]) > 0
+
 
 
 def test_upload_exam_key_files_stores_file_and_db_row(tmp_path, monkeypatch) -> None:
@@ -1011,3 +1018,52 @@ def test_parse_finish_returns_recomputed_totals(tmp_path, monkeypatch) -> None:
         assert payload["totals"]["cost_total"] == pytest.approx(0.006)
         assert payload["totals"]["input_tokens_total"] == 200
         assert payload["totals"]["output_tokens_total"] == 80
+
+
+def test_list_questions_orders_by_parse_order_then_source_page(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Order Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        q1 = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={
+                "label": "Q-late",
+                "max_marks": 1,
+                "rubric_json": {"source_page_number": 3, "parse_order": 3002, "criteria": []},
+            },
+        )
+        q2 = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={
+                "label": "Q-early",
+                "max_marks": 1,
+                "rubric_json": {"source_page_number": 1, "parse_order": 1001, "criteria": []},
+            },
+        )
+        q3 = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={
+                "label": "Q-no-parse-order",
+                "max_marks": 1,
+                "rubric_json": {"source_page_number": 2, "criteria": []},
+            },
+        )
+
+        assert q1.status_code == 201
+        assert q2.status_code == 201
+        assert q3.status_code == 201
+
+        listed = client.get(f"/api/exams/{exam_id}/questions")
+        assert listed.status_code == 200
+
+        labels = [item["label"] for item in listed.json()]
+        assert labels == ["Q-early", "Q-late", "Q-no-parse-order"]
+

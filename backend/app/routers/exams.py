@@ -927,6 +927,16 @@ def list_questions(exam_id: int, session: Session = Depends(get_session), job_id
         _get_job_for_exam_or_error(exam_id, job_id, session)
 
     questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
+
+    def _question_sort_key(question: Question) -> tuple[int, int, int]:
+        rubric = json.loads(question.rubric_json)
+        parse_order = int(rubric.get("parse_order") or 0)
+        source_page_number = int(rubric.get("source_page_number") or rubric.get("key_page_number") or 0)
+        if parse_order > 0:
+            return (0, parse_order, question.id)
+        return (1, source_page_number, question.id)
+
+    questions = sorted(questions, key=_question_sort_key)
     result: list[QuestionRead] = []
     for q in questions:
         regions = session.exec(select(QuestionRegion).where(QuestionRegion.question_id == q.id)).all()
@@ -1098,7 +1108,7 @@ def _upsert_questions_for_page(exam_id: int, page_number: int, questions_payload
     existing_labels = set(existing.keys())
     stored: list[dict[str, Any]] = []
 
-    for parsed in questions_payload:
+    for local_index, parsed in enumerate(questions_payload, start=1):
         raw_label = str(parsed.get("label") or "Q?")
         label, relabeled = _ensure_unique_label(existing_labels, raw_label, page_number)
         existing_labels.add(label)
@@ -1123,7 +1133,9 @@ def _upsert_questions_for_page(exam_id: int, page_number: int, questions_payload
             "marks_reason": parsed.get("marks_reason", ""),
             "evidence": evidence_list,
             "needs_review": relabeled or bool(parsed.get("needs_review", False)),
+            "parse_order": (1000 * page_number) + local_index,
             "source_page_number": page_number,
+            "key_page_number": page_number,
             "original_label": raw_label,
         }
 
@@ -1146,10 +1158,18 @@ def _upsert_questions_for_page(exam_id: int, page_number: int, questions_payload
             kind = str(e.get("kind") or "question_box")
             if kind not in {"question_box", "answer_box", "marks_box"}:
                 continue
+            evidence_page_number = e.get("page_number")
+            try:
+                resolved_page_number = int(evidence_page_number)
+            except (TypeError, ValueError):
+                resolved_page_number = page_number
+            if resolved_page_number <= 0:
+                resolved_page_number = page_number
+
             session.add(QuestionParseEvidence(
                 question_id=question.id,
                 exam_id=exam_id,
-                page_number=int(e.get("page_number") or page_number),
+                page_number=resolved_page_number,
                 x=float(e.get("x") or 0),
                 y=float(e.get("y") or 0),
                 w=float(e.get("w") or 0.1),

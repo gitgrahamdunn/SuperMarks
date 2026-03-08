@@ -63,7 +63,7 @@ export function ExamReviewPage() {
           || paths.has('/api/exams/{exam_id}/wizard/questions/{question_id}');
         setSaveAvailable(patchAvailable);
 
-        const mapped = fetchedQuestions.map(mapQuestion);
+        const mapped = fetchedQuestions.map(mapQuestion).sort(compareQuestionsForReview);
         setQuestions(mapped);
         showSuccess(`Loaded ${mapped.length} questions for review.`);
       } catch (error) {
@@ -108,7 +108,7 @@ export function ExamReviewPage() {
   const derivedPageNumber = getCurrentPageNumber(currentQuestion);
   const currentKeyPageNumber = manualPageNumber ?? derivedPageNumber;
   const overlayEvidence = useMemo(
-    () => currentQuestion?.evidence?.filter((box) => Number(box.page_number || 1) === currentKeyPageNumber) ?? [],
+    () => currentQuestion?.evidence?.filter((box) => Number(box.page_number || 0) === currentKeyPageNumber) ?? [],
     [currentQuestion, currentKeyPageNumber],
   );
   const regionCountOnPage = overlayEvidence.length;
@@ -297,7 +297,7 @@ export function ExamReviewPage() {
         </div>
         {previewError && (
           <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', color: '#78350f', borderRadius: 8, padding: 10 }}>
-            Key page preview not available for this question (PDF/image not rendered).
+            No key page image found for page {currentKeyPageNumber}
           </div>
         )}
         {imageLoaded && !previewError && regionCountOnPage === 0 && (
@@ -337,6 +337,9 @@ export function ExamReviewPage() {
         )}
         <p className="subtle-text" style={{ margin: 0 }}>
           Overlay diagnostics: currentQuestionId: {currentQuestion.id} | currentKeyPageNumber: {currentKeyPageNumber} | regionCountOnPage: {regionCountOnPage} | manualPage: {manualPageNumber ?? 'auto'} | imageLoaded: {String(imageLoaded && !previewError)}
+        </p>
+        <p className="subtle-text" style={{ margin: 0, fontSize: '0.8rem' }}>
+          Debug metadata → label: {currentQuestion.label} | original_label: {String(currentQuestion.rubric_json?.original_label || '—')} | source_page_number: {String(currentQuestion.rubric_json?.source_page_number || '—')} | key_page_number: {String(currentQuestion.rubric_json?.key_page_number || '—')} | region count: {currentQuestion.evidence.length}
         </p>
       </div>
 
@@ -534,6 +537,31 @@ function getMarksSuggestion(question: EditableQuestion): { value: number; confid
   return { value: guess, confidence: 0.3, source: 'unknown' };
 }
 
+function compareQuestionsForReview(a: EditableQuestion, b: EditableQuestion): number {
+  const aRubric = a.rubric_json as Record<string, unknown> | undefined;
+  const bRubric = b.rubric_json as Record<string, unknown> | undefined;
+  const aParseOrder = Number(aRubric?.parse_order || 0);
+  const bParseOrder = Number(bRubric?.parse_order || 0);
+
+  const aHasParseOrder = Number.isFinite(aParseOrder) && aParseOrder > 0;
+  const bHasParseOrder = Number.isFinite(bParseOrder) && bParseOrder > 0;
+
+  if (aHasParseOrder && bHasParseOrder && aParseOrder !== bParseOrder) {
+    return aParseOrder - bParseOrder;
+  }
+  if (aHasParseOrder !== bHasParseOrder) {
+    return aHasParseOrder ? -1 : 1;
+  }
+
+  const aSourcePage = Number(aRubric?.source_page_number || aRubric?.key_page_number || 0);
+  const bSourcePage = Number(bRubric?.source_page_number || bRubric?.key_page_number || 0);
+  if (aSourcePage !== bSourcePage) {
+    return aSourcePage - bSourcePage;
+  }
+
+  return a.id - b.id;
+}
+
 function getCurrentPageNumber(question: EditableQuestion | undefined): number {
   if (!question) return 1;
 
@@ -549,12 +577,12 @@ function getCurrentPageNumber(question: EditableQuestion | undefined): number {
     return Math.max(1, Math.floor(firstEvidencePage));
   }
 
-  if (Number.isFinite(keyPageNumber) && keyPageNumber > 0) {
-    return Math.max(1, Math.floor(keyPageNumber));
-  }
-
   if (Number.isFinite(sourcePageNumber) && sourcePageNumber > 0) {
     return Math.max(1, Math.floor(sourcePageNumber));
+  }
+
+  if (Number.isFinite(keyPageNumber) && keyPageNumber > 0) {
+    return Math.max(1, Math.floor(keyPageNumber));
   }
 
   return 1;
