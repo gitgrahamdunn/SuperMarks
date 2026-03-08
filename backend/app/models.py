@@ -119,6 +119,8 @@ class ExamKeyPage(SQLModel, table=True):
     exam_id: int = Field(foreign_key="exam.id", index=True)
     page_number: int
     image_path: str
+    blob_pathname: Optional[str] = None
+    blob_url: Optional[str] = None
     width: int
     height: int
     created_at: datetime = Field(default_factory=utcnow)

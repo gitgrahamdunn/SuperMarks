@@ -828,6 +828,10 @@ def test_parse_next_concurrent_isolated_and_recomputes_totals(tmp_path, monkeypa
         ).first()
         assert page_two is not None
         Path(page_two.image_path).unlink()
+        page_two.blob_pathname = None
+        page_two.blob_url = None
+        session.add(page_two)
+        session.commit()
 
     with TestClient(app) as client:
         next_result = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"job_id": job_id, "batch_size": 3})
@@ -1096,6 +1100,8 @@ def test_list_key_pages_reports_exists_on_disk(tmp_path, monkeypatch) -> None:
         assert len(payload) == 1
         assert payload[0]["page_number"] == 1
         assert payload[0]["exists_on_disk"] is True
+        assert payload[0]["exists_on_storage"] is True
+        assert payload[0]["blob_pathname"].startswith(f"exams/{exam_id}/key-pages/")
         assert payload[0]["image_path"]
 
 
@@ -1125,6 +1131,14 @@ def test_key_page_image_route_returns_debug_detail_when_file_missing(tmp_path, m
         image_path = Path(settings.data_dir) / rows[0]["image_path"]
         image_path.unlink()
 
+        with Session(db.engine) as session:
+            row = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id, ExamKeyPage.page_number == 1)).first()
+            assert row is not None
+            row.blob_pathname = None
+            row.blob_url = None
+            session.add(row)
+            session.commit()
+
         missing_image = client.get(f"/api/exams/{exam_id}/key/page/1")
         assert missing_image.status_code == 404
         detail = missing_image.json()["detail"]
@@ -1132,6 +1146,8 @@ def test_key_page_image_route_returns_debug_detail_when_file_missing(tmp_path, m
         assert detail["exam_id"] == exam_id
         assert detail["page_number"] == 1
         assert detail["image_path"].endswith("page_0001.png")
+        assert detail["blob_pathname"] is None
+        assert detail["local_file_exists"] is False
 
         missing_row = client.get(f"/api/exams/{exam_id}/key/page/2")
         assert missing_row.status_code == 404

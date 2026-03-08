@@ -97,7 +97,10 @@ export interface ExamKeyPage {
   exam_id: number;
   page_number: number;
   image_path: string;
+  blob_pathname?: string | null;
+  blob_url?: string | null;
   exists_on_disk: boolean;
+  exists_on_storage: boolean;
   width: number;
   height: number;
 }

@@ -18,11 +18,10 @@ import httpx
 from PIL import Image, ImageOps
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlmodel import Session, delete, select
 
-from app.blob_service import create_signed_blob_url, normalize_blob_path
-from app.blob_service import BlobDownloadError
+from app.blob_service import BlobDownloadError, create_signed_blob_url, download_blob_bytes, normalize_blob_path
 from app.ai.openai_vision import (
     AnswerKeyParser,
     BulkNameDetectionResult,
@@ -83,6 +82,9 @@ def _exam_key_pages_dir(exam_id: int) -> Path:
 
 def _load_key_page_images(exam_id: int, session: Session) -> list[Path]:
     rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
+    if rows and all((row.blob_pathname or "").strip() for row in rows):
+        return [Path(f"blob://{row.blob_pathname}") for row in rows]
+
     paths = [Path(row.image_path) for row in rows if Path(row.image_path).exists()]
     if paths:
         return paths
@@ -91,6 +93,14 @@ def _load_key_page_images(exam_id: int, session: Session) -> list[Path]:
     if not legacy_dir.exists() or not legacy_dir.is_dir():
         return []
     return [path for path in sorted(legacy_dir.iterdir()) if path.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+
+
+def _upload_key_page_png(exam_id: int, page_number: int, png_path: Path) -> tuple[str, str]:
+    pathname = f"exams/{exam_id}/key-pages/page_{page_number:04d}.png"
+    upload = upload_bytes(pathname=pathname, data=png_path.read_bytes(), content_type="image/png")
+    blob_pathname = normalize_blob_path(str(upload.get("pathname") or pathname))
+    blob_url = str(upload.get("url") or "") or blob_pathname
+    return blob_pathname, blob_url
 
 
 
@@ -187,7 +197,19 @@ def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
                 out_path = output_dir / f"page_{page_num:04d}.png"
                 stage = "write_pages"
                 width, height = _normalize_to_png(source_path, out_path)
-                session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(out_path), width=width, height=height))
+                stage = "upload_blob"
+                blob_pathname, blob_url = _upload_key_page_png(exam_id=exam_id, page_number=page_num, png_path=out_path)
+                session.add(
+                    ExamKeyPage(
+                        exam_id=exam_id,
+                        page_number=page_num,
+                        image_path=str(out_path),
+                        blob_pathname=blob_pathname,
+                        blob_url=blob_url,
+                        width=width,
+                        height=height,
+                    )
+                )
                 created_paths.append(out_path)
                 page_num += 1
                 continue
@@ -209,7 +231,19 @@ def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
                 for rendered in rendered_paths:
                     stage = "write_pages"
                     width, height = _normalize_to_png(rendered, rendered)
-                    session.add(ExamKeyPage(exam_id=exam_id, page_number=page_num, image_path=str(rendered), width=width, height=height))
+                    stage = "upload_blob"
+                    blob_pathname, blob_url = _upload_key_page_png(exam_id=exam_id, page_number=page_num, png_path=rendered)
+                    session.add(
+                        ExamKeyPage(
+                            exam_id=exam_id,
+                            page_number=page_num,
+                            image_path=str(rendered),
+                            blob_pathname=blob_pathname,
+                            blob_url=blob_url,
+                            width=width,
+                            height=height,
+                        )
+                    )
                     created_paths.append(rendered)
                     page_num += 1
 
@@ -867,7 +901,10 @@ def build_exam_key_pages(exam_id: int, session: Session = Depends(get_session)) 
                 exam_id=r.exam_id,
                 page_number=r.page_number,
                 image_path=relative_to_data(Path(r.image_path)),
+                blob_pathname=r.blob_pathname,
+                blob_url=r.blob_url,
                 exists_on_disk=Path(r.image_path).exists(),
+                exists_on_storage=bool((r.blob_pathname or "").strip()),
                 width=r.width,
                 height=r.height,
             )
@@ -900,7 +937,10 @@ def list_exam_key_pages(exam_id: int, session: Session = Depends(get_session)) -
                 exam_id=r.exam_id,
                 page_number=r.page_number,
                 image_path=relative_to_data(Path(r.image_path)),
+                blob_pathname=r.blob_pathname,
+                blob_url=r.blob_url,
                 exists_on_disk=Path(r.image_path).exists(),
+                exists_on_storage=bool((r.blob_pathname or "").strip()),
                 width=r.width,
                 height=r.height,
             )
@@ -1009,11 +1049,19 @@ def update_question(
     )
 
 
-def _resolve_key_page_or_404(
-    exam_id: int,
-    page_number: int,
-    session: Session = Depends(get_session),
-) -> tuple[Path, str]:
+def _key_page_missing_detail(exam_id: int, page: ExamKeyPage, requested_page_number: int) -> dict[str, Any]:
+    image_path = Path(page.image_path)
+    return {
+        "message": "Key page image missing",
+        "exam_id": exam_id,
+        "page_number": requested_page_number,
+        "blob_pathname": page.blob_pathname,
+        "image_path": str(image_path),
+        "local_file_exists": image_path.exists(),
+    }
+
+
+def _read_key_page_bytes_or_404(exam_id: int, page_number: int, session: Session) -> tuple[bytes, str]:
     exam = session.get(Exam, exam_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
@@ -1024,23 +1072,21 @@ def _resolve_key_page_or_404(
     if not page:
         raise HTTPException(status_code=404, detail="Key page not found")
 
-    image_path = Path(page.image_path)
-    if not image_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "message": "Key page image missing",
-                "exam_id": exam_id,
-                "page_number": page_number,
-                "image_path": str(image_path),
-            },
-        )
+    if (page.blob_pathname or "").strip():
+        try:
+            data, content_type = _run_async(download_blob_bytes(page.blob_pathname))
+            return data, content_type or "image/png"
+        except BlobDownloadError:
+            pass
 
-    media_type = "image/png"
-    suffix = image_path.suffix.lower()
-    if suffix in {".jpg", ".jpeg"}:
-        media_type = "image/jpeg"
-    return image_path, media_type
+    image_path = Path(page.image_path)
+    if image_path.exists():
+        media_type = "image/png"
+        if image_path.suffix.lower() in {".jpg", ".jpeg"}:
+            media_type = "image/jpeg"
+        return image_path.read_bytes(), media_type
+
+    raise HTTPException(status_code=404, detail=_key_page_missing_detail(exam_id=exam_id, page=page, requested_page_number=page_number))
 
 
 @public_router.get("/{exam_id}/key/page/{page_number}")
@@ -1048,9 +1094,9 @@ def get_key_page_image(
     exam_id: int,
     page_number: int,
     session: Session = Depends(get_session),
-) -> FileResponse:
-    image_path, media_type = _resolve_key_page_or_404(exam_id=exam_id, page_number=page_number, session=session)
-    return FileResponse(path=image_path, media_type=media_type)
+) -> Response:
+    content, media_type = _read_key_page_bytes_or_404(exam_id=exam_id, page_number=page_number, session=session)
+    return Response(content=content, media_type=media_type)
 
 
 @public_router.get("/{exam_id}/questions/{question_id}/key-visual")
@@ -1058,7 +1104,7 @@ def get_question_key_visual(
     exam_id: int,
     question_id: int,
     session: Session = Depends(get_session),
-) -> FileResponse:
+) -> Response:
     question = _get_exam_question_or_404(exam_id, question_id, session)
     rubric = json.loads(question.rubric_json)
     page_number = int(rubric.get("key_page_number") or 1)
@@ -1073,22 +1119,8 @@ def get_question_key_visual(
     if not page:
         raise HTTPException(status_code=404, detail="Key page not found")
 
-    image_path = Path(page.image_path)
-    if not image_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "message": "Key page image missing",
-                "exam_id": exam_id,
-                "page_number": page_number,
-                "image_path": str(image_path),
-            },
-        )
-
-    media_type = "image/png"
-    if image_path.suffix.lower() in {".jpg", ".jpeg"}:
-        media_type = "image/jpeg"
-    return FileResponse(path=image_path, media_type=media_type)
+    content, media_type = _read_key_page_bytes_or_404(exam_id=exam_id, page_number=page.page_number, session=session)
+    return Response(content=content, media_type=media_type)
 
 
 def _extract_usage(result: ParseResult) -> tuple[int, int, float]:
@@ -1317,6 +1349,14 @@ def _process_single_parse_page_task(
 
         nano_model, mini_model = _resolve_models()
         page_path = Path(key_page.image_path)
+        if not page_path.exists() and (key_page.blob_pathname or "").strip():
+            try:
+                content, _content_type = _run_async(download_blob_bytes(key_page.blob_pathname))
+                page_path = ensure_dir(settings.data_path / "cache" / "key-pages" / str(exam_id)) / f"page_{page_number:04d}.png"
+                page_path.write_bytes(content)
+            except BlobDownloadError:
+                page_path = Path(key_page.image_path)
+
         if not page_path.exists():
             target_parse_page.status = "failed"
             target_parse_page.error_json = {"detail": "Page image missing"}

@@ -136,7 +136,10 @@ class ExamKeyPageRead(BaseModel):
     exam_id: int
     page_number: int
     image_path: str
+    blob_pathname: str | None = None
+    blob_url: str | None = None
     exists_on_disk: bool
+    exists_on_storage: bool
     width: int
     height: int
 
