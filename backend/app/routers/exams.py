@@ -861,7 +861,18 @@ def build_exam_key_pages(exam_id: int, session: Session = Depends(get_session)) 
         session.commit()
 
         rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
-        return [ExamKeyPageRead(id=r.id, exam_id=r.exam_id, page_number=r.page_number, image_path=relative_to_data(Path(r.image_path)), width=r.width, height=r.height) for r in rows]
+        return [
+            ExamKeyPageRead(
+                id=r.id,
+                exam_id=r.exam_id,
+                page_number=r.page_number,
+                image_path=relative_to_data(Path(r.image_path)),
+                exists_on_disk=Path(r.image_path).exists(),
+                width=r.width,
+                height=r.height,
+            )
+            for r in rows
+        ]
     except Exception as exc:
         request_id = str(uuid.uuid4())
         stage = getattr(exc, "stage", stage)
@@ -883,7 +894,18 @@ def list_exam_key_pages(exam_id: int, session: Session = Depends(get_session)) -
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
-    return [ExamKeyPageRead(id=r.id, exam_id=r.exam_id, page_number=r.page_number, image_path=relative_to_data(Path(r.image_path)), width=r.width, height=r.height) for r in rows]
+    return [
+        ExamKeyPageRead(
+            id=r.id,
+            exam_id=r.exam_id,
+            page_number=r.page_number,
+            image_path=relative_to_data(Path(r.image_path)),
+            exists_on_disk=Path(r.image_path).exists(),
+            width=r.width,
+            height=r.height,
+        )
+        for r in rows
+    ]
 
 
 @router.post("/{exam_id}/questions", response_model=QuestionRead, status_code=status.HTTP_201_CREATED)
@@ -1004,7 +1026,15 @@ def _resolve_key_page_or_404(
 
     image_path = Path(page.image_path)
     if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Key page image missing")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "Key page image missing",
+                "exam_id": exam_id,
+                "page_number": page_number,
+                "image_path": str(image_path),
+            },
+        )
 
     media_type = "image/png"
     suffix = image_path.suffix.lower()
@@ -1045,7 +1075,15 @@ def get_question_key_visual(
 
     image_path = Path(page.image_path)
     if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Key page image missing")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "Key page image missing",
+                "exam_id": exam_id,
+                "page_number": page_number,
+                "image_path": str(image_path),
+            },
+        )
 
     media_type = "image/png"
     if image_path.suffix.lower() in {".jpg", ".jpeg"}:

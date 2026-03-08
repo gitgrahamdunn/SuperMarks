@@ -38,6 +38,7 @@ export interface SubmissionPage {
   id: number;
   page_number: number;
   image_path: string;
+  exists_on_disk: boolean;
   width: number;
   height: number;
 }
@@ -97,6 +98,7 @@ export interface ExamKeyPage {
   exam_id: number;
   page_number: number;
   image_path: string;
+  exists_on_disk: boolean;
   width: number;
   height: number;
 }

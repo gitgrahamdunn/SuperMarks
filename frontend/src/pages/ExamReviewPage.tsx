@@ -4,7 +4,7 @@ import { api, ApiError, getOpenApiPaths } from '../api/client';
 import { EvidenceOverlayCanvas, type EvidenceBox } from '../components/EvidenceOverlayCanvas';
 import { AutoGrowTextarea } from '../components/AutoGrowTextarea';
 import { useToast } from '../components/ToastProvider';
-import type { QuestionRead } from '../types/api';
+import type { ExamKeyPage, QuestionRead } from '../types/api';
 
 interface Criterion {
   desc: string;
@@ -38,6 +38,7 @@ export function ExamReviewPage() {
   const [showOverlay, setShowOverlay] = useState(true);
   const [manualPageNumber, setManualPageNumber] = useState<number | null>(null);
   const [examUnavailable, setExamUnavailable] = useState(false);
+  const [keyPages, setKeyPages] = useState<ExamKeyPage[]>([]);
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
 
@@ -52,8 +53,9 @@ export function ExamReviewPage() {
       try {
         setLoading(true);
         setExamUnavailable(false);
-        const [fetchedQuestions, paths] = await Promise.all([
+        const [fetchedQuestions, fetchedKeyPages, paths] = await Promise.all([
           api.getExamQuestionsForReview(examId),
+          api.listExamKeyPages(examId),
           getOpenApiPaths(),
         ]);
 
@@ -65,12 +67,14 @@ export function ExamReviewPage() {
 
         const mapped = fetchedQuestions.map(mapQuestion).sort(compareQuestionsForReview);
         setQuestions(mapped);
+        setKeyPages(fetchedKeyPages);
         showSuccess(`Loaded ${mapped.length} questions for review.`);
       } catch (error) {
         console.error('Failed to fetch questions for review', error);
         if (error instanceof ApiError && error.status === 404) {
           setExamUnavailable(true);
           setQuestions([]);
+          setKeyPages([]);
           return;
         }
         const storageKey = `supermarks:lastParse:${examId}`;
@@ -105,6 +109,8 @@ export function ExamReviewPage() {
   }, [currentIndex]);
 
   const currentQuestion = questions[currentIndex];
+  const keyPagesByNumber = useMemo(() => new Map(keyPages.map((page) => [page.page_number, page])), [keyPages]);
+  const availableKeyPageNumbers = useMemo(() => keyPages.map((page) => page.page_number).sort((a, b) => a - b), [keyPages]);
   const derivedPageNumber = getCurrentPageNumber(currentQuestion);
   const currentKeyPageNumber = manualPageNumber ?? derivedPageNumber;
   const overlayEvidence = useMemo(
@@ -113,12 +119,17 @@ export function ExamReviewPage() {
   );
   const regionCountOnPage = overlayEvidence.length;
   const activeQuestionIdForVersion = currentQuestion?.id || currentIndex;
-  const keyVisualUrl = `${api.getExamKeyPageUrl(examId, currentKeyPageNumber)}?v=${examId}-${currentKeyPageNumber}-${activeQuestionIdForVersion}`;
-  const keyPageUrlFromRubric = currentQuestion?.rubric_json?.key_page_url || currentQuestion?.rubric_json?.key_page_image_url;
+  const keyPageMeta = keyPagesByNumber.get(currentKeyPageNumber);
+  const hasKeyPageMeta = Boolean(keyPageMeta);
+  const keyVisualUrl = hasKeyPageMeta
+    ? `${api.getExamKeyPageUrl(examId, currentKeyPageNumber)}?v=${examId}-${currentKeyPageNumber}-${activeQuestionIdForVersion}`
+    : '';
   const questionLabelText = formatQuestionLabel(currentQuestion?.label);
-  const fallbackKeyPageUrl = typeof keyPageUrlFromRubric === 'string' && keyPageUrlFromRubric.trim().length > 0
-    ? keyPageUrlFromRubric
-    : api.getExamKeyPageUrl(examId, currentKeyPageNumber);
+
+  useEffect(() => {
+    setPreviewError(false);
+    setImageLoaded(false);
+  }, [currentKeyPageNumber, hasKeyPageMeta]);
 
   const updateCurrentQuestion = (updater: (question: EditableQuestion) => EditableQuestion) => {
     setQuestions((prev) => prev.map((question, index) => (index === currentIndex ? updater(question) : question)));
@@ -295,7 +306,12 @@ export function ExamReviewPage() {
             Next page
           </button>
         </div>
-        {previewError && (
+        {!hasKeyPageMeta && (
+          <div style={{ background: '#fee2e2', border: '1px solid #ef4444', color: '#7f1d1d', borderRadius: 8, padding: 10 }}>
+            No key page metadata found for page {currentKeyPageNumber}
+          </div>
+        )}
+        {hasKeyPageMeta && previewError && (
           <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', color: '#78350f', borderRadius: 8, padding: 10 }}>
             No key page image found for page {currentKeyPageNumber}
           </div>
@@ -306,7 +322,7 @@ export function ExamReviewPage() {
           </div>
         )}
 
-        {!previewError ? (
+        {hasKeyPageMeta && !previewError ? (
           <EvidenceOverlayCanvas
             imageKey={currentKeyPageNumber}
             imageUrl={keyVisualUrl}
@@ -322,21 +338,15 @@ export function ExamReviewPage() {
               setImageLoaded(true);
             }}
           />
-        ) : (
-          <div className="stack" style={{ gap: 8 }}>
-            <button type="button" onClick={() => window.open(fallbackKeyPageUrl, '_blank', 'noopener,noreferrer')}>
-              Open key page in new tab
-            </button>
-          </div>
-        )}
+        ) : null}
 
-        {regionCountOnPage > 0 && !previewError && (
+        {hasKeyPageMeta && regionCountOnPage > 0 && !previewError && (
           <label>
             <input type="checkbox" checked={showOverlay} onChange={(e) => setShowOverlay(e.target.checked)} /> Show overlays
           </label>
         )}
         <p className="subtle-text" style={{ margin: 0 }}>
-          Overlay diagnostics: currentQuestionId: {currentQuestion.id} | currentKeyPageNumber: {currentKeyPageNumber} | regionCountOnPage: {regionCountOnPage} | manualPage: {manualPageNumber ?? 'auto'} | imageLoaded: {String(imageLoaded && !previewError)}
+          Overlay diagnostics: currentQuestionId: {currentQuestion.id} | currentKeyPageNumber: {currentKeyPageNumber} | availableKeyPages: [{availableKeyPageNumbers.join(',')}] | regionCountOnPage: {regionCountOnPage} | manualPage: {manualPageNumber ?? 'auto'} | imageLoaded: {String(imageLoaded && !previewError)}
         </p>
         <p className="subtle-text" style={{ margin: 0, fontSize: '0.8rem' }}>
           Debug metadata → label: {currentQuestion.label} | original_label: {String(currentQuestion.rubric_json?.original_label || '—')} | source_page_number: {String(currentQuestion.rubric_json?.source_page_number || '—')} | key_page_number: {String(currentQuestion.rubric_json?.key_page_number || '—')} | region count: {currentQuestion.evidence.length}

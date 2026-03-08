@@ -233,6 +233,51 @@ def test_key_page_image_endpoint_returns_image_content_type_without_auth(tmp_pat
         assert image_response.headers["content-type"].startswith("image/")
 
 
+
+
+def test_list_key_pages_includes_exists_on_disk_and_missing_image_404_detail(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Key Page Metadata Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert upload.status_code == 200
+
+        build = client.post(f"/api/exams/{exam_id}/key/build-pages")
+        assert build.status_code == 200
+
+        pages = client.get(f"/api/exams/{exam_id}/key/pages")
+        assert pages.status_code == 200
+        payload = pages.json()
+        assert payload
+        assert payload[0]["page_number"] == 1
+        assert payload[0]["exists_on_disk"] is True
+
+        image_path = Path(settings.data_dir) / payload[0]["image_path"]
+        image_path.unlink()
+
+        missing = client.get(f"/api/exams/{exam_id}/key/page/1")
+        assert missing.status_code == 404
+        detail = missing.json()["detail"]
+        assert detail["exam_id"] == exam_id
+        assert detail["page_number"] == 1
+        assert detail["image_path"].endswith(".png")
+
+        pages_after_delete = client.get(f"/api/exams/{exam_id}/key/pages")
+        assert pages_after_delete.status_code == 200
+        assert pages_after_delete.json()[0]["exists_on_disk"] is False
+
 def test_parse_answer_key_without_uploaded_files_returns_actionable_400(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
