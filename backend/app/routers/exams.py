@@ -34,7 +34,7 @@ from app.ai.openai_vision import (
 )
 from app.db import get_session
 from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionPage, SubmissionStatus, utcnow
-from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
+from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamParseJobRead, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
 from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
@@ -296,12 +296,13 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id)).all()
-    questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
+    submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id).order_by(Submission.created_at.desc(), Submission.id.desc())).all()
+    parse_jobs = session.exec(select(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id).order_by(ExamKeyParseJob.created_at.desc(), ExamKeyParseJob.id.desc())).all()
+    key_files = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id).order_by(ExamKeyFile.id)).all()
 
     submission_reads: list[SubmissionRead] = []
     for sub in submissions:
-        files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == sub.id)).all()
+        files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == sub.id).order_by(SubmissionFile.id)).all()
         submission_reads.append(
             SubmissionRead(
                 id=sub.id,
@@ -314,20 +315,6 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
             )
         )
 
-    question_reads: list[QuestionRead] = []
-    for q in questions:
-        regions = session.exec(select(QuestionRegion).where(QuestionRegion.question_id == q.id)).all()
-        question_reads.append(
-            QuestionRead(
-                id=q.id,
-                exam_id=q.exam_id,
-                label=q.label,
-                max_marks=q.max_marks,
-                rubric_json=json.loads(q.rubric_json),
-                regions=[RegionRead(id=r.id, page_number=r.page_number, x=r.x, y=r.y, w=r.w, h=r.h) for r in regions],
-            )
-        )
-
     return ExamDetail(
         exam=ExamRead(
             id=exam.id,
@@ -336,9 +323,64 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
             teacher_style_profile_json=exam.teacher_style_profile_json,
             status=exam.status,
         ),
+        key_files=[
+            StoredFileRead(
+                id=row.id,
+                original_filename=row.original_filename,
+                stored_path=row.stored_path,
+                content_type=row.content_type,
+                size_bytes=row.size_bytes,
+                signed_url=_resolve_signed_url(row.stored_path),
+                blob_url=row.blob_url,
+            )
+            for row in key_files
+        ],
         submissions=submission_reads,
-        questions=question_reads,
+        parse_jobs=[
+            ExamParseJobRead(
+                id=job.id,
+                exam_id=job.exam_id,
+                status=job.status,
+                page_count=job.page_count,
+                pages_done=job.pages_done,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+                cost_total=job.cost_total,
+                input_tokens_total=job.input_tokens_total,
+                output_tokens_total=job.output_tokens_total,
+            )
+            for job in parse_jobs
+        ],
     )
+
+
+@router.get("/{exam_id}/submissions", response_model=list[SubmissionRead])
+def list_exam_submissions(exam_id: int, session: Session = Depends(get_session)) -> list[SubmissionRead]:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    submissions = session.exec(
+        select(Submission)
+        .where(Submission.exam_id == exam_id)
+        .order_by(Submission.created_at.desc(), Submission.id.desc())
+    ).all()
+
+    output: list[SubmissionRead] = []
+    for sub in submissions:
+        files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == sub.id).order_by(SubmissionFile.id)).all()
+        output.append(
+            SubmissionRead(
+                id=sub.id,
+                exam_id=sub.exam_id,
+                student_name=sub.student_name,
+                status=sub.status,
+                created_at=sub.created_at,
+                files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
+                pages=[],
+            )
+        )
+    return output
 
 
 @router.post("/{exam_id}/submissions", response_model=SubmissionRead, status_code=status.HTTP_201_CREATED)

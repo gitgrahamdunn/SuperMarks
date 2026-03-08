@@ -17,7 +17,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from app import db
 from app.ai.openai_vision import OpenAIAnswerKeyParser
 from app.main import app
-from app.models import ExamKeyFile, ExamKeyPage, ExamKeyParsePage, Question
+from app.models import ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, Question, Submission, SubmissionStatus
 from app.settings import settings
 
 def _tiny_png_bytes() -> bytes:
@@ -788,3 +788,79 @@ def test_retry_parse_page_does_not_create_new_job(tmp_path, monkeypatch) -> None
         latest = client.get(f"/api/exams/{exam_id}/key/parse/latest")
         assert latest.status_code == 200
         assert latest.json()["job"]["job_id"] == job_id
+
+
+def test_get_exam_detail_returns_key_files_submissions_and_parse_jobs(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("BLOB_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_resp = client.post("/api/exams", json={"name": "History Exam"})
+        assert exam_resp.status_code == 201
+        exam_id = exam_resp.json()["id"]
+
+        key_upload = client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+        assert key_upload.status_code == 200
+
+        submission_resp = client.post(f"/api/exams/{exam_id}/submissions", json={"student_name": "Ada"})
+        assert submission_resp.status_code == 201
+
+    with Session(db.engine) as session:
+        session.add(
+            ExamKeyParseJob(
+                exam_id=exam_id,
+                status="running",
+                page_count=2,
+                pages_done=1,
+                cost_total=0.2,
+                input_tokens_total=100,
+                output_tokens_total=50,
+            )
+        )
+        session.commit()
+
+    with TestClient(app) as client:
+        detail = client.get(f"/api/exams/{exam_id}")
+        assert detail.status_code == 200
+        payload = detail.json()
+        assert payload["exam"]["id"] == exam_id
+        assert len(payload["key_files"]) == 1
+        assert payload["key_files"][0]["original_filename"] == "key.png"
+        assert len(payload["submissions"]) == 1
+        assert payload["submissions"][0]["student_name"] == "Ada"
+        assert len(payload["parse_jobs"]) == 1
+        assert payload["parse_jobs"][0]["status"] == "running"
+
+
+def test_list_exam_submissions_returns_submission_rows(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_resp = client.post("/api/exams", json={"name": "Math Exam"})
+        assert exam_resp.status_code == 201
+        exam_id = exam_resp.json()["id"]
+
+    with Session(db.engine) as session:
+        session.add(Submission(exam_id=exam_id, student_name="Alice", status=SubmissionStatus.UPLOADED))
+        session.add(Submission(exam_id=exam_id, student_name="Bob", status=SubmissionStatus.PAGES_READY))
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/exams/{exam_id}/submissions")
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload) == 2
+        names = [item["student_name"] for item in payload]
+        assert "Alice" in names
+        assert "Bob" in names

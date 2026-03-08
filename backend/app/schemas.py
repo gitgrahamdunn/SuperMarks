@@ -111,8 +111,22 @@ class SubmissionResults(BaseModel):
 
 class ExamDetail(BaseModel):
     exam: ExamRead
+    key_files: list[StoredFileRead] = Field(default_factory=list)
     submissions: list[SubmissionRead]
-    questions: list[QuestionRead]
+    parse_jobs: list["ExamParseJobRead"] = Field(default_factory=list)
+
+
+class ExamParseJobRead(BaseModel):
+    id: int
+    exam_id: int
+    status: str
+    page_count: int
+    pages_done: int
+    created_at: datetime
+    updated_at: datetime
+    cost_total: float
+    input_tokens_total: int
+    output_tokens_total: int
 
 
 

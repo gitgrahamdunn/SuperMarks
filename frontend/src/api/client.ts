@@ -492,11 +492,11 @@ export const api = {
       return request<QuestionRead[]>(`exams/${examId}/questions`);
     }
 
-    const examDetail = await request<ExamDetail>(`exams/${examId}`);
-    return examDetail.questions || [];
+    return [];
   },
 
   listExamKeyFiles: (examId: number) => request<StoredFileRead[]>(`exams/${examId}/key/files`),
+  listExamSubmissions: (examId: number) => request<SubmissionRead[]>(`exams/${examId}/submissions`),
   buildExamKeyPages: (examId: number, options?: RequestInit) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST', ...options }, BUILD_PAGES_TIMEOUT_MS),
   listExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/pages`),
   getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),

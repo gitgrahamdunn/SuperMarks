@@ -3,13 +3,15 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import { uploadToBlob } from '../blob/upload';
 import { useToast } from '../components/ToastProvider';
-import type { BulkUploadPreview, ExamDetail, StoredFileRead } from '../types/api';
+import type { BulkUploadPreview, ExamDetail, QuestionRead, StoredFileRead, SubmissionRead } from '../types/api';
 
 export function ExamDetailPage() {
   const params = useParams();
   const examId = Number(params.examId);
   const navigate = useNavigate();
   const [detail, setDetail] = useState<ExamDetail | null>(null);
+  const [questions, setQuestions] = useState<QuestionRead[]>([]);
+  const [submissions, setSubmissions] = useState<SubmissionRead[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [keyFiles, setKeyFiles] = useState<StoredFileRead[]>([]);
@@ -28,9 +30,16 @@ export function ExamDetailPage() {
   const loadDetail = async () => {
     setIsLoading(true);
     try {
-      const [examDetail, uploadedKeyFiles] = await Promise.all([api.getExamDetail(examId), api.listExamKeyFiles(examId)]);
+      const [examDetail, fetchedQuestions, uploadedKeyFiles, examSubmissions] = await Promise.all([
+        api.getExamDetail(examId),
+        api.listQuestions(examId),
+        api.listExamKeyFiles(examId),
+        api.listExamSubmissions(examId),
+      ]);
       setDetail(examDetail);
+      setQuestions(fetchedQuestions);
       setKeyFiles(uploadedKeyFiles);
+      setSubmissions(examSubmissions);
       setNotFound(false);
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
@@ -163,7 +172,7 @@ export function ExamDetailPage() {
     return (
       <div className="card stack">
         <h1>Exam unavailable</h1>
-        <p>This exam record is unavailable. It may have been created on non-persistent storage before database persistence was configured.</p>
+        <p>This exam record no longer exists.</p>
         <p>
           <Link className="btn btn-secondary" to="/">Back to Exams</Link>
         </p>
@@ -173,6 +182,11 @@ export function ExamDetailPage() {
 
   if (!detail) return <p>Unable to load exam details.</p>;
 
+  const latestParseJob = detail.parse_jobs[0];
+  const parseStatusMessage = latestParseJob
+    ? `${latestParseJob.status} (${latestParseJob.pages_done}/${latestParseJob.page_count} pages)`
+    : 'No parse jobs yet';
+
   return (
     <div>
       <p><Link to="/">← Back to Exams</Link></p>
@@ -180,10 +194,30 @@ export function ExamDetailPage() {
 
       <div className="grid-2">
         <section className="card">
+          <h2>Answer Key Files</h2>
+          {keyFiles.length === 0 && <p className="subtle-text">No key files uploaded yet.</p>}
+          {keyFiles.length > 0 && (
+            <ul>
+              {keyFiles.map((file) => (
+                <li key={file.id}>{file.original_filename}</li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="card">
+          <h2>Parse Status</h2>
+          <p>{parseStatusMessage}</p>
+        </section>
+      </div>
+
+      <div className="grid-2">
+        <section className="card">
           <h2>Questions</h2>
           <p className="subtle-text">Questions are generated from the exam key.</p>
+          {questions.length === 0 && <p className="subtle-text">No questions parsed yet.</p>}
           <ul>
-            {detail.questions.map((question) => (
+            {questions.map((question) => (
               <li key={question.id}>{question.label} (max: {question.max_marks})</li>
             ))}
           </ul>
@@ -191,8 +225,9 @@ export function ExamDetailPage() {
 
         <section className="card">
           <h2>Submissions</h2>
+          {submissions.length === 0 && <p className="subtle-text">No submissions yet.</p>}
           <ul>
-            {detail.submissions.map((submission) => (
+            {submissions.map((submission) => (
               <li key={submission.id}>
                 <Link to={`/submissions/${submission.id}`}>{submission.student_name}</Link> ({submission.status})
               </li>
@@ -230,7 +265,7 @@ export function ExamDetailPage() {
       </section>
 
       {preview && (
-  
+
       <section className="card stack" style={{ marginTop: 16 }}>
           <h3>Bulk upload preview</h3>
           {preview.warnings.length > 0 && (
