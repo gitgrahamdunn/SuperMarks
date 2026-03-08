@@ -3,7 +3,9 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import { uploadToBlob } from '../blob/upload';
 import { useToast } from '../components/ToastProvider';
-import type { BulkUploadPreview, ExamDetail, QuestionRead, StoredFileRead, SubmissionRead } from '../types/api';
+import type { BulkUploadPreview, ExamDetail, ParseLatestResponse, QuestionRead, StoredFileRead, SubmissionRead } from '../types/api';
+
+const PARSE_BATCH_SIZE = 3;
 
 export function ExamDetailPage() {
   const params = useParams();
@@ -15,6 +17,8 @@ export function ExamDetailPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [keyFiles, setKeyFiles] = useState<StoredFileRead[]>([]);
+  const [latestParse, setLatestParse] = useState<ParseLatestResponse['job'] | null>(null);
+  const [isProcessingParse, setIsProcessingParse] = useState(false);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [rosterText, setRosterText] = useState('');
   const [preview, setPreview] = useState<BulkUploadPreview | null>(null);
@@ -30,16 +34,18 @@ export function ExamDetailPage() {
   const loadDetail = async () => {
     setIsLoading(true);
     try {
-      const [examDetail, fetchedQuestions, uploadedKeyFiles, examSubmissions] = await Promise.all([
+      const [examDetail, fetchedQuestions, uploadedKeyFiles, examSubmissions, latestParseJob] = await Promise.all([
         api.getExamDetail(examId),
         api.listQuestions(examId),
         api.listExamKeyFiles(examId),
         api.listExamSubmissions(examId),
+        api.getExamKeyParseLatest(examId),
       ]);
       setDetail(examDetail);
       setQuestions(fetchedQuestions);
       setKeyFiles(uploadedKeyFiles);
       setSubmissions(examSubmissions);
+      setLatestParse(latestParseJob.job);
       setNotFound(false);
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
@@ -51,6 +57,16 @@ export function ExamDetailPage() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const refreshParseStatus = async () => {
+    const latest = await api.getExamKeyParseLatest(examId);
+    setLatestParse(latest.job);
+    return latest.job;
+  };
+
+  const scrollToKeyFiles = () => {
+    document.getElementById('answer-key-files')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   useEffect(() => {
@@ -72,6 +88,60 @@ export function ExamDetailPage() {
     () => preview?.candidates.find((candidate) => candidate.candidate_id === activeCandidateId) ?? preview?.candidates[0] ?? null,
     [preview, activeCandidateId],
   );
+
+  const hasQuestions = questions.length > 0;
+  const parseDone = latestParse?.status === 'done';
+  const parseHasFailedPages = (latestParse?.failed_pages.length || 0) > 0;
+  const parseHasPendingPages = (latestParse?.pending_pages.length || 0) > 0;
+
+  const onResumeParsing = async () => {
+    try {
+      setIsProcessingParse(true);
+      const latest = await api.getExamKeyParseLatest(examId);
+      if (!latest.job) {
+        showWarning('No parse job available to resume.');
+        return;
+      }
+      let status = await api.getExamKeyParseStatus(examId, latest.job.job_id);
+      while (status.status === 'running') {
+        const next = await api.parseExamKeyNext(examId, latest.job.job_id, PARSE_BATCH_SIZE);
+        if ((next.pages_processed || []).length === 0 || next.status !== 'running') {
+          break;
+        }
+        status = await api.getExamKeyParseStatus(examId, latest.job.job_id);
+      }
+      await api.finishExamKeyParse(examId, latest.job.job_id);
+      await loadDetail();
+      showSuccess('Parsing resumed from the exam page.');
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to resume parsing');
+    } finally {
+      setIsProcessingParse(false);
+    }
+  };
+
+  const onRetryFailedPages = async () => {
+    try {
+      setIsProcessingParse(true);
+      const latest = await api.getExamKeyParseLatest(examId);
+      if (!latest.job) {
+        showWarning('No parse job available for retries.');
+        return;
+      }
+      if (latest.job.failed_pages.length === 0) {
+        showWarning('No failed pages to retry.');
+        return;
+      }
+      for (const pageNumber of latest.job.failed_pages) {
+        await api.retryExamKeyParsePage(examId, latest.job.job_id, pageNumber);
+      }
+      await onResumeParsing();
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to retry failed pages');
+    } finally {
+      setIsProcessingParse(false);
+    }
+  };
 
   const onUploadBulk = async () => {
     if (!bulkFile) {
@@ -135,7 +205,6 @@ export function ExamDetailPage() {
     }
   };
 
-
   const onUploadStudentSubmission = async () => {
     if (!studentName.trim() || studentFiles.length === 0) {
       showWarning('Provide student name and at least one file');
@@ -157,16 +226,17 @@ export function ExamDetailPage() {
           size_bytes: file.size,
         })),
       );
-      showSuccess('Student submission uploaded');
+
+      showSuccess('Submission files uploaded');
       setStudentName('');
       setStudentFiles([]);
       await loadDetail();
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to upload student submission');
+      showError(error instanceof Error ? error.message : 'Failed to upload submission files');
     }
   };
 
-  if (isLoading) return <p>Loading...</p>;
+  if (isLoading) return <p>Loading exam details…</p>;
 
   if (notFound) {
     return (
@@ -182,18 +252,55 @@ export function ExamDetailPage() {
 
   if (!detail) return <p>Unable to load exam details.</p>;
 
-  const latestParseJob = detail.parse_jobs[0];
-  const parseStatusMessage = latestParseJob
-    ? `${latestParseJob.status} (${latestParseJob.pages_done}/${latestParseJob.page_count} pages)`
-    : 'No parse jobs yet';
-
   return (
     <div>
       <p><Link to="/">← Back to Exams</Link></p>
       <h1>{detail.exam.name}</h1>
 
+      {latestParse && (
+        <section className="card stack" style={{ marginBottom: 16 }}>
+          <h2>Answer Key Processing</h2>
+          <p className="subtle-text">Parsing can continue later from the exam page.</p>
+          <p>Status: <strong>{latestParse.status}</strong></p>
+          <p>Progress: {latestParse.pages_done}/{latestParse.page_count}</p>
+          <p>Failed pages: {latestParse.failed_pages.length}</p>
+          <p>Pending pages: {latestParse.pending_pages.length}</p>
+          <p>Updated: {new Date(latestParse.updated_at).toLocaleString()}</p>
+          {latestParse.totals && (
+            <p className="subtle-text">
+              Totals — cost: ${latestParse.totals.cost_total.toFixed(6)}, input tokens: {latestParse.totals.input_tokens_total}, output tokens: {latestParse.totals.output_tokens_total}
+            </p>
+          )}
+          {parseHasFailedPages && (
+            <p className="warning-text">Failed pages: {latestParse.failed_pages.join(', ')}</p>
+          )}
+          {parseHasPendingPages && (
+            <p className="subtle-text">Pending pages: {latestParse.pending_pages.join(', ')}</p>
+          )}
+          <div className="actions-row">
+            <button type="button" className="btn btn-secondary" onClick={() => void onResumeParsing()} disabled={isProcessingParse}>
+              Resume parsing
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => void onRetryFailedPages()}
+              disabled={isProcessingParse || !parseHasFailedPages}
+            >
+              Retry failed pages
+            </button>
+            <button type="button" className={parseDone && hasQuestions ? 'btn btn-primary' : 'btn btn-secondary'} onClick={() => navigate(`/exams/${examId}/review`)} disabled={!hasQuestions}>
+              Review criteria
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={scrollToKeyFiles}>
+              View key files
+            </button>
+          </div>
+        </section>
+      )}
+
       <div className="grid-2">
-        <section className="card">
+        <section className="card" id="answer-key-files">
           <h2>Answer Key Files</h2>
           {keyFiles.length === 0 && <p className="subtle-text">No key files uploaded yet.</p>}
           {keyFiles.length > 0 && (
@@ -207,7 +314,8 @@ export function ExamDetailPage() {
 
         <section className="card">
           <h2>Parse Status</h2>
-          <p>{parseStatusMessage}</p>
+          {!latestParse && <p>No parse jobs yet</p>}
+          {latestParse && <p>{latestParse.status} ({latestParse.pages_done}/{latestParse.page_count} pages)</p>}
         </section>
       </div>
 
@@ -235,7 +343,6 @@ export function ExamDetailPage() {
           </ul>
         </section>
       </div>
-
 
       <section className="card stack" style={{ marginTop: 16 }}>
         <h2>Upload Student Submission</h2>
@@ -265,8 +372,7 @@ export function ExamDetailPage() {
       </section>
 
       {preview && (
-
-      <section className="card stack" style={{ marginTop: 16 }}>
+        <section className="card stack" style={{ marginTop: 16 }}>
           <h3>Bulk upload preview</h3>
           {preview.warnings.length > 0 && (
             <ul>
