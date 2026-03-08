@@ -173,6 +173,7 @@ export function ExamsPage() {
   const [latestBackendParseJobId, setLatestBackendParseJobId] = useState<number | null>(null);
   const [parseStartReusedJob, setParseStartReusedJob] = useState<boolean | null>(null);
   const [lastProcessedPages, setLastProcessedPages] = useState<number[]>([]);
+  const [lastFailedPages, setLastFailedPages] = useState<number[]>([]);
   const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [backendVersion, setBackendVersion] = useState<string>('loading...');
@@ -198,7 +199,7 @@ export function ExamsPage() {
   const diagnostics = getClientDiagnostics();
   const estimatedParsingPage = parsePageCount > 0 ? Math.min(parsePageCount, Math.max(1, Math.floor(elapsedSeconds / 3) + 1)) : 0;
   const parseActivityMessages = [
-    `Processing pages near ${Math.max(1, currentParsingPageNumber)}…`,
+    `Parsing up to 3 pages at a time (near page ${Math.max(1, currentParsingPageNumber)})…`,
     'Extracting questions…',
     'Drafting rubric…',
   ];
@@ -220,13 +221,20 @@ export function ExamsPage() {
     const processed = Array.isArray(next.pages_processed) ? next.pages_processed : [];
     setLastProcessedPages(processed);
     if (processed.length > 0) {
-      setCurrentParsingPageNumber(processed[processed.length - 1]);
+      setCurrentParsingPageNumber(Math.max(...processed));
     }
+    const failedInBatch: number[] = [];
     (next.page_results || []).forEach((result) => {
       if (result.page_number > 0) {
-        markPageStatus(result.page_number, toParsePageUiStatus(result.status || 'done'));
+        const status = toParsePageUiStatus(result.status || 'done');
+        markPageStatus(result.page_number, status);
+        if (status === 'failed') failedInBatch.push(result.page_number);
       }
     });
+    setLastFailedPages(failedInBatch);
+    if (failedInBatch.length > 0) {
+      setFailedPage(failedInBatch[0]);
+    }
     setParseJobStatus(next.status === 'running' ? 'running' : next.status);
     if (next.totals) setRunningTotals(next.totals);
     const pct = Math.min(98, 50 + Math.round((next.pages_done / Math.max(1, next.page_count)) * 45));
@@ -416,6 +424,7 @@ export function ExamsPage() {
     setLatestBackendParseJobId(null);
     setParseStartReusedJob(null);
     setLastProcessedPages([]);
+    setLastFailedPages([]);
     setChecklistSteps(initChecklist());
     setExamUnavailable(false);
   };
@@ -468,9 +477,9 @@ export function ExamsPage() {
         const next = await api.parseExamKeyNext(examId, activeJobId, PARSE_BATCH_SIZE);
         const processed = applyParseBatchResult(next);
         await syncLiveQuestions(examId);
-        const failedBatchPage = (next.page_results || []).find((result) => result.status === 'failed')?.page_number;
-        if (failedBatchPage) {
-          setFailedPage(failedBatchPage);
+        const failedBatchPages = (next.page_results || []).filter((result) => result.status === 'failed').map((result) => result.page_number);
+        if (failedBatchPages.length > 0) {
+          setFailedPage(failedBatchPages[0]);
           break;
         }
         if (processed.length === 0) {
@@ -628,10 +637,10 @@ export function ExamsPage() {
           break;
         }
 
-        const failedBatchPage = (next.page_results || []).find((result) => result.status === 'failed')?.page_number;
-        if (failedBatchPage) {
-          setFailedPage(failedBatchPage);
-          showWarning(`Page ${failedBatchPage} failed — retry this parse job from the wizard.`);
+        const failedBatchPages = (next.page_results || []).filter((result) => result.status === 'failed').map((result) => result.page_number);
+        if (failedBatchPages.length > 0) {
+          setFailedPage(failedBatchPages[0]);
+          showWarning(`Failed pages: ${failedBatchPages.join(', ')} — retry this parse job from the wizard.`);
         }
       }
 
@@ -1089,13 +1098,13 @@ export function ExamsPage() {
               </div>
               {step === 'parsing' && parsePageCount > 0 && (
                 <div className="stack" style={{ gap: 8 }}>
-                  <p className="subtle-text">Processing {PARSE_BATCH_SIZE} pages at a time</p>
+                  <p className="subtle-text">Parsing up to 3 pages at a time</p>
                   <p className="subtle-text">Completed {pagesDone} of {parsePageCount} pages</p>
                   {processedStart !== null && processedEnd !== null && (
                     <p className="subtle-text">Parsing pages {processedStart}–{processedEnd} of {parsePageCount}</p>
                   )}
                   {lastProcessedPages.length > 0 && <p className="subtle-text">Processed pages: {lastProcessedPages.join(', ')}</p>}
-                  {failedPageCount > 0 && <p className="warning-text">Failed pages: {failedPageCount}</p>}
+                  {failedPageCount > 0 && <p className="warning-text">Failed pages: {lastFailedPages.length > 0 ? lastFailedPages.join(', ') : failedPageCount}</p>}
                   <p className="subtle-text">Parse job: {parseJobStatus}</p>
                   <p className="subtle-text wizard-activity-text">{parseActivityMessages[activityMessageIndex]}</p>
                   <div className="wizard-page-row" aria-label="Page parsing status">

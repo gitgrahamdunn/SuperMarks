@@ -6,11 +6,12 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -32,6 +33,7 @@ from app.ai.openai_vision import (
     get_answer_key_parser,
     get_bulk_name_detector,
 )
+from app import db as db_state
 from app.db import get_session
 from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionPage, SubmissionStatus, utcnow
 from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamParseJobRead, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
@@ -43,6 +45,17 @@ from app.blob_store import BlobUploadError, upload_bytes
 router = APIRouter(prefix="/exams", tags=["exams"])
 public_router = APIRouter(prefix="/exams", tags=["exams-public"])
 logger = logging.getLogger(__name__)
+_exam_question_locks: dict[int, threading.Lock] = {}
+_exam_question_locks_guard = threading.Lock()
+
+
+def _get_exam_question_lock(exam_id: int) -> threading.Lock:
+    with _exam_question_locks_guard:
+        lock = _exam_question_locks.get(exam_id)
+        if lock is None:
+            lock = threading.Lock()
+            _exam_question_locks[exam_id] = lock
+        return lock
 
 
 class KeyPageBuildError(RuntimeError):
@@ -1173,119 +1186,194 @@ def _job_has_remaining_work(job_id: int, session: Session) -> bool:
     return remaining is not None
 
 
-def _process_single_parse_page(
+def _process_single_parse_page_task(
     *,
     exam_id: int,
-    exam: Exam,
-    job: ExamKeyParseJob,
-    target_parse_page: ExamKeyParsePage,
-    page_rows_by_number: dict[int, ExamKeyPage],
-    session: Session,
+    job_id: int,
+    page_number: int,
     parser: AnswerKeyParser,
 ) -> dict[str, Any]:
-    target_parse_page.status = "running"
-    target_parse_page.updated_at = utcnow()
-    session.add(target_parse_page)
-    session.commit()
+    with Session(db_state.engine) as session:
+        _get_exam_or_404(exam_id, session)
+        job = _get_job_for_exam_or_error(exam_id, job_id, session)
+        target_parse_page = session.exec(
+            select(ExamKeyParsePage).where(
+                ExamKeyParsePage.job_id == job.id,
+                ExamKeyParsePage.page_number == page_number,
+            )
+        ).first()
+        if not target_parse_page:
+            raise HTTPException(status_code=404, detail="Parse page not found")
+        key_page = session.exec(
+            select(ExamKeyPage).where(
+                ExamKeyPage.exam_id == exam_id,
+                ExamKeyPage.page_number == page_number,
+            )
+        ).first()
 
-    page_number = target_parse_page.page_number
-    key_page = page_rows_by_number.get(page_number)
-    if key_page is None:
-        target_parse_page.status = "failed"
-        target_parse_page.error_json = {"detail": "Key page not found"}
+        target_parse_page.status = "running"
         target_parse_page.updated_at = utcnow()
         session.add(target_parse_page)
-        return {"page_number": page_number, "status": "failed", "cost": 0.0, "input_tokens": 0, "output_tokens": 0}
+        session.commit()
 
-    nano_model, mini_model = _resolve_models()
-    page_path = Path(key_page.image_path)
-    if not page_path.exists():
-        target_parse_page.status = "failed"
-        target_parse_page.error_json = {"detail": "Page image missing"}
-        target_parse_page.updated_at = utcnow()
-        session.add(target_parse_page)
-        return {"page_number": page_number, "status": "failed", "cost": 0.0, "input_tokens": 0, "output_tokens": 0}
+        logger.info("parse_page_start job_id=%s page=%s", job.id, page_number)
+        parse_started_at = time.perf_counter()
 
-    warnings: list[str] = []
-    used_model = nano_model
-    confidence = 0.0
-    questions_payload: list[dict[str, Any]] = []
-    input_tokens = 0
-    output_tokens = 0
-    cost = 0.0
-    error_payload: dict[str, Any] | None = None
-    tried_models: list[str] = []
-    first_attempt_confidence = 0.0
+        if key_page is None:
+            target_parse_page.status = "failed"
+            target_parse_page.error_json = {"detail": "Key page not found"}
+            target_parse_page.updated_at = utcnow()
+            session.add(target_parse_page)
+            session.commit()
+            elapsed_ms = int((time.perf_counter() - parse_started_at) * 1000)
+            logger.info("parse_page_done job_id=%s page=%s status=%s model=%s ms=%s", job.id, page_number, "failed", "n/a", elapsed_ms)
+            return {"page_number": page_number, "status": "failed", "cost": 0.0, "input_tokens": 0, "output_tokens": 0}
 
-    for model_name in [nano_model, mini_model]:
-        tried_models.append(model_name)
-        used_model = model_name
-        try:
-            result = _invoke_parser(parser, [page_path], model_name, str(job.id))
-            in_t, out_t, cst = _extract_usage(result)
-            input_tokens += in_t
-            output_tokens += out_t
-            cost += cst
-            confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
-            if len(tried_models) == 1:
-                first_attempt_confidence = confidence
-            if model_name == nano_model and (not questions_payload or confidence < 0.60):
-                warnings.append("Low confidence on nano; escalating")
-                logger.info("nano questions=0 or low confidence -> escalating to mini")
+        nano_model, mini_model = _resolve_models()
+        page_path = Path(key_page.image_path)
+        if not page_path.exists():
+            target_parse_page.status = "failed"
+            target_parse_page.error_json = {"detail": "Page image missing"}
+            target_parse_page.updated_at = utcnow()
+            session.add(target_parse_page)
+            session.commit()
+            elapsed_ms = int((time.perf_counter() - parse_started_at) * 1000)
+            logger.info("parse_page_done job_id=%s page=%s status=%s model=%s ms=%s", job.id, page_number, "failed", "n/a", elapsed_ms)
+            return {"page_number": page_number, "status": "failed", "cost": 0.0, "input_tokens": 0, "output_tokens": 0}
+
+        warnings: list[str] = []
+        used_model = nano_model
+        confidence = 0.0
+        questions_payload: list[dict[str, Any]] = []
+        input_tokens = 0
+        output_tokens = 0
+        cost = 0.0
+        error_payload: dict[str, Any] | None = None
+        tried_models: list[str] = []
+        first_attempt_confidence = 0.0
+
+        for model_name in [nano_model, mini_model]:
+            tried_models.append(model_name)
+            used_model = model_name
+            try:
+                result = _invoke_parser(parser, [page_path], model_name, str(job.id))
+                in_t, out_t, cst = _extract_usage(result)
+                input_tokens += in_t
+                output_tokens += out_t
+                cost += cst
+                confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
+                if len(tried_models) == 1:
+                    first_attempt_confidence = confidence
+                if model_name == nano_model and (not questions_payload or confidence < 0.60):
+                    warnings.append("Low confidence on nano; escalating")
+                    logger.info("nano questions=0 or low confidence -> escalating to mini")
+                    continue
+                break
+            except (OpenAIRequestError, ValueError, SchemaBuildError) as exc:
+                warnings.append(f"{model_name} failed: {type(exc).__name__}")
+                error_payload = {"detail": str(exc)[:300], "model": model_name}
                 continue
-            break
-        except (OpenAIRequestError, ValueError, SchemaBuildError) as exc:
-            warnings.append(f"{model_name} failed: {type(exc).__name__}")
-            error_payload = {"detail": str(exc)[:300], "model": model_name}
-            continue
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"{model_name} failed: {type(exc).__name__}")
-            error_payload = {"detail": str(exc)[:300], "model": model_name}
-            continue
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"{model_name} failed: {type(exc).__name__}")
+                error_payload = {"detail": str(exc)[:300], "model": model_name}
+                continue
 
-    page_status = "done" if questions_payload else "failed"
-    if questions_payload:
-        _upsert_questions_for_page(exam_id, page_number, questions_payload, session)
+        page_status = "done" if questions_payload else "failed"
+        if questions_payload:
+            with _get_exam_question_lock(exam_id):
+                with Session(db_state.engine) as question_session:
+                    _upsert_questions_for_page(exam_id, page_number, questions_payload, question_session)
+                    question_session.commit()
 
-    target_parse_page.model_used = used_model
-    target_parse_page.confidence = confidence
-    target_parse_page.status = page_status
-    target_parse_page.cost = cost
-    target_parse_page.input_tokens = input_tokens
-    target_parse_page.output_tokens = output_tokens
-    target_parse_page.result_json = {"questions": questions_payload, "warnings": warnings}
-    target_parse_page.error_json = error_payload
-    target_parse_page.updated_at = utcnow()
-    session.add(target_parse_page)
+        target_parse_page.model_used = used_model
+        target_parse_page.confidence = confidence
+        target_parse_page.status = page_status
+        target_parse_page.cost = cost
+        target_parse_page.input_tokens = input_tokens
+        target_parse_page.output_tokens = output_tokens
+        target_parse_page.result_json = {"questions": questions_payload, "warnings": warnings}
+        target_parse_page.error_json = error_payload
+        target_parse_page.updated_at = utcnow()
+        session.add(target_parse_page)
+        session.commit()
 
-    if page_status == "done":
-        job.pages_done += 1
-    job.cost_total += cost
-    job.input_tokens_total += input_tokens
-    job.output_tokens_total += output_tokens
-    pending_pages = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "pending")).all()
-    failed_pages = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "failed")).all()
-    if not pending_pages:
-        job.status = "failed" if failed_pages else "done"
-        if job.status == "done":
+        elapsed_ms = int((time.perf_counter() - parse_started_at) * 1000)
+        logger.info("parse_page_done job_id=%s page=%s status=%s model=%s ms=%s", job.id, page_number, page_status, used_model, elapsed_ms)
+        return {
+            "page_number": page_number,
+            "status": page_status,
+            "tried_models": tried_models,
+            "first_attempt_confidence": first_attempt_confidence,
+            "confidence": confidence,
+            "model_used": used_model,
+            "cost": cost,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+
+
+async def _process_parse_pages_concurrently(
+    *,
+    exam_id: int,
+    job_id: int,
+    target_parse_pages: list[ExamKeyParsePage],
+    parser_factory: Callable[[], AnswerKeyParser],
+    max_concurrency: int,
+) -> list[dict[str, Any]]:
+    semaphore = asyncio.Semaphore(max(1, max_concurrency))
+
+    async def _run_one(page_number: int) -> dict[str, Any]:
+        async with semaphore:
+            parser = parser_factory()
+            return await asyncio.to_thread(
+                _process_single_parse_page_task,
+                exam_id=exam_id,
+                job_id=job_id,
+                page_number=page_number,
+                parser=parser,
+            )
+
+    tasks = [asyncio.create_task(_run_one(parse_page.page_number)) for parse_page in target_parse_pages]
+    return await asyncio.gather(*tasks, return_exceptions=False)
+
+
+def _recompute_parse_job_state(exam_id: int, job_id: int) -> dict[str, Any]:
+    with Session(db_state.engine) as recompute_session:
+        exam = _get_exam_or_404(exam_id, recompute_session)
+        job = _get_job_for_exam_or_error(exam_id, job_id, recompute_session)
+        parse_pages = recompute_session.exec(
+            select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id)
+        ).all()
+
+        pages_done = sum(1 for page in parse_pages if page.status == "done")
+        has_running_or_pending = any(page.status in {"running", "pending"} for page in parse_pages)
+        has_failed = any(page.status == "failed" for page in parse_pages)
+
+        job.pages_done = pages_done
+        job.cost_total = sum(float(page.cost or 0.0) for page in parse_pages)
+        job.input_tokens_total = sum(int(page.input_tokens or 0) for page in parse_pages)
+        job.output_tokens_total = sum(int(page.output_tokens or 0) for page in parse_pages)
+        if has_running_or_pending:
+            job.status = "running"
+        elif has_failed:
+            job.status = "failed"
+        else:
+            job.status = "done"
             exam.status = ExamStatus.REVIEWING
-            session.add(exam)
-    else:
-        job.status = "running"
-    job.updated_at = utcnow()
-    session.add(job)
+            recompute_session.add(exam)
 
-    return {
-        "page_number": page_number,
-        "status": page_status,
-        "tried_models": tried_models,
-        "first_attempt_confidence": first_attempt_confidence,
-        "confidence": confidence,
-        "model_used": used_model,
-        "cost": cost,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-    }
+        job.updated_at = utcnow()
+        recompute_session.add(job)
+        recompute_session.commit()
+
+        return {
+            "pages_done": job.pages_done,
+            "page_count": job.page_count,
+            "status": job.status,
+            "cost_total": job.cost_total,
+            "input_tokens_total": job.input_tokens_total,
+            "output_tokens_total": job.output_tokens_total,
+        }
 
 
 @router.post("/{exam_id}/key/parse/start")
@@ -1334,7 +1422,7 @@ def start_answer_key_parse(exam_id: int, session: Session = Depends(get_session)
 
 
 @router.post("/{exam_id}/key/parse/next")
-def parse_answer_key_next_page(
+async def parse_answer_key_next_page(
     exam_id: int,
     job_id: int | None = None,
     request_id: str | None = None,
@@ -1342,7 +1430,7 @@ def parse_answer_key_next_page(
     session: Session = Depends(get_session),
     parser: AnswerKeyParser = Depends(get_answer_key_parser),
 ) -> dict[str, object]:
-    exam = _get_exam_or_404(exam_id, session)
+    _get_exam_or_404(exam_id, session)
 
     resolved_job_id = job_id or (int(request_id) if request_id and request_id.isdigit() else None)
     if not resolved_job_id:
@@ -1351,8 +1439,10 @@ def parse_answer_key_next_page(
     page_rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)).all()
     if not page_rows:
         raise HTTPException(status_code=400, detail="No key pages available. Upload and build pages first.")
-    page_rows_by_number = {row.page_number: row for row in page_rows}
+
     capped_batch_size = max(1, min(batch_size, 5))
+    concurrency = min(capped_batch_size, 3)
+    logger.info("parse_next job_id=%s batch_size=%s concurrency=%s", job.id, capped_batch_size, concurrency)
 
     target_parse_pages = session.exec(
         select(ExamKeyParsePage)
@@ -1361,50 +1451,45 @@ def parse_answer_key_next_page(
         .limit(capped_batch_size)
     ).all()
 
-    if not target_parse_pages:
-        failed_pages = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "failed")).all()
-        job.status = "failed" if failed_pages else "done"
-        job.updated_at = utcnow()
-        if job.status == "done":
-            exam.status = ExamStatus.REVIEWING
-            session.add(exam)
-        session.add(job)
-        session.commit()
-        return {
-            "job_id": job.id,
-            "request_id": str(job.id),
-            "pages_processed": [],
-            "page_count": job.page_count,
-            "pages_done": job.pages_done,
-            "status": job.status,
-            "totals": {"cost_total": job.cost_total, "input_tokens_total": job.input_tokens_total, "output_tokens_total": job.output_tokens_total},
-        }
-
-    pages_processed: list[int] = []
     page_results: list[dict[str, Any]] = []
-    for target_parse_page in target_parse_pages:
-        page_result = _process_single_parse_page(
+    if target_parse_pages:
+        parser_factory: Callable[[], AnswerKeyParser]
+        if os.getenv("OPENAI_MOCK", "").strip() == "1":
+            parser_factory = lambda: parser
+        else:
+            parser_factory = get_answer_key_parser
+        page_results = await _process_parse_pages_concurrently(
             exam_id=exam_id,
-            exam=exam,
-            job=job,
-            target_parse_page=target_parse_page,
-            page_rows_by_number=page_rows_by_number,
-            session=session,
-            parser=parser,
+            job_id=job.id,
+            target_parse_pages=list(target_parse_pages),
+            parser_factory=parser_factory,
+            max_concurrency=concurrency,
         )
-        page_results.append(page_result)
-        pages_processed.append(page_result["page_number"])
-        session.commit()
+        page_results.sort(key=lambda result: int(result.get("page_number", 0)))
+
+    job_state = _recompute_parse_job_state(exam_id, job.id)
+    pages_processed = [int(result["page_number"]) for result in page_results]
+    logger.info(
+        "parse_next_complete job_id=%s pages_done=%s/%s status=%s",
+        job.id,
+        job_state["pages_done"],
+        job_state["page_count"],
+        job_state["status"],
+    )
 
     return {
         "job_id": job.id,
         "request_id": str(job.id),
         "pages_processed": pages_processed,
-        "pages_done": job.pages_done,
-        "page_count": job.page_count,
-        "status": job.status,
+        "pages_done": job_state["pages_done"],
+        "page_count": job_state["page_count"],
+        "status": job_state["status"],
         "page_results": page_results,
-        "totals": {"cost_total": job.cost_total, "input_tokens_total": job.input_tokens_total, "output_tokens_total": job.output_tokens_total},
+        "totals": {
+            "cost_total": job_state["cost_total"],
+            "input_tokens_total": job_state["input_tokens_total"],
+            "output_tokens_total": job_state["output_tokens_total"],
+        },
     }
 
 
@@ -1539,7 +1624,7 @@ def parse_answer_key(exam_id: int, session: Session = Depends(get_session), pars
     page_count = int(started["page_count"])
     attempts: list[dict[str, object]] = []
     for _ in range(page_count):
-        next_result = parse_answer_key_next_page(exam_id=exam_id, job_id=job_id, session=session, parser=parser)
+        next_result = _run_async(parse_answer_key_next_page(exam_id=exam_id, job_id=job_id, session=session, parser=parser))
         pages_processed = next_result.get("pages_processed") if isinstance(next_result.get("pages_processed"), list) else []
         if not pages_processed:
             break
