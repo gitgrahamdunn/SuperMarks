@@ -28,6 +28,15 @@ def _default_data_dir() -> str:
     return str(DEFAULT_LOCAL_DATA_DIR)
 
 
+def _normalize_database_url(value: str) -> str:
+    normalized = value.strip()
+    if normalized.startswith("postgres://"):
+        return f"postgresql+psycopg://{normalized[len('postgres://') :]}"
+    if normalized.startswith("postgresql://"):
+        return f"postgresql+psycopg://{normalized[len('postgresql://') :]}"
+    return normalized
+
+
 class Settings(BaseSettings):
     """Runtime configuration for the SuperMarks backend."""
 
@@ -111,12 +120,12 @@ class Settings(BaseSettings):
     def effective_database_url(self) -> str:
         if self.is_production:
             if self.database_url and self.database_url.strip():
-                return self.database_url.strip()
+                return _normalize_database_url(self.database_url)
             raise RuntimeError(
                 "DATABASE_URL is required in production for durable exam metadata persistence."
             )
         if self.database_url and self.database_url.strip():
-            return self.database_url.strip()
+            return _normalize_database_url(self.database_url)
         return self.sqlite_url
 
     @property

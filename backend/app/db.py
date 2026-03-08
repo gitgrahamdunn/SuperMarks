@@ -39,9 +39,17 @@ def _is_sqlite_url(url: str) -> bool:
 
 def _create_engine():
     database_url = settings.effective_database_url
-    if _is_sqlite_url(database_url):
-        return create_engine(database_url, connect_args={"check_same_thread": False})
-    return create_engine(database_url)
+    backend = "sqlite" if _is_sqlite_url(database_url) else "postgres"
+    redacted_url = _redact_database_url(database_url)
+    logger.info("database backend: %s", backend)
+    logger.info("database url: %s", redacted_url)
+    try:
+        if _is_sqlite_url(database_url):
+            return create_engine(database_url, connect_args={"check_same_thread": False})
+        return create_engine(database_url)
+    except Exception:
+        logger.exception("failed to initialize database engine for backend=%s url=%s", backend, redacted_url)
+        raise
 
 
 def get_database_backend_name() -> str:
