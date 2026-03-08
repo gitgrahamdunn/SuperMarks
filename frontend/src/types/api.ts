@@ -184,6 +184,9 @@ export interface ParseStatusResponse {
 export interface ParseFinishResponse {
   job_id: number;
   status: string;
+  pages_done?: number;
+  page_count?: number;
+  totals?: { cost_total: number; input_tokens_total: number; output_tokens_total: number };
   questions: unknown[];
 }
 

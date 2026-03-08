@@ -15,8 +15,9 @@ from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from app import db
-from app.ai.openai_vision import OpenAIAnswerKeyParser
+from app.ai.openai_vision import OpenAIAnswerKeyParser, ParseResult
 from app.main import app
+from app.routers import exams as exams_router
 from app.models import ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, Question, Submission, SubmissionStatus
 from app.settings import settings
 
@@ -932,3 +933,81 @@ def test_list_exam_submissions_returns_submission_rows(tmp_path) -> None:
         names = [item["student_name"] for item in payload]
         assert "Alice" in names
         assert "Bob" in names
+
+
+def test_extract_usage_supports_nested_fields() -> None:
+    result = ParseResult(
+        payload={
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "total_tokens": 18,
+                "cost_usd": 0.001,
+            },
+            "response": {
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 3,
+                    "total_tokens": 8,
+                    "cost": 0.002,
+                },
+            },
+            "meta": {
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 1,
+                },
+            },
+        },
+        model="gpt-5-mini",
+    )
+
+    input_tokens, output_tokens, cost = exams_router._extract_usage(result)
+    assert input_tokens == 18
+    assert output_tokens == 11
+    assert cost == pytest.approx(0.003)
+
+
+def test_parse_finish_returns_recomputed_totals(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_id = client.post("/api/exams", json={"name": "Finish Totals"}).json()["id"]
+        client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key1.png", _tiny_png_bytes(), "image/png")), ("files", ("key2.png", _tiny_png_bytes(), "image/png"))],
+        )
+        client.post(f"/api/exams/{exam_id}/key/build-pages")
+        started = client.post(f"/api/exams/{exam_id}/key/parse/start").json()
+        job_id = started["job_id"]
+
+    with Session(db.engine) as session:
+        pages = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job_id).order_by(ExamKeyParsePage.page_number)).all()
+        assert len(pages) == 2
+        pages[0].status = "done"
+        pages[0].cost = 0.004
+        pages[0].input_tokens = 120
+        pages[0].output_tokens = 50
+        pages[1].status = "done"
+        pages[1].cost = 0.002
+        pages[1].input_tokens = 80
+        pages[1].output_tokens = 30
+        for page in pages:
+            session.add(page)
+        session.commit()
+
+    with TestClient(app) as client:
+        finished = client.post(f"/api/exams/{exam_id}/key/parse/finish", params={"job_id": job_id})
+        assert finished.status_code == 200
+        payload = finished.json()
+        assert payload["status"] == "done"
+        assert payload["pages_done"] == 2
+        assert payload["page_count"] == 2
+        assert payload["totals"]["cost_total"] == pytest.approx(0.006)
+        assert payload["totals"]["input_tokens_total"] == 200
+        assert payload["totals"]["output_tokens_total"] == 80

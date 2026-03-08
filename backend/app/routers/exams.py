@@ -1045,10 +1045,38 @@ def get_question_key_visual(
 
 def _extract_usage(result: ParseResult) -> tuple[int, int, float]:
     payload = result.payload if isinstance(result.payload, dict) else {}
-    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
-    input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-    output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
-    cost = float(usage.get("cost") or usage.get("cost_usd") or 0.0)
+
+    usage_candidates: list[dict[str, Any]] = []
+    direct_usage = payload.get("usage")
+    if isinstance(direct_usage, dict):
+        usage_candidates.append(direct_usage)
+
+    response_payload = payload.get("response")
+    if isinstance(response_payload, dict):
+        response_usage = response_payload.get("usage")
+        if isinstance(response_usage, dict):
+            usage_candidates.append(response_usage)
+
+    nested_usage = payload.get("meta")
+    if isinstance(nested_usage, dict):
+        meta_usage = nested_usage.get("usage")
+        if isinstance(meta_usage, dict):
+            usage_candidates.append(meta_usage)
+
+    input_tokens = 0
+    output_tokens = 0
+    total_tokens = 0
+    cost = 0.0
+
+    for usage in usage_candidates:
+        input_tokens += int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        output_tokens += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        total_tokens += int(usage.get("total_tokens") or 0)
+        cost += float(usage.get("cost") or usage.get("cost_usd") or 0.0)
+
+    if input_tokens == 0 and output_tokens == 0 and total_tokens > 0:
+        input_tokens = total_tokens
+
     return input_tokens, output_tokens, cost
 
 
@@ -1261,6 +1289,15 @@ def _process_single_parse_page_task(
                 input_tokens += in_t
                 output_tokens += out_t
                 cost += cst
+                logger.info(
+                    "parse_page_usage job_id=%s page=%s model=%s input_tokens=%s output_tokens=%s cost=%s",
+                    job.id,
+                    page_number,
+                    model_name,
+                    in_t,
+                    out_t,
+                    cst,
+                )
                 confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
                 if len(tried_models) == 1:
                     first_attempt_confidence = confidence
@@ -1365,6 +1402,17 @@ def _recompute_parse_job_state(exam_id: int, job_id: int) -> dict[str, Any]:
         job.updated_at = utcnow()
         recompute_session.add(job)
         recompute_session.commit()
+
+        logger.info(
+            "parse_job_totals job_id=%s pages_done=%s/%s status=%s input_tokens_total=%s output_tokens_total=%s cost_total=%s",
+            job.id,
+            job.pages_done,
+            job.page_count,
+            job.status,
+            job.input_tokens_total,
+            job.output_tokens_total,
+            job.cost_total,
+        )
 
         return {
             "pages_done": job.pages_done,
@@ -1558,14 +1606,21 @@ def finish_answer_key_parse(exam_id: int, job_id: int | None = None, request_id:
         raise HTTPException(status_code=422, detail="job_id is required")
     _get_exam_or_404(exam_id, session)
     job = _get_job_for_exam_or_error(exam_id, resolved_job_id, session)
-    pending = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "pending")).all()
-    failed = session.exec(select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "failed")).all()
-    job.status = "running" if pending else ("failed" if failed else "done")
-    job.updated_at = utcnow()
-    session.add(job)
-    session.commit()
+    job_state = _recompute_parse_job_state(exam_id, job.id)
     questions = list_questions(exam_id, session)
-    return {"job_id": job.id, "request_id": str(job.id), "status": job.status, "questions": [q.model_dump() for q in questions]}
+    return {
+        "job_id": job.id,
+        "request_id": str(job.id),
+        "status": job_state["status"],
+        "totals": {
+            "cost_total": job_state["cost_total"],
+            "input_tokens_total": job_state["input_tokens_total"],
+            "output_tokens_total": job_state["output_tokens_total"],
+        },
+        "pages_done": job_state["pages_done"],
+        "page_count": job_state["page_count"],
+        "questions": [q.model_dump() for q in questions],
+    }
 
 
 @router.get("/{exam_id}/key/parse/latest")
