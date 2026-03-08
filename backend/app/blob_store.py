@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -127,3 +128,9 @@ def upload_bytes(pathname: str, data: bytes, content_type: str) -> dict[str, str
         return sdk_result
 
     return _upload_with_http(pathname, data, content_type)
+
+
+def upload_rendered_key_page(exam_id: int, page_number: int, local_png_path: Path) -> dict[str, str]:
+    """Upload a normalized key page PNG to durable blob storage."""
+    pathname = f"exams/{exam_id}/key-pages/page_{page_number:04d}.png"
+    return upload_bytes(pathname=pathname, data=local_png_path.read_bytes(), content_type="image/png")
