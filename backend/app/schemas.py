@@ -136,6 +136,7 @@ class ExamKeyPageRead(BaseModel):
     exam_id: int
     page_number: int
     image_path: str
+    exists_on_disk: bool
     width: int
     height: int
 
