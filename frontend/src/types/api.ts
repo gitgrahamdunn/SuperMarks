@@ -42,6 +42,19 @@ export interface SubmissionPage {
   height: number;
 }
 
+export interface ExamParseJobRead {
+  id: number;
+  exam_id: number;
+  status: 'running' | 'done' | 'failed' | string;
+  page_count: number;
+  pages_done: number;
+  created_at: string;
+  updated_at: string;
+  cost_total: number;
+  input_tokens_total: number;
+  output_tokens_total: number;
+}
+
 export interface SubmissionRead {
   id: number;
   exam_id: number;
@@ -54,8 +67,9 @@ export interface SubmissionRead {
 
 export interface ExamDetail {
   exam: ExamRead;
+  key_files: StoredFileRead[];
   submissions: SubmissionRead[];
-  questions: QuestionRead[];
+  parse_jobs: ExamParseJobRead[];
 }
 
 export interface TranscriptionRead {
