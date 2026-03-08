@@ -47,8 +47,13 @@ def _create_engine():
         if _is_sqlite_url(database_url):
             return create_engine(database_url, connect_args={"check_same_thread": False})
         return create_engine(database_url)
-    except Exception:
-        logger.exception("failed to initialize database engine for backend=%s url=%s", backend, redacted_url)
+    except Exception as exc:
+        logger.exception(
+            "failed to initialize database engine for backend=%s url=%s: %s",
+            backend,
+            redacted_url,
+            exc,
+        )
         raise
 
 
