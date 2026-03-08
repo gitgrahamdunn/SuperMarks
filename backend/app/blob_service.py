@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 
 from vercel.blob import AsyncBlobClient
 
+from app.settings import settings
+
 
 class BlobConfigError(RuntimeError):
     """Raised when required blob configuration is missing."""
@@ -62,6 +64,12 @@ def normalize_blob_path(value: str) -> str:
 async def download_blob_bytes(pathname: str) -> tuple[bytes, str | None]:
     normalized_pathname = normalize_blob_path(pathname)
     logger.info("blob_private_read pathname=%s", normalized_pathname)
+
+    if blob_mock_enabled():
+        local_object = settings.data_path / "objects" / normalized_pathname
+        if not local_object.exists():
+            raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}")
+        return local_object.read_bytes(), "image/png"
 
     client = AsyncBlobClient()
     try:

@@ -1152,3 +1152,61 @@ def test_key_page_image_route_returns_debug_detail_when_file_missing(tmp_path, m
         missing_row = client.get(f"/api/exams/{exam_id}/key/page/2")
         assert missing_row.status_code == 404
         assert missing_row.json()["detail"] == "Key page not found"
+
+def test_build_key_pages_reuses_existing_durable_rows_without_rerender(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Reuse durable key pages"})
+        exam_id = exam.json()["id"]
+        client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+
+        first_build = client.post(f"/api/exams/{exam_id}/key/build-pages")
+        assert first_build.status_code == 200
+
+        image_path = Path(settings.data_dir) / first_build.json()[0]["image_path"]
+        image_path.unlink()
+
+        second_build = client.post(f"/api/exams/{exam_id}/key/build-pages")
+        assert second_build.status_code == 200
+
+    with Session(db.engine) as session:
+        rows = session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id)).all()
+        assert len(rows) == 1
+        assert rows[0].blob_pathname is not None
+
+
+def test_key_page_image_route_serves_blob_when_local_file_deleted(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Blob-backed page"})
+        exam_id = exam.json()["id"]
+        client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[("files", ("key.png", _tiny_png_bytes(), "image/png"))],
+        )
+
+        build = client.post(f"/api/exams/{exam_id}/key/build-pages")
+        assert build.status_code == 200
+
+        image_path = Path(settings.data_dir) / build.json()[0]["image_path"]
+        image_path.unlink()
+
+        image_response = client.get(f"/api/exams/{exam_id}/key/page/1")
+        assert image_response.status_code == 200
+        assert image_response.headers["content-type"].startswith("image/")
+        assert image_response.content.startswith(b"\x89PNG")

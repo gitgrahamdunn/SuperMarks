@@ -39,7 +39,7 @@ from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCan
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
 from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
-from app.blob_store import BlobUploadError, upload_bytes
+from app.blob_store import BlobUploadError, upload_bytes, upload_rendered_key_page
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 public_router = APIRouter(prefix="/exams", tags=["exams-public"])
@@ -96,9 +96,9 @@ def _load_key_page_images(exam_id: int, session: Session) -> list[Path]:
 
 
 def _upload_key_page_png(exam_id: int, page_number: int, png_path: Path) -> tuple[str, str]:
-    pathname = f"exams/{exam_id}/key-pages/page_{page_number:04d}.png"
-    upload = upload_bytes(pathname=pathname, data=png_path.read_bytes(), content_type="image/png")
-    blob_pathname = normalize_blob_path(str(upload.get("pathname") or pathname))
+    upload = upload_rendered_key_page(exam_id=exam_id, page_number=page_number, local_png_path=png_path)
+    fallback_pathname = f"exams/{exam_id}/key-pages/page_{page_number:04d}.png"
+    blob_pathname = normalize_blob_path(str(upload.get("pathname") or fallback_pathname))
     blob_url = str(upload.get("url") or "") or blob_pathname
     return blob_pathname, blob_url
 
@@ -167,9 +167,35 @@ def _render_pdf_pages(input_path: Path, output_dir: Path, start_page_number: int
 def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
     stage = "load_key_files"
     try:
-        existing = _load_key_page_images(exam_id, session)
-        if existing:
-            return existing
+        existing_rows = session.exec(
+            select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)
+        ).all()
+        if existing_rows:
+            has_durable = all((row.blob_pathname or "").strip() for row in existing_rows)
+            if has_durable:
+                return [Path(f"blob://{row.blob_pathname}") for row in existing_rows]
+
+            stage = "backfill_existing_rows"
+            needs_commit = False
+            for row in existing_rows:
+                if (row.blob_pathname or "").strip():
+                    continue
+                local_path = Path(row.image_path)
+                if not local_path.exists():
+                    continue
+                blob_pathname, blob_url = _upload_key_page_png(exam_id=exam_id, page_number=row.page_number, png_path=local_path)
+                row.blob_pathname = blob_pathname
+                row.blob_url = blob_url
+                session.add(row)
+                needs_commit = True
+
+            if needs_commit:
+                session.commit()
+                existing_rows = session.exec(
+                    select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id).order_by(ExamKeyPage.page_number)
+                ).all()
+                if existing_rows and all((row.blob_pathname or "").strip() for row in existing_rows):
+                    return [Path(f"blob://{row.blob_pathname}") for row in existing_rows]
 
         key_files = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id).order_by(ExamKeyFile.id)).all()
         if not key_files:
