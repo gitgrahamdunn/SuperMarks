@@ -790,6 +790,74 @@ def test_retry_parse_page_does_not_create_new_job(tmp_path, monkeypatch) -> None
         assert latest.json()["job"]["job_id"] == job_id
 
 
+
+
+def test_parse_next_concurrent_isolated_and_recomputes_totals(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_id = client.post("/api/exams", json={"name": "Concurrent Parse"}).json()["id"]
+        client.post(
+            f"/api/exams/{exam_id}/key/upload",
+            files=[
+                ("files", ("key1.png", _tiny_png_bytes(), "image/png")),
+                ("files", ("key2.png", _tiny_png_bytes(), "image/png")),
+                ("files", ("key3.png", _tiny_png_bytes(), "image/png")),
+            ],
+        )
+        client.post(f"/api/exams/{exam_id}/key/build-pages")
+        started = client.post(f"/api/exams/{exam_id}/key/parse/start")
+        job_id = started.json()["job_id"]
+
+    with Session(db.engine) as session:
+        page_two = session.exec(
+            select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id, ExamKeyPage.page_number == 2)
+        ).first()
+        assert page_two is not None
+        Path(page_two.image_path).unlink()
+
+    with TestClient(app) as client:
+        next_result = client.post(f"/api/exams/{exam_id}/key/parse/next", params={"job_id": job_id, "batch_size": 3})
+        assert next_result.status_code == 200
+        payload = next_result.json()
+        assert payload["pages_processed"] == [1, 2, 3]
+        result_by_page = {item["page_number"]: item["status"] for item in payload["page_results"]}
+        assert result_by_page[1] == "done"
+        assert result_by_page[2] == "failed"
+        assert result_by_page[3] == "done"
+        assert payload["pages_done"] == 2
+        assert payload["status"] == "failed"
+
+        retry = client.post(f"/api/exams/{exam_id}/key/parse/retry", params={"job_id": job_id, "page_number": 2})
+        assert retry.status_code == 200
+        assert retry.json()["job_id"] == job_id
+
+        start_reuse = client.post(f"/api/exams/{exam_id}/key/parse/start")
+        assert start_reuse.status_code == 200
+        assert start_reuse.json()["job_id"] == job_id
+        assert start_reuse.json()["reused"] is True
+
+    with Session(db.engine) as session:
+        pages = session.exec(
+            select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job_id).order_by(ExamKeyParsePage.page_number)
+        ).all()
+        assert [page.status for page in pages] == ["done", "pending", "done"]
+        job = session.get(ExamKeyParseJob, job_id)
+        assert job is not None
+        assert job.pages_done == 2
+        assert job.cost_total == pytest.approx(sum(page.cost for page in pages))
+        assert job.input_tokens_total == sum(page.input_tokens for page in pages)
+        assert job.output_tokens_total == sum(page.output_tokens for page in pages)
+
+        questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
+        labels = [question.label for question in questions]
+        assert len(labels) == len(set(labels))
+
 def test_get_exam_detail_returns_key_files_submissions_and_parse_jobs(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
