@@ -35,6 +35,7 @@ export function ExamReviewPage() {
   const [saveAvailable, setSaveAvailable] = useState(true);
   const [previewError, setPreviewError] = useState(false);
   const [imageLoaded, setImageLoaded] = useState(false);
+  const [keyImageErrorDetail, setKeyImageErrorDetail] = useState<string>('');
   const [showOverlay, setShowOverlay] = useState(true);
   const [manualPageNumber, setManualPageNumber] = useState<number | null>(null);
   const [keyPagesByNumber, setKeyPagesByNumber] = useState<Record<number, ExamKeyPage>>({});
@@ -111,6 +112,7 @@ export function ExamReviewPage() {
   useEffect(() => {
     setPreviewError(false);
     setImageLoaded(false);
+    setKeyImageErrorDetail('');
     setManualPageNumber(null);
   }, [currentIndex]);
 
@@ -127,6 +129,26 @@ export function ExamReviewPage() {
   const regionCountOnPage = overlayEvidence.length;
   const activeQuestionIdForVersion = currentQuestion?.id || currentIndex;
   const keyVisualUrl = `${api.getExamKeyPageUrl(examId, currentKeyPageNumber)}?v=${examId}-${currentKeyPageNumber}-${activeQuestionIdForVersion}`;
+  const isDebugMode = import.meta.env.DEV;
+
+  const loadKeyImageErrorDetail = async () => {
+    try {
+      const response = await fetch(api.getExamKeyPageUrl(examId, currentKeyPageNumber));
+      if (response.ok) {
+        setKeyImageErrorDetail('');
+        return;
+      }
+      const payload = await response.json().catch(() => null);
+      const detail = payload?.detail;
+      if (detail) {
+        setKeyImageErrorDetail(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      } else {
+        setKeyImageErrorDetail(`Image request failed with status ${response.status}`);
+      }
+    } catch (error) {
+      setKeyImageErrorDetail(error instanceof Error ? error.message : 'Unknown key image error');
+    }
+  };
   const questionLabelText = formatQuestionLabel(currentQuestion?.label);
 
   const updateCurrentQuestion = (updater: (question: EditableQuestion) => EditableQuestion) => {
@@ -138,6 +160,7 @@ export function ExamReviewPage() {
     setManualPageNumber(nextPageNumber);
     setPreviewError(false);
     setImageLoaded(false);
+    setKeyImageErrorDetail('');
   };
 
   const onFieldChange = (field: keyof EditableQuestion, value: string | number) => {
@@ -313,7 +336,12 @@ export function ExamReviewPage() {
         )}
         {previewError && currentKeyPageMeta && (
           <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', color: '#78350f', borderRadius: 8, padding: 10 }}>
-            No key page image found for page {currentKeyPageNumber}
+            Key page image unavailable for page {currentKeyPageNumber}
+            {isDebugMode && keyImageErrorDetail && (
+              <p className="subtle-text" style={{ margin: '8px 0 0 0', whiteSpace: 'pre-wrap' }}>
+                {keyImageErrorDetail}
+              </p>
+            )}
           </div>
         )}
         {imageLoaded && !previewError && regionCountOnPage === 0 && (
@@ -333,10 +361,12 @@ export function ExamReviewPage() {
             onImageError={() => {
               setPreviewError(true);
               setImageLoaded(false);
+              void loadKeyImageErrorDetail();
             }}
             onImageLoad={() => {
               setPreviewError(false);
               setImageLoaded(true);
+              setKeyImageErrorDetail('');
             }}
           />
         ) : null}

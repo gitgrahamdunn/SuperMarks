@@ -85,6 +85,8 @@ def create_db_and_tables() -> None:
     _ensure_column("examkeyfile", "blob_pathname", "blob_pathname VARCHAR")
     _ensure_column("submissionfile", "blob_url", "blob_url VARCHAR")
     _ensure_column("submissionfile", "blob_pathname", "blob_pathname VARCHAR")
+    _ensure_column("examkeypage", "blob_url", "blob_url VARCHAR")
+    _ensure_column("examkeypage", "blob_pathname", "blob_pathname VARCHAR")
 
 
 
