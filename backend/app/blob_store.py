@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import os
+import inspect
+import logging
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 class BlobUploadError(RuntimeError):
     """Raised when blob upload fails."""
@@ -40,34 +45,38 @@ def _mock_upload(pathname: str, data: bytes, content_type: str) -> dict[str, str
 
 def _upload_with_sdk(pathname: str, data: bytes, content_type: str) -> dict[str, str] | None:
     try:
-        from vercel import blob as vercel_blob  # type: ignore
+        from vercel.blob import put  # type: ignore
     except Exception:
         return None
 
     token = _require_blob_token()
     access = _blob_access_value()
 
-    candidates = [
-        getattr(vercel_blob, "put", None),
-        getattr(vercel_blob, "upload", None),
-        getattr(vercel_blob, "put_blob", None),
-    ]
-    uploader = next((fn for fn in candidates if callable(fn)), None)
-    if uploader is None:
+    if not callable(put):
         return None
 
+    signature = "<unknown>"
     try:
-        result: Any = uploader(  # type: ignore[misc]
+        signature = str(inspect.signature(put))
+    except Exception:
+        pass
+    logger.debug("Using vercel.blob.put=%s with signature=%s", type(put), signature)
+
+    try:
+        result: Any = put(
             pathname,
             data,
-            {
-                "access": access,
-                "contentType": content_type,
-                "token": token,
-            },
+            access=access,
+            content_type=content_type,
+            add_random_suffix=False,
+            token=token,
         )
-    except TypeError:
-        result = uploader(pathname=pathname, data=data, access=access, content_type=content_type, token=token)  # type: ignore[misc]
+    except TypeError as exc:
+        raise BlobUploadError(
+            "Blob SDK put() signature mismatch: "
+            f"signature={signature}; "
+            "attempted_call_mode=put(pathname, data, access=..., content_type=..., add_random_suffix=False, token=...)"
+        ) from exc
     except Exception:
         return None
 
