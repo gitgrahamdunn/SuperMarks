@@ -69,13 +69,27 @@ engine = _create_engine()
 
 
 def _ensure_column(table: str, column: str, ddl: str) -> None:
-    if not _is_sqlite_url(settings.effective_database_url):
-        return
     with engine.begin() as conn:
-        rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
-        existing = {row[1] for row in rows}
+        if _is_sqlite_url(settings.effective_database_url):
+            rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+            existing = {row[1] for row in rows}
+        else:
+            rows = conn.exec_driver_sql(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = %(table)s
+                  AND column_name = %(column)s
+                """,
+                {"table": table, "column": column},
+            ).fetchall()
+            existing = {row[0] for row in rows}
+
         if column not in existing:
             conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+    logger.info("ensured column %s.%s", table, column)
 
 
 def create_db_and_tables() -> None:
