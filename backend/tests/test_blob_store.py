@@ -180,3 +180,67 @@ def test_download_blob_bytes_raises_on_unsupported_shape(monkeypatch) -> None:
 
     with pytest.raises(BlobDownloadError, match="Unsupported blob result type"):
         asyncio.run(download_blob_bytes("exams/1/key/odd.bin"))
+
+
+def test_upload_bytes_uses_sdk_put_signature(monkeypatch) -> None:
+    monkeypatch.setenv("BLOB_MOCK", "")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "test-token")
+    monkeypatch.setenv("BLOB_PUBLIC_ACCESS", "public")
+
+    import types
+    import sys
+    from app import blob_store
+
+    calls: dict[str, object] = {}
+
+    def _fake_put(path: str, body: bytes, *, access: str, content_type: str | None = None, add_random_suffix: bool = False, token: str | None = None):
+        calls["path"] = path
+        calls["body"] = body
+        calls["access"] = access
+        calls["content_type"] = content_type
+        calls["add_random_suffix"] = add_random_suffix
+        calls["token"] = token
+        return {
+            "url": "https://blob.vercel-storage.com/exams/1/key/a.png",
+            "pathname": path,
+            "contentType": content_type,
+        }
+
+    fake_blob_module = types.ModuleType("vercel.blob")
+    fake_blob_module.put = _fake_put  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "vercel.blob", fake_blob_module)
+
+    result = blob_store.upload_bytes("exams/1/key/a.png", b"png-data", "image/png")
+
+    assert result["pathname"] == "exams/1/key/a.png"
+    assert result["url"].endswith("/exams/1/key/a.png")
+    assert result["contentType"] == "image/png"
+    assert calls == {
+        "path": "exams/1/key/a.png",
+        "body": b"png-data",
+        "access": "public",
+        "content_type": "image/png",
+        "add_random_suffix": False,
+        "token": "test-token",
+    }
+
+
+def test_upload_bytes_raises_clear_error_on_sdk_signature_mismatch(monkeypatch) -> None:
+    monkeypatch.setenv("BLOB_MOCK", "")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "test-token")
+
+    import types
+    import sys
+    from app import blob_store
+
+    def _bad_put(path: str, body: bytes):
+        return {"url": "https://blob.vercel-storage.com/bad.png", "pathname": path, "contentType": "image/png"}
+
+    fake_blob_module = types.ModuleType("vercel.blob")
+    fake_blob_module.put = _bad_put  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "vercel.blob", fake_blob_module)
+
+    with pytest.raises(blob_store.BlobUploadError, match="signature=.*attempted_call_mode"):
+        blob_store.upload_bytes("exams/1/key/a.png", b"png-data", "image/png")
