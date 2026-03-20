@@ -17,14 +17,44 @@ backend/
 
 ## Local development
 
+Preferred local path on this machine uses `uv`:
+
 ```bash
 cd backend
-python -m venv .venv
+uv venv .venv
 source .venv/bin/activate
-pip install -U pip
-pip install -e .[dev]
-uvicorn app.main:app --reload --port 8000
+uv pip install -e .[dev]
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+Or from repo root:
+
+```bash
+./scripts/dev-backend.sh
+```
+
+### OpenAI-compatible providers
+
+The backend now supports OpenAI-compatible providers through env vars.
+
+Example local config (`backend/.env.local`):
+
+```bash
+SUPERMARKS_LLM_PROVIDER=doubleword
+SUPERMARKS_LLM_BASE_URL=https://api.doubleword.ai/v1
+SUPERMARKS_LLM_API_KEY=your-key-here
+SUPERMARKS_KEY_PARSE_NANO_MODEL=your-model-name
+SUPERMARKS_KEY_PARSE_MINI_MODEL=your-model-name
+```
+
+If you want to force a single provider model for both parse stages, set both model vars to the same value.
+
+Recommended shape for teacher-first key parsing:
+
+- `SUPERMARKS_KEY_PARSE_NANO_MODEL` = faster visual first-pass model
+- `SUPERMARKS_KEY_PARSE_MINI_MODEL` = stronger visual escalation model
+
+The backend will keep clean pages on the fast path and only escalate suspicious pages based on structural heuristics.
 
 ## Vercel deployment
 

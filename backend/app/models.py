@@ -41,11 +41,19 @@ class Exam(SQLModel, table=True):
     status: ExamStatus = Field(default=ExamStatus.DRAFT)
 
 
+class SubmissionCaptureMode(str, Enum):
+    QUESTION_LEVEL = "question_level"
+    FRONT_PAGE_TOTALS = "front_page_totals"
+
+
 class Submission(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     exam_id: int = Field(foreign_key="exam.id", index=True)
     student_name: str
     status: SubmissionStatus = Field(default=SubmissionStatus.UPLOADED)
+    capture_mode: SubmissionCaptureMode = Field(default=SubmissionCaptureMode.QUESTION_LEVEL)
+    front_page_totals_json: Optional[str] = None
+    front_page_reviewed_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=utcnow)
 
 

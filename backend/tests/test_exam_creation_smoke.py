@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, create_engine
@@ -73,8 +74,15 @@ def test_exam_creation_workflow_smoke(tmp_path) -> None:
             assert parse_response.status_code == 200
             parse_json = parse_response.json()
             assert parse_json["ok"] is True
-            assert isinstance(parse_json["model_used"], str)
-            assert isinstance(parse_json["confidence_score"], float)
-            assert parse_json["questions_count"] == 1
+            assert parse_json["stage"] == "job_started"
+            for _ in range(10):
+                finished = client.post(f"/api/exams/{exam_id}/key/parse/finish", params={"job_id": parse_json["job_id"]})
+                assert finished.status_code == 200
+                if finished.json()["status"] != "running":
+                    break
+                time.sleep(0.05)
+            questions = client.get(f"/api/exams/{exam_id}/questions")
+            assert questions.status_code == 200
+            assert len(questions.json()) == 1
     finally:
         app.dependency_overrides.pop(get_answer_key_parser, None)

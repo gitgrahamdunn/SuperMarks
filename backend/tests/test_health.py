@@ -14,6 +14,8 @@ from app.settings import settings
 )
 def test_health_returns_openai_configuration_status(monkeypatch, api_key: str, expected_openai_configured: bool) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", api_key)
+    monkeypatch.delenv("SUPERMARKS_FRONT_PAGE_API_KEY", raising=False)
+    monkeypatch.delenv("SUPERMARKS_FRONT_PAGE_PROVIDER", raising=False)
 
     with TestClient(app) as client:
         response = client.get("/health")
@@ -23,6 +25,27 @@ def test_health_returns_openai_configuration_status(monkeypatch, api_key: str, e
     payload = response.json()
     assert payload["ok"] is True
     assert payload["openai_configured"] is expected_openai_configured
+    assert payload["front_page_openai_configured"] is expected_openai_configured
+
+
+def test_health_reports_front_page_provider_override(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERMARKS_LLM_PROVIDER", "doubleword")
+    monkeypatch.setenv("SUPERMARKS_LLM_API_KEY", "doubleword-key")
+    monkeypatch.setenv("SUPERMARKS_LLM_BASE_URL", "https://api.doubleword.ai/v1")
+    monkeypatch.setenv("SUPERMARKS_FRONT_PAGE_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("SUPERMARKS_FRONT_PAGE_API_KEY", "front-page-openai-key")
+    monkeypatch.delenv("SUPERMARKS_FRONT_PAGE_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["llm_provider"] == "doubleword"
+    assert payload["front_page_llm_provider"] == "openai_compatible"
+    assert payload["front_page_openai_configured"] is True
+    assert payload["front_page_llm_base_url_configured"] is False
 
 
 def test_health_deep_returns_storage_and_db_diagnostics(monkeypatch) -> None:

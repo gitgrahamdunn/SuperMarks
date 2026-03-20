@@ -3,16 +3,22 @@ import type {
   BulkFinalizeResponse,
   BulkUploadPreview,
   ExamDetail,
+  ExamMarkingDashboardResponse,
   ExamRead,
+  FrontPageTotals,
+  FrontPageTotalsCandidate,
+  GradeResultRead,
   QuestionRead,
   Region,
   ExamKeyPage,
   SubmissionPage,
   SubmissionRead,
+  SubmissionPrepareStatus,
   SubmissionResults,
   ParseFinishResponse,
   ParseNextResponse,
   ParseLatestResponse,
+  ParseRetryResponse,
   ParseStartResponse,
   ParseStatusResponse,
   StoredFileRead,
@@ -28,13 +34,16 @@ const EXAM_CREATE_TIMEOUT_MS = 20_000;
 const KEY_UPLOAD_TIMEOUT_MS = 0;
 const KEY_PARSE_TIMEOUT_MS = 120_000;
 const BUILD_PAGES_TIMEOUT_MS = 60_000;
+const FRONT_PAGE_CANDIDATES_TIMEOUT_MS = 60_000;
 
 function validateApiBaseUrl(baseUrl: string): string | null {
   if (!baseUrl) {
-    return 'Missing VITE_API_BASE_URL (must be https://.../api).';
+    return 'Missing VITE_API_BASE_URL (must be /api or an absolute http(s) URL ending in /api).';
   }
-  if (!/^https?:\/\//i.test(baseUrl)) {
-    return `Invalid VITE_API_BASE_URL: "${baseUrl}" must be an absolute http(s) URL ending in /api.`;
+  if (!baseUrl.startsWith('/')) {
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      return `Invalid VITE_API_BASE_URL: "${baseUrl}" must be /api or an absolute http(s) URL ending in /api.`;
+    }
   }
   if (!/\/api\/?$/i.test(baseUrl)) {
     return `Invalid VITE_API_BASE_URL: "${baseUrl}" must end with /api.`;
@@ -68,6 +77,7 @@ const REQUIRED_BACKEND_PATHS = [
   '/api/exams/{exam_id}/key/parse/start',
   '/api/exams/{exam_id}/key/parse/next',
   '/api/exams/{exam_id}/key/parse/status',
+  '/api/exams/{exam_id}/key/parse/retry',
   '/api/exams/{exam_id}/key/parse/finish',
   '/api/exams/{exam_id}/key/pages',
   '/api/exams/{exam_id}/key/review/complete',
@@ -442,6 +452,10 @@ export const api = {
     body: JSON.stringify({ name }),
     ...options,
   }, EXAM_CREATE_TIMEOUT_MS),
+  deleteExam: (examId: number, options?: RequestInit) => request(`exams/${examId}`, {
+    method: 'DELETE',
+    ...options,
+  }, EXAM_CREATE_TIMEOUT_MS),
   getExamDetail: (examId: number, options?: RequestInit) => request<ExamDetail>(`exams/${examId}`, options, EXAM_READ_TIMEOUT_MS),
   addQuestion: (examId: number, label: string, max_marks: number) => request<QuestionRead>(`exams/${examId}/questions`, {
     method: 'POST',
@@ -449,10 +463,10 @@ export const api = {
     body: JSON.stringify({ label, max_marks }),
   }),
   listQuestions: (examId: number) => request<QuestionRead[]>(`exams/${examId}/questions`),
-  createSubmission: async (examId: number, studentName: string) => request<SubmissionRead>(`exams/${examId}/submissions`, {
+  createSubmission: async (examId: number, studentName: string, captureMode: 'question_level' | 'front_page_totals' = 'question_level') => request<SubmissionRead>(`exams/${examId}/submissions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ student_name: studentName }),
+    body: JSON.stringify({ student_name: studentName, capture_mode: captureMode }),
   }, DEFAULT_TIMEOUT_MS),
   getBlobUploadToken: () => request<{ token: string }>('blob/upload-token', { method: 'POST' }),
   registerExamKeyFiles: (examId: number, files: Array<{ original_filename: string; blob_pathname: string; content_type: string; size_bytes: number }>) => request<{ registered: number }>(`exams/${examId}/key/register`, {
@@ -466,7 +480,7 @@ export const api = {
     body: JSON.stringify({ files }),
   }),
 
-  uploadBulkSubmissionsPdf: async (examId: number, file: File, rosterText?: string) => {
+  uploadBulkSubmissionsFile: async (examId: number, file: File, rosterText?: string) => {
     const formData = new FormData();
     formData.append('file', file);
     if (rosterText && rosterText.trim()) {
@@ -497,6 +511,67 @@ export const api = {
 
   listExamKeyFiles: (examId: number) => request<StoredFileRead[]>(`exams/${examId}/key/files`),
   listExamSubmissions: (examId: number) => request<SubmissionRead[]>(`exams/${examId}/submissions`),
+  getExamMarkingDashboard: (examId: number) => request<ExamMarkingDashboardResponse>(`exams/${examId}/marking-dashboard`),
+  downloadExamExportCsv: async (examId: number) => {
+    const url = buildApiUrl(`exams/${examId}/export.csv`);
+    const { response, clear } = await fetchWithTimeout(url, buildRequestOptions(), DEFAULT_TIMEOUT_MS);
+    try {
+      if (!response.ok) {
+        throw buildErrorDetailsFromResponse(url, 'GET', response.status, await response.text());
+      }
+      return {
+        blob: await response.blob(),
+        filename: response.headers.get('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] || `exam-${examId}-marks.csv`,
+      };
+    } finally {
+      clear();
+    }
+  },
+  downloadExamSummaryCsv: async (examId: number) => {
+    const url = buildApiUrl(`exams/${examId}/export-summary.csv`);
+    const { response, clear } = await fetchWithTimeout(url, buildRequestOptions(), DEFAULT_TIMEOUT_MS);
+    try {
+      if (!response.ok) {
+        throw buildErrorDetailsFromResponse(url, 'GET', response.status, await response.text());
+      }
+      return {
+        blob: await response.blob(),
+        filename: response.headers.get('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] || `exam-${examId}-summary.csv`,
+      };
+    } finally {
+      clear();
+    }
+  },
+  downloadExamObjectivesSummaryCsv: async (examId: number) => {
+    const url = buildApiUrl(`exams/${examId}/export-objectives-summary.csv`);
+    const { response, clear } = await fetchWithTimeout(url, buildRequestOptions(), DEFAULT_TIMEOUT_MS);
+    try {
+      if (!response.ok) {
+        throw buildErrorDetailsFromResponse(url, 'GET', response.status, await response.text());
+      }
+      return {
+        blob: await response.blob(),
+        filename: response.headers.get('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] || `exam-${examId}-objectives-summary.csv`,
+      };
+    } finally {
+      clear();
+    }
+  },
+  downloadExamStudentSummariesZip: async (examId: number) => {
+    const url = buildApiUrl(`exams/${examId}/export-student-summaries.zip`);
+    const { response, clear } = await fetchWithTimeout(url, buildRequestOptions(), DEFAULT_TIMEOUT_MS);
+    try {
+      if (!response.ok) {
+        throw buildErrorDetailsFromResponse(url, 'GET', response.status, await response.text());
+      }
+      return {
+        blob: await response.blob(),
+        filename: response.headers.get('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] || `exam-${examId}-student-summaries.zip`,
+      };
+    } finally {
+      clear();
+    }
+  },
   buildExamKeyPages: (examId: number, options?: RequestInit) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST', ...options }, BUILD_PAGES_TIMEOUT_MS),
   listExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/pages`),
   getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),
@@ -507,7 +582,7 @@ export const api = {
   parseExamKeyNext: (examId: number, jobId: number, batchSize = 3, options?: RequestInit) => request<ParseNextResponse>(`exams/${examId}/key/parse/next?job_id=${jobId}&batch_size=${batchSize}`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
   getExamKeyParseStatus: (examId: number, jobId: number, options?: RequestInit) => request<ParseStatusResponse>(`exams/${examId}/key/parse/status?job_id=${jobId}`, { method: 'GET', ...options }, EXAM_READ_TIMEOUT_MS),
   getExamKeyParseLatest: (examId: number, options?: RequestInit) => request<ParseLatestResponse>(`exams/${examId}/key/parse/latest`, { method: 'GET', ...options }, EXAM_READ_TIMEOUT_MS),
-  retryExamKeyParsePage: (examId: number, jobId: number, pageNumber: number, options?: RequestInit) => request<ParseNextResponse>(`exams/${examId}/key/parse/retry?job_id=${jobId}&page_number=${pageNumber}`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
+  retryExamKeyParsePage: (examId: number, jobId: number, pageNumber: number, options?: RequestInit) => request<ParseRetryResponse>(`exams/${examId}/key/parse/retry?job_id=${jobId}&page_number=${pageNumber}`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
   finishExamKeyParse: (examId: number, jobId: number, options?: RequestInit) => request<ParseFinishResponse>(`exams/${examId}/key/parse/finish?job_id=${jobId}`, { method: 'POST', ...options }, EXAM_CREATE_TIMEOUT_MS),
   parseExamKeyRaw: async (examId: number, options?: RequestInit) => {
     const path = `exams/${examId}/key/parse`;
@@ -546,9 +621,27 @@ export const api = {
   listSubmissionFiles: (submissionId: number) => request<StoredFileRead[]>(`submissions/${submissionId}/files`),
   buildPages: (submissionId: number) => request<SubmissionPage[]>(`submissions/${submissionId}/build-pages`, { method: 'POST' }, BUILD_PAGES_TIMEOUT_MS),
   buildCrops: (submissionId: number) => request<{ message: string }>(`submissions/${submissionId}/build-crops`, { method: 'POST' }),
+  getPrepareStatus: (submissionId: number) => request<SubmissionPrepareStatus>(`submissions/${submissionId}/prepare-status`),
+  prepareSubmission: (submissionId: number) => request<SubmissionPrepareStatus>(`submissions/${submissionId}/prepare?provider=stub`, { method: 'POST' }),
   transcribe: (submissionId: number) => request<{ message: string }>(`submissions/${submissionId}/transcribe?provider=stub`, { method: 'POST' }),
   grade: (submissionId: number) => request<{ message: string }>(`submissions/${submissionId}/grade?grader=rule_based`, { method: 'POST' }),
   getResults: (submissionId: number) => request<SubmissionResults>(`submissions/${submissionId}/results`),
+  getFrontPageTotals: (submissionId: number) => request<FrontPageTotals | null>(`submissions/${submissionId}/front-page-totals`),
+  getFrontPageTotalsCandidates: (submissionId: number) => request<FrontPageTotalsCandidate>(
+    `submissions/${submissionId}/front-page-totals-candidates`,
+    {},
+    FRONT_PAGE_CANDIDATES_TIMEOUT_MS,
+  ),
+  saveFrontPageTotals: (submissionId: number, payload: { overall_marks_awarded: number; overall_max_marks?: number | null; objective_scores: Array<{ objective_code: string; marks_awarded: number; max_marks?: number | null }>; teacher_note: string; confirmed: boolean }) => request<FrontPageTotals>(`submissions/${submissionId}/front-page-totals`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }),
+  saveManualGrade: (submissionId: number, questionId: number, payload: { marks_awarded: number; teacher_note: string }) => request<GradeResultRead>(`submissions/${submissionId}/questions/${questionId}/manual-grade`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }),
   getPageImageUrl: (submissionId: number, pageNumber: number) => buildApiUrl(`submissions/${submissionId}/page/${pageNumber}`),
   getCropImageUrl: (submissionId: number, questionId: number) => buildApiUrl(`submissions/${submissionId}/crop/${questionId}`),
   getSignedBlobUrl: (pathname: string) => request<{ url: string }>('blob/signed-url', {

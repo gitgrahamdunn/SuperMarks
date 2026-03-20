@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, ApiError, api, buildApiUrl, getBackendVersion, getClientDiagnostics, maskApiBaseUrl, pingApiHealth } from '../api/client';
+import { API_BASE_URL, ApiError, api, buildApiUrl, getBackendVersion, maskApiBaseUrl, pingApiHealth } from '../api/client';
 import { DebugPanel } from '../components/DebugPanel';
 import { FileUploader } from '../components/FileUploader';
 import { uploadToBlob } from '../blob/upload';
@@ -153,10 +153,51 @@ const pickPreferredTotals = (
   return incoming;
 };
 
+const formatExamDate = (value: string) => {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'Unknown date';
+  return parsed.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+};
+
+const formatExamDateTime = (value: string) => {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'Unknown time';
+  return parsed.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+};
+
+const normalizeExamStatus = (status?: string | null) => {
+  const normalized = status?.trim().toLowerCase();
+  if (!normalized) {
+    return { label: 'Active workspace', tone: 'status-ready' };
+  }
+  if (normalized.includes('complete') || normalized.includes('done')) {
+    return { label: 'Complete', tone: 'status-complete' };
+  }
+  if (normalized.includes('progress') || normalized.includes('review')) {
+    return { label: 'In progress', tone: 'status-in-progress' };
+  }
+  if (normalized.includes('block') || normalized.includes('flag')) {
+    return { label: 'Needs review', tone: 'status-blocked' };
+  }
+  return { label: status || 'Active workspace', tone: 'status-neutral' };
+};
+
 
 export function ExamsPage() {
+  const showDevTools = import.meta.env.DEV;
   const [exams, setExams] = useState<ExamRead[]>([]);
   const [loading, setLoading] = useState(true);
+  const [deletingExamId, setDeletingExamId] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalName, setModalName] = useState('');
@@ -209,11 +250,15 @@ export function ExamsPage() {
 
   const totalFileBytes = useMemo(() => modalFiles.reduce((sum, file) => sum + file.size, 0), [modalFiles]);
   const totalTooLarge = totalFileBytes > LARGE_TOTAL_BYTES;
-  const filteredExams = useMemo(
-    () => exams.filter((exam) => exam.name.toLowerCase().includes(searchTerm.toLowerCase().trim())),
-    [exams, searchTerm],
+  const sortedExams = useMemo(
+    () => [...exams].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()),
+    [exams],
   );
-  const diagnostics = getClientDiagnostics();
+  const filteredExams = useMemo(
+    () => sortedExams.filter((exam) => exam.name.toLowerCase().includes(searchTerm.toLowerCase().trim())),
+    [sortedExams, searchTerm],
+  );
+  const recentExams = useMemo(() => sortedExams.slice(0, 3), [sortedExams]);
   const estimatedParsingPage = parsePageCount > 0 ? Math.min(parsePageCount, Math.max(1, Math.floor(elapsedSeconds / 3) + 1)) : 0;
   const parseActivityMessages = [
     `Parsing up to 3 pages at a time (near page ${Math.max(1, currentParsingPageNumber)})…`,
@@ -234,6 +279,7 @@ export function ExamsPage() {
   const parseHasFailedPages = lastFailedPages.length > 0 || failedPage !== null;
   const parseIsDone = step === 'done' || parseJobStatus === 'done';
   const canReviewCriteria = Boolean(currentExamId && parseIsDone && (parsedQuestionCount || liveParsedQuestions.length) > 0);
+  const activeExamCount = exams.filter((exam) => !normalizeExamStatus(exam.status).label.toLowerCase().includes('complete')).length;
 
   const applyParseBatchResult = (next: ParseNextResponse) => {
     setParsePageIndex(next.pages_done);
@@ -310,6 +356,42 @@ export function ExamsPage() {
   useEffect(() => {
     void loadExams();
   }, []);
+
+  const onCreateExamWorkspace = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!modalName.trim()) {
+      showWarning('Enter an exam name');
+      return;
+    }
+
+    try {
+      setIsRunning(true);
+      const exam = await api.createExam(modalName.trim());
+      showSuccess('Exam workspace created.');
+      closeModal();
+      navigate(`/exams/${exam.id}`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to create exam workspace');
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const handleDeleteExam = async (exam: ExamRead) => {
+    const confirmed = window.confirm(`Delete "${exam.name}" and all of its submissions, parsing jobs, and results? This cannot be undone.`);
+    if (!confirmed) return;
+
+    try {
+      setDeletingExamId(exam.id);
+      await api.deleteExam(exam.id);
+      setExams((prev) => prev.filter((item) => item.id !== exam.id));
+      showSuccess(`Deleted "${exam.name}"`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to delete exam');
+    } finally {
+      setDeletingExamId((current) => (current === exam.id ? null : current));
+    }
+  };
 
   useEffect(() => {
     const loadBackendVersion = async () => {
@@ -666,7 +748,6 @@ export function ExamsPage() {
 
       const status = await api.getExamKeyParseStatus(activeExamId, started.job_id, requestOptions);
       setRunningTotals((prev) => pickPreferredTotals(prev, status.totals));
-      setParseJobStatus(status.status === 'running' ? 'running' : status.status);
       const finished = await api.finishExamKeyParse(activeExamId, started.job_id, requestOptions);
       setRunningTotals((prev) => pickPreferredTotals(prev, finished.totals));
       logStep({ step: 'parsing', endpointUrl: buildApiUrl(`exams/${activeExamId}/key/parse/finish?job_id=${started.job_id}`), status: 200, responseSnippet: JSON.stringify(finished).slice(0, 500) });
@@ -970,31 +1051,201 @@ export function ExamsPage() {
   };
 
   return (
-    <div className="stack">
-      <h1>Exams</h1>
+    <div className="page-stack">
+      <section className="card card--hero stack">
+        <div className="page-header">
+          <div>
+            <p className="page-eyebrow">Teacher workspace</p>
+            <h1 className="page-title">Exams</h1>
+            <p className="page-subtitle">Set up an exam, upload marked papers, confirm the extracted totals, and export the class table. The interface should feel calm enough to use during real school admin, not like a debug console.</p>
+          </div>
+          <div className="page-toolbar">
+            {showDevTools && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setDiagnosticsOpen((prev) => !prev)}
+                aria-expanded={diagnosticsOpen}
+                aria-controls="diagnostics-panel"
+              >
+                {diagnosticsOpen ? 'Hide API diagnostics' : 'API diagnostics'}
+              </button>
+            )}
+          </div>
+        </div>
 
-      <div className="grid-2 top-cards">
-        <section className="card">
-          <h2>Enter Exam Key</h2>
-          <p className="subtle-text">Create an exam and parse answer keys in one guided flow.</p>
-          <button ref={openWizardButtonRef} type="button" className="btn btn-primary" onClick={() => setIsModalOpen(true)}>
-            Enter Exam Key
-          </button>
-          {parsedQuestionCount !== null && <p className="subtle-text">Last parse detected {parsedQuestionCount} questions.</p>}
+        <div className="metric-grid">
+          <article className="metric-card">
+            <p className="metric-label">Open workspaces</p>
+            <p className="metric-value">{exams.length}</p>
+            <p className="metric-meta">Saved exams ready to reopen</p>
+          </article>
+          <article className="metric-card">
+            <p className="metric-label">Needs attention</p>
+            <p className="metric-value">{activeExamCount}</p>
+            <p className="metric-meta">Workspaces still moving toward export</p>
+          </article>
+          <article className="metric-card">
+            <p className="metric-label">Recent</p>
+            <p className="metric-value">{recentExams.length}</p>
+            <p className="metric-meta">Most recent work is surfaced first</p>
+          </article>
+          <article className="metric-card">
+            <p className="metric-label">Latest activity</p>
+            <p className="metric-value">{recentExams.length > 0 ? formatExamDate(recentExams[0].created_at) : '—'}</p>
+            <p className="metric-meta">Most recent workspace created</p>
+          </article>
+        </div>
+      </section>
+
+      <div className="workflow-grid">
+        <section className="card stack">
+          <div className="panel-title-row">
+            <div>
+              <h2 className="section-title">Start a new exam</h2>
+              <p className="subtle-text">Start with the exam shell. Bulk paper upload and totals confirmation happen inside the workspace.</p>
+            </div>
+            <span className="status-pill status-ready">Primary action</span>
+          </div>
+          <div className="review-readonly-block surface-muted callout-card">
+            <strong>Minimal first step</strong>
+            <p className="subtle-text" style={{ marginTop: '.35rem' }}>Create the exam first. Then upload graded papers and confirm the totals table for export.</p>
+          </div>
+          <div className="actions-row" style={{ marginTop: 0 }}>
+            <button type="button" className="btn btn-primary" onClick={() => setIsModalOpen(true)}>
+              Create exam
+            </button>
+          </div>
         </section>
 
-        <section className="card">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setDiagnosticsOpen((prev) => !prev)}
-            aria-expanded={diagnosticsOpen}
-            aria-controls="diagnostics-panel"
-          >
-            API diagnostics
-          </button>
+        <section className="card stack">
+          <div className="panel-title-row">
+            <div>
+              <h2 className="section-title">Recent workspaces</h2>
+              <p className="subtle-text">Jump back into the exams you touched most recently.</p>
+            </div>
+            <span className="status-pill status-neutral">{recentExams.length} shown</span>
+          </div>
+          {recentExams.length === 0 ? (
+            <p className="subtle-text">No exams yet. Create the first one above.</p>
+          ) : (
+            <div className="stack" style={{ gap: '.7rem' }}>
+              {recentExams.map((exam) => {
+                const status = normalizeExamStatus(exam.status);
+                const isDeleting = deletingExamId === exam.id;
+                return (
+                  <article key={`recent-${exam.id}`} className="workspace-card">
+                    <div className="workspace-card-header">
+                      <div>
+                        <Link className="workspace-card-title" to={`/exams/${exam.id}`}>{exam.name}</Link>
+                        <p className="subtle-text" style={{ marginTop: '.25rem' }}>Created {formatExamDateTime(exam.created_at)}</p>
+                      </div>
+                      <span className={`status-pill ${status.tone}`}>{status.label}</span>
+                    </div>
+                    <div className="actions-row" style={{ marginTop: 0 }}>
+                      <Link className="btn btn-secondary btn-sm" to={`/exams/${exam.id}`}>Open workspace</Link>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm"
+                        onClick={() => void handleDeleteExam(exam)}
+                        disabled={isDeleting}
+                      >
+                        {isDeleting ? 'Deleting…' : 'Delete'}
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </div>
+
+      <section className="card stack">
+        <div className="panel-title-row">
+          <div>
+            <h2 className="section-title">Exam library</h2>
+            <p className="subtle-text">Search and reopen saved exam workspaces.</p>
+          </div>
+          <span className="status-pill status-neutral">{filteredExams.length} match{filteredExams.length === 1 ? '' : 'es'}</span>
+        </div>
+
+        <label htmlFor="exam-search">Search exams</label>
+        <input
+          id="exam-search"
+          value={searchTerm}
+          onChange={(event) => setSearchTerm(event.target.value)}
+          placeholder="Search by exam name"
+        />
+
+        {loading && (
+          <div className="workspace-card-grid" aria-label="Loading exams">
+            {[1, 2, 3].map((item) => (
+              <div key={item} className="workspace-card skeleton" style={{ minHeight: 132 }} />
+            ))}
+          </div>
+        )}
+
+        {!loading && filteredExams.length === 0 && (
+          <div className="review-readonly-block">
+            <strong>No matching exams</strong>
+            <p className="subtle-text" style={{ marginTop: '.35rem' }}>No saved exam matches that search yet. Start a new exam above to create one.</p>
+          </div>
+        )}
+
+        {!loading && filteredExams.length > 0 && (
+          <div className="workspace-card-grid">
+            {filteredExams.map((exam) => {
+              const status = normalizeExamStatus(exam.status);
+              const isDeleting = deletingExamId === exam.id;
+              return (
+                <article key={exam.id} className="workspace-card">
+                  <div className="workspace-card-header">
+                    <div>
+                      <p className="workspace-card-kicker">Exam workspace</p>
+                      <Link className="workspace-card-title" to={`/exams/${exam.id}`}>{exam.name}</Link>
+                    </div>
+                    <span className={`status-pill ${status.tone}`}>{status.label}</span>
+                  </div>
+                  <div className="workspace-card-meta">
+                    <span>Created {formatExamDate(exam.created_at)}</span>
+                    <span>Exam ID {exam.id}</span>
+                  </div>
+                  <div className="actions-row" style={{ marginTop: 0 }}>
+                    <Link className="btn btn-secondary btn-sm" to={`/exams/${exam.id}`}>Open workspace</Link>
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      onClick={() => void handleDeleteExam(exam)}
+                      disabled={isDeleting}
+                    >
+                      {isDeleting ? 'Deleting…' : 'Delete'}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {showDevTools && (
+        <section className="card stack">
+          <div className="panel-title-row">
+            <div>
+              <h2 className="section-title">Diagnostics</h2>
+              <p className="subtle-text">Available when needed, visually out of the way when you are just trying to run the workflow.</p>
+            </div>
+            <span className="status-pill status-neutral">Technical</span>
+          </div>
+          <div className="review-readonly-block surface-muted">
+            <div className="inline-stat-row">
+              <span className="status-pill status-neutral">API base: {maskApiBaseUrl(API_BASE_URL)}</span>
+              <span className="status-pill status-neutral">Backend: {backendVersion}</span>
+            </div>
+          </div>
           {diagnosticsOpen && (
-            <div id="diagnostics-panel" className="stack" style={{ marginTop: '0.75rem' }}>
+            <div id="diagnostics-panel" className="stack" style={{ marginTop: '0.25rem' }}>
               <p className="subtle-text">Configured API base: {maskApiBaseUrl(API_BASE_URL)}</p>
               <button type="button" className="btn btn-secondary" onClick={onPingApi} disabled={isPingingApi}>
                 {isPingingApi ? 'Pinging...' : 'Ping API'}
@@ -1026,46 +1277,12 @@ export function ExamsPage() {
             </div>
           )}
         </section>
-      </div>
-
-      <section className="card">
-        <h2>Exam List</h2>
-        <label htmlFor="exam-search">Search exams</label>
-        <input
-          id="exam-search"
-          value={searchTerm}
-          onChange={(event) => setSearchTerm(event.target.value)}
-          placeholder="Type exam name..."
-        />
-
-        {loading && (
-          <ul className="stack" aria-label="Loading exams">
-            {[1, 2, 3].map((item) => (
-              <li key={item} className="skeleton skeleton-row" />
-            ))}
-          </ul>
-        )}
-
-        {!loading && filteredExams.length === 0 && (
-          <p className="subtle-text">No exams match your search yet. Add an exam key above to get started.</p>
-        )}
-
-        {!loading && filteredExams.length > 0 && (
-          <ul className="stack">
-            {filteredExams.map((exam) => (
-              <li key={exam.id}>
-                <Link to={`/exams/${exam.id}`}>{exam.name}</Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      )}
 
       {isModalOpen && (
-        <Modal title="Enter Exam Key" onClose={closeModal} initialFocusRef={examNameRef}>
-          <h2>Enter Exam Key</h2>
-          <p className="subtle-text wizard-step-banner">Current step: {isRunning ? step : 'ready'}</p>
-          <form onSubmit={onCreateAndUpload} className="stack" encType="multipart/form-data">
+        <Modal title="Create exam" onClose={closeModal} initialFocusRef={examNameRef}>
+          <p className="subtle-text">Give the exam a clear name. The upload and confirmation flow lives in the next screen.</p>
+          <form onSubmit={onCreateExamWorkspace} className="stack">
             <label htmlFor="exam-name">Exam name</label>
             <input
               id="exam-name"
@@ -1076,213 +1293,25 @@ export function ExamsPage() {
               required
               disabled={isRunning}
             />
-
-            <label htmlFor="exam-key-files">Key files (PDF or image)</label>
-            <FileUploader
-              files={modalFiles}
-              disabled={isRunning}
-              maxBytesPerFile={SERVER_UPLOAD_MAX_BYTES}
-              onChange={(files) => {
-                setModalFiles(files);
-                setAllowLargeUpload(false);
-                const hasLargePdf = files.some((file) => file.type === 'application/pdf' && file.size > LARGE_FILE_BYTES);
-                if (hasLargePdf) {
-                  showWarning('Large PDFs will require direct-to-Blob upload (coming next).');
-                  // TODO(Phase 2): route large PDFs through client upload flow using /api/blob/client-upload-token.
-                }
-              }}
-              onReject={(message) => showError(message)}
-            />
-
-            <p className="subtle-text">Total: {formatMb(totalFileBytes)}</p>
-            {totalTooLarge && (
-              <div className="warning-strong">
-                <p>Total selection exceeds 12 MB and may fail in serverless environments.</p>
-                <label htmlFor="allow-large-upload">
-                  <input
-                    id="allow-large-upload"
-                    type="checkbox"
-                    checked={allowLargeUpload}
-                    onChange={(event) => setAllowLargeUpload(event.target.checked)}
-                    disabled={isRunning}
-                  />
-                  {' '}I understand and want to continue anyway.
-                </label>
-              </div>
-            )}
-
-            <div className="wizard-progress-block">
-              <div className="wizard-progress-header subtle-text">
-                <span>Progress: {parseProgress}%</span>
-                <span>Elapsed: {formatElapsed(elapsedSeconds)}</span>
-              </div>
-              {step === 'parsing' && parsePageCount > 0 && (
-                <div className="stack" style={{ gap: 8 }}>
-                  <p className="subtle-text">Parsing up to 3 pages at a time</p>
-                  <p className="subtle-text">Completed {pagesDone} of {parsePageCount} pages</p>
-                  {processedStart !== null && processedEnd !== null && (
-                    <p className="subtle-text">Parsing pages {processedStart}–{processedEnd} of {parsePageCount}</p>
-                  )}
-                  {lastProcessedPages.length > 0 && <p className="subtle-text">Processed pages: {lastProcessedPages.join(', ')}</p>}
-                  {failedPageCount > 0 && <p className="warning-text">Failed pages: {lastFailedPages.length > 0 ? lastFailedPages.join(', ') : failedPageCount}</p>}
-                  <p className="subtle-text">Parse job: {parseJobStatus}</p>
-                  <p className="subtle-text wizard-activity-text">{parseActivityMessages[activityMessageIndex]}</p>
-                  <div className="wizard-page-row" aria-label="Page parsing status">
-                    {Array.from({ length: parsePageCount }, (_, idx) => {
-                      const pageNumber = idx + 1;
-                      const status = pageStatuses[pageNumber] || 'pending';
-                      const label = status === 'done' ? 'done' : status === 'active' ? 'current' : status;
-                      return (
-                        <span key={pageNumber} className={`wizard-page-pill status-${status}`}>
-                          {pageNumber} {label}
-                        </span>
-                      );
-                    })}
-                  </div>
-                  {keyPageImageUrl && (
-                    <img
-                      key={currentParsingPageNumber}
-                      className="wizard-key-page-preview"
-                      src={keyPageImageUrl}
-                      alt={`Key page ${currentParsePageForDisplay}`}
-                    />
-                  )}
-                </div>
-              )}
-              <div className="wizard-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={parseProgress}>
-                <div className="wizard-progress-fill" style={{ width: `${parseProgress}%` }} />
-              </div>
-              <ul className="wizard-checklist subtle-text">
-                {checklistSteps.map((item) => {
-                  const marker = item.status === 'done' ? '✓' : item.status === 'active' ? '…' : item.status === 'failed' ? '✕' : '○';
-                  return (
-                    <li key={item.id} className={`wizard-checklist-item status-${item.status}`}>
-                      <span>{marker}</span> {item.label}
-                    </li>
-                  );
-                })}
-              </ul>
+            <div className="review-readonly-block surface-muted">
+              <strong>Next</strong>
+              <p className="subtle-text" style={{ marginTop: '.35rem' }}>
+                Open the exam workspace, upload graded student papers, confirm extracted totals, then export the class table as CSV.
+              </p>
             </div>
 
-            {currentExamId && <p className="subtle-text">Exam ID: {currentExamId}</p>}
-            {failedSummary && <p className="warning-text">{failedSummary}</p>}
-            {parseTimings && <pre className="code-box">{Object.entries(parseTimings).map(([k, v]) => `${k}: ${v}ms`).join('\n')}</pre>}
-            {runningTotals && (
-              <pre className="code-box">{`cost_total: $${runningTotals.cost_total.toFixed(6)}\ninput_tokens_total: ${runningTotals.input_tokens_total}\noutput_tokens_total: ${runningTotals.output_tokens_total}\nmodel_usage: ${JSON.stringify(runningTotals.model_usage || {})}`}</pre>
-            )}
-            {step === 'parsing' && liveParsedQuestions.length > 0 && (
-              <div className="stack wizard-live-questions" style={{ gap: 6 }}>
-                <strong>Live parsed questions ({liveParsedQuestions.length})</strong>
-                {liveParsedQuestions.map((question) => {
-                  const parsedFromPage = getQuestionPageNumber(question);
-                  return (
-                    <div key={question.id} className="wizard-live-question-row">
-                      <span>{question.label}</span>
-                      <span className="wizard-page-badge">Parsed from page {parsedFromPage}</span>
-                    </div>
-                  );
-                })}
-                <div ref={liveQuestionsBottomRef} />
-              </div>
-            )}
-            {step === 'parsing' && emptyPageNotes.map((page) => (
-              <p key={page} className="subtle-text">No questions detected on page {page}</p>
-            ))}
-            {currentExamId && (step === 'parsing' || parseIsDone) && (
-              <p className="subtle-text">This exam is saved. You can safely leave and come back later.</p>
-            )}
-            {isRunning && step === 'parsing' && (
-              <p className="subtle-text">You can safely close this and return later from the exam page.</p>
-            )}
-            {failedPage && <p className="warning-text">Page {failedPage} failed — retry?</p>}
-            {failedPage && (
-              <button type="button" className="btn btn-secondary" onClick={() => void retryFailedParsePage()}>
-                Retry failed page
-              </button>
-            )}
-            {parseJobId && currentExamId && (
-              <button type="button" className="btn btn-secondary" onClick={() => void resumeParseJob()} disabled={isRunning}>
-                Resume parsing
-              </button>
-            )}
-            {wizardError && <DebugPanel summary={wizardError.summary} details={wizardError.details} />}
-            {wizardError && !isRunning && (
-              <button type="button" className="btn btn-secondary" onClick={onRetryFailedStep}>
-                Retry step
-              </button>
-            )}
-            {examUnavailable && (
-              <button type="button" className="btn btn-secondary" onClick={() => { closeModal(); navigate('/'); }}>
-                Back to Exams
-              </button>
-            )}
-
-            <details>
-              <summary>Show details</summary>
-              <div className="subtle-text stack">
-                <p>API base URL: {diagnostics.apiBaseUrl}</p>
-                <p>API base host (masked): {diagnostics.maskedApiBaseHost}</p>
-                <p>Frontend version: {diagnostics.appVersion}</p>
-                <p>Backend version: {backendVersion}</p>
-                <p>hasApiKey: {String(diagnostics.hasApiKey)}</p>
-                <p>Auth header attached: {String(diagnostics.authHeaderAttached)}</p>
-                <p>buildId: {diagnostics.buildId}</p>
-                <p>Computed create endpoint: {buildApiUrl('exams')}</p>
-                <p>currentExamId: {currentExamId ?? 'n/a'}</p>
-                <p>currentParseJobId: {parseJobId ?? 'n/a'}</p>
-                <p>latestBackendParseJobId: {latestBackendParseJobId ?? 'n/a'}</p>
-                <p>parse/start reused existing job: {parseStartReusedJob === null ? 'n/a' : String(parseStartReusedJob)}</p>
-                <p>parse/start URL: {parseStartUrl}</p>
-                {stepLogs.length === 0 && <p>No step details yet.</p>}
-                {stepLogs.map((entry, index) => (
-                  <div key={`${entry.step}-${index}`} className="wizard-detail-block">
-                    <p><strong>Step:</strong> {entry.step}</p>
-                    <p><strong>Endpoint:</strong> {entry.endpointUrl}</p>
-                    <p><strong>Status:</strong> {entry.status}</p>
-                    <p><strong>Response snippet:</strong> {(entry.responseSnippet || '<empty>').slice(0, 500)}</p>
-                    {entry.exceptionMessage && <p><strong>Exception:</strong> {entry.exceptionMessage}</p>}
-                  </div>
-                ))}
-              </div>
-            </details>
-
             <div className="actions-row">
-              {!parseIsDone && (
-                <button type="submit" className="btn btn-primary" disabled={isRunning || (totalTooLarge && !allowLargeUpload)}>
-                  {isRunning ? 'Working...' : 'Enter exam & parse'}
-                </button>
-              )}
-              {currentExamId && (step === 'parsing' || parseIsDone) && (
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => navigate(`/exams/${currentExamId}`)}
-                >
-                  Open Exam
-                </button>
-              )}
-              {parseHasFailedPages && parseJobId && currentExamId && (
-                <button type="button" className="btn btn-secondary" onClick={() => void retryFailedParsePage()} disabled={isRunning}>
-                  Retry failed pages
-                </button>
-              )}
-              {canReviewCriteria && currentExamId && (
-                <button type="button" className="btn btn-secondary" onClick={() => navigate(`/exams/${currentExamId}/review`)}>
-                  Review Criteria
-                </button>
-              )}
+              <button type="submit" className="btn btn-primary" disabled={isRunning}>
+                {isRunning ? 'Creating…' : 'Create exam'}
+              </button>
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={() => {
-                  if (isRunning) {
-                    requestControllerRef.current?.abort();
-                    return;
-                  }
                   closeModal();
                 }}
               >
-                {isRunning ? 'Cancel' : 'Close'}
+                Close
               </button>
             </div>
           </form>

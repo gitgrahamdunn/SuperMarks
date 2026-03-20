@@ -1,0 +1,13 @@
+{
+  "exam_id": 1,
+  "question_level_submission_id": 1,
+  "front_page_submission_id": 2,
+  "question_ids": {
+    "Q1": 1,
+    "Q2": 2
+  },
+  "paths": {
+    "db": "/home/graham/repos/SuperMarks/artifacts/acceptance/supermarks-acceptance.db",
+    "data_dir": "/home/graham/repos/SuperMarks/artifacts/acceptance/data"
+  }
+}

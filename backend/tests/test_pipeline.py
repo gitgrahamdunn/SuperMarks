@@ -111,6 +111,23 @@ def test_end_to_end_pipeline(tmp_path: Path) -> None:
         assert len(payload["transcriptions"]) == 2
         assert len(payload["grades"]) == 2
 
+        manual_grade_resp = client.put(
+            f"/api/submissions/{submission_id}/questions/{q1_id}/manual-grade",
+            json={"marks_awarded": 4, "teacher_note": "Strong method, one arithmetic slip."},
+        )
+        assert manual_grade_resp.status_code == 200
+        manual_payload = manual_grade_resp.json()
+        assert manual_payload["marks_awarded"] == 4
+        assert manual_payload["model_name"] == "teacher_manual"
+        assert manual_payload["breakdown_json"]["source"] == "teacher_manual"
+        assert manual_payload["feedback_json"]["teacher_note"] == "Strong method, one arithmetic slip."
+
+        updated_results_resp = client.get(f"/api/submissions/{submission_id}/results")
+        assert updated_results_resp.status_code == 200
+        updated_grade = next(item for item in updated_results_resp.json()["grades"] if item["question_id"] == q1_id)
+        assert updated_grade["marks_awarded"] == 4
+        assert updated_grade["model_name"] == "teacher_manual"
+
         # verify artifacts exist
         for page in pages:
             assert (Path(settings.data_dir) / page["image_path"]).exists()

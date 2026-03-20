@@ -12,6 +12,7 @@
 - `POST /api/exams/{exam_id}/key/parse`
 - `PATCH /api/exams/{exam_id}/questions/{question_id}`
 - `POST /api/exams/{exam_id}/key/review/complete`
+- `PUT /api/submissions/{submission_id}/questions/{question_id}/manual-grade`
 
 ## Parse behavior
 - Auto-builds pages if missing.

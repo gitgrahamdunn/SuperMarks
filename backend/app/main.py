@@ -13,6 +13,11 @@ from sqlmodel import Session
 
 from app.auth import require_api_key
 from app import db
+from app.ai.openai_vision import (
+    _front_page_provider_api_key,
+    _front_page_provider_base_url,
+    _front_page_provider_name,
+)
 from app.db import create_db_and_tables, get_database_backend_name, get_redacted_database_url
 from app.routers.exams import public_router as public_exams_router
 from app.routers.exams import router as exams_router
@@ -71,9 +76,19 @@ def favicon() -> Response:
 
 
 @app.get("/health", tags=["meta"])
-def health() -> dict[str, bool]:
-    openai_api_key = os.getenv("OPENAI_API_KEY", "")
-    return {"ok": True, "openai_configured": bool(openai_api_key.strip())}
+def health() -> dict[str, bool | str]:
+    llm_api_key = os.getenv("SUPERMARKS_LLM_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+    llm_provider = os.getenv("SUPERMARKS_LLM_PROVIDER", "openai_compatible")
+    llm_base_url = os.getenv("SUPERMARKS_LLM_BASE_URL", "") or os.getenv("OPENAI_BASE_URL", "")
+    return {
+        "ok": True,
+        "openai_configured": bool(llm_api_key.strip()),
+        "llm_provider": llm_provider,
+        "llm_base_url_configured": bool(str(llm_base_url).strip()),
+        "front_page_openai_configured": bool(_front_page_provider_api_key().strip()),
+        "front_page_llm_provider": _front_page_provider_name(),
+        "front_page_llm_base_url_configured": bool(str(_front_page_provider_base_url() or "").strip()),
+    }
 
 
 @app.get("/version", tags=["meta"])
@@ -83,7 +98,12 @@ def version() -> dict[str, bool | str]:
 
 @app.get("/health/deep", tags=["meta"])
 def deep_health() -> dict[str, bool | str]:
-    openai_api_key = os.getenv("OPENAI_API_KEY", "")
+    llm_api_key = os.getenv("SUPERMARKS_LLM_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+    llm_provider = os.getenv("SUPERMARKS_LLM_PROVIDER", "openai_compatible")
+    llm_base_url = os.getenv("SUPERMARKS_LLM_BASE_URL", "") or os.getenv("OPENAI_BASE_URL", "")
+    front_page_api_key = _front_page_provider_api_key()
+    front_page_provider = _front_page_provider_name()
+    front_page_base_url = _front_page_provider_base_url()
     data_dir = settings.data_path
 
     storage_writable = False
@@ -106,7 +126,12 @@ def deep_health() -> dict[str, bool | str]:
 
     return {
         "ok": True,
-        "openai_configured": bool(openai_api_key.strip()),
+        "openai_configured": bool(llm_api_key.strip()),
+        "llm_provider": llm_provider,
+        "llm_base_url_configured": bool(str(llm_base_url).strip()),
+        "front_page_openai_configured": bool(front_page_api_key.strip()),
+        "front_page_llm_provider": front_page_provider,
+        "front_page_llm_base_url_configured": bool(str(front_page_base_url or "").strip()),
         "storage_writable": storage_writable,
         "data_dir": str(data_dir),
         "db_ok": db_ok,
@@ -118,4 +143,3 @@ def deep_health() -> dict[str, bool | str]:
 @app.post("/api/blob/client-upload-token", tags=["blob"], dependencies=[Depends(require_api_key)])
 def client_upload_token_stub() -> Response:
     return JSONResponse(status_code=501, content={"detail": "Client upload not implemented yet."})
-

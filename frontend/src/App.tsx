@@ -7,6 +7,8 @@ const ExamsPage = lazy(async () => ({ default: (await import('./pages/ExamsPage'
 const ExamDetailPage = lazy(async () => ({ default: (await import('./pages/ExamDetailPage')).ExamDetailPage }));
 const ExamReviewPage = lazy(async () => ({ default: (await import('./pages/ExamReviewPage')).ExamReviewPage }));
 const SubmissionDetailPage = lazy(async () => ({ default: (await import('./pages/SubmissionDetailPage')).SubmissionDetailPage }));
+const SubmissionMarkingPage = lazy(async () => ({ default: (await import('./pages/SubmissionMarkingPage')).SubmissionMarkingPage }));
+const SubmissionFrontPageTotalsPage = lazy(async () => ({ default: (await import('./pages/SubmissionFrontPageTotalsPage')).SubmissionFrontPageTotalsPage }));
 const TemplateBuilderPage = lazy(async () => ({ default: (await import('./pages/TemplateBuilderPage')).TemplateBuilderPage }));
 const ResultsPage = lazy(async () => ({ default: (await import('./pages/ResultsPage')).ResultsPage }));
 
@@ -27,6 +29,7 @@ function getInitialTheme(): Theme {
 }
 
 export default function App() {
+  const showDevTools = import.meta.env.DEV;
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
   const [logsOpen, setLogsOpen] = useState(false);
   const [clientLogs, setClientLogs] = useState(() => getClientLogs());
@@ -45,11 +48,14 @@ export default function App() {
   }), []);
 
   return (
-    <div className="layout">
+    <div className="layout app-shell">
       <a href="#main-content" className="skip-link">Skip to content</a>
       <header className="top-nav">
         <div className="top-nav-left">
-          <NavLink to="/" className="brand">SuperMarks</NavLink>
+          <div className="brand-lockup">
+            <NavLink to="/" className="brand">SuperMarks</NavLink>
+            <span className="brand-tag">Teacher totals capture</span>
+          </div>
           <nav aria-label="Main navigation" className="main-nav-links">
             <NavLink
               to="/"
@@ -60,29 +66,31 @@ export default function App() {
             </NavLink>
           </nav>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.25rem' }}>
-          <div className="actions-row" style={{ marginTop: 0 }}>
+        <div className="app-shell-meta">
+          <div className="actions-row app-shell-actions" style={{ marginTop: 0 }}>
+            {showDevTools && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm btn-quiet"
+                onClick={() => setLogsOpen(true)}
+              >
+                Diagnostics ({clientLogs.length})
+              </button>
+            )}
             <button
               type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => setLogsOpen(true)}
-            >
-              Open Logs ({clientLogs.length})
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
+              className="btn btn-secondary btn-sm btn-quiet"
               onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
               aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
             >
-              Theme: {theme}
+              {theme === 'light' ? 'Dark mode' : 'Light mode'}
             </button>
           </div>
-          <small className="subtle-text">{frontendVersion}</small>
+          <small className="app-version">{frontendVersion}</small>
         </div>
       </header>
 
-      {location.pathname === '/' && showClientErrorBanner && (
+      {showDevTools && location.pathname === '/' && showClientErrorBanner && (
         <p className="warning-text">
           A client error occurred. Open Logs for details.
         </p>
@@ -95,13 +103,15 @@ export default function App() {
             <Route path="/exams/:examId" element={<ExamDetailPage />} />
             <Route path="/exams/:examId/review" element={<ExamReviewPage />} />
             <Route path="/submissions/:submissionId" element={<SubmissionDetailPage />} />
+            <Route path="/submissions/:submissionId/mark" element={<SubmissionMarkingPage />} />
+            <Route path="/submissions/:submissionId/front-page-totals" element={<SubmissionFrontPageTotalsPage />} />
             <Route path="/submissions/:submissionId/template-builder" element={<TemplateBuilderPage />} />
             <Route path="/submissions/:submissionId/results" element={<ResultsPage />} />
           </Routes>
         </Suspense>
       </main>
 
-      {logsOpen && (
+      {showDevTools && logsOpen && (
         <Modal title="Client Logs" onClose={() => setLogsOpen(false)}>
           <div className="stack">
             <h2 style={{ margin: 0 }}>Client Logs</h2>

@@ -1,0 +1,14 @@
+[Unit]
+Description=SuperMarks hosted dev stack
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/repos/SuperMarks
+ExecStart=%h/repos/SuperMarks/scripts/host-supermarks.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

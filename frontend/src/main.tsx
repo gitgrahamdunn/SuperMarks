@@ -46,7 +46,7 @@ if (import.meta.env.PROD && apiConfigError) {
     <React.StrictMode>
       <div className="contract-error-page">
         <div className="contract-error-card">
-          <h1>Missing VITE_API_BASE_URL (must be https://.../api).</h1>
+          <h1>Invalid VITE_API_BASE_URL configuration.</h1>
           <p>{apiConfigError}</p>
         </div>
       </div>
@@ -55,7 +55,12 @@ if (import.meta.env.PROD && apiConfigError) {
 } else {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
-      <BrowserRouter>
+      <BrowserRouter
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
         <ErrorBoundary>
           <ToastProvider>
             <App />

@@ -6,10 +6,13 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shutil
 import threading
 import time
 import uuid
 from difflib import SequenceMatcher
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +26,7 @@ from sqlmodel import Session, delete, select
 
 from app.blob_service import BlobDownloadError, create_signed_blob_url, download_blob_bytes, normalize_blob_path
 from app.ai.openai_vision import (
+    _front_page_model,
     AnswerKeyParser,
     BulkNameDetectionResult,
     OpenAIRequestError,
@@ -34,8 +38,10 @@ from app.ai.openai_vision import (
 )
 from app import db as db_state
 from app.db import get_session
-from app.models import BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionPage, SubmissionStatus, utcnow
-from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamParseJobRead, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
+from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
+from app.reporting import front_page_totals_read
+from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, write_csv_export
+from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
 from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
@@ -46,6 +52,8 @@ public_router = APIRouter(prefix="/exams", tags=["exams-public"])
 logger = logging.getLogger(__name__)
 _exam_question_locks: dict[int, threading.Lock] = {}
 _exam_question_locks_guard = threading.Lock()
+_parse_job_runner_locks: dict[int, threading.Lock] = {}
+_parse_job_runner_guard = threading.Lock()
 
 
 def _get_exam_question_lock(exam_id: int) -> threading.Lock:
@@ -54,6 +62,15 @@ def _get_exam_question_lock(exam_id: int) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             _exam_question_locks[exam_id] = lock
+        return lock
+
+
+def _get_parse_job_runner_lock(job_id: int) -> threading.Lock:
+    with _parse_job_runner_guard:
+        lock = _parse_job_runner_locks.get(job_id)
+        if lock is None:
+            lock = threading.Lock()
+            _parse_job_runner_locks[job_id] = lock
         return lock
 
 
@@ -72,6 +89,7 @@ _ALLOWED_TYPES = {
 }
 
 _ALLOWED_KEY_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+_ALLOWED_BULK_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 _MAX_RENDERED_KEY_PAGES = 10
 _VERCEL_SERVER_UPLOAD_LIMIT_BYTES = 4 * 1024 * 1024
 
@@ -162,6 +180,74 @@ def _render_pdf_pages(input_path: Path, output_dir: Path, start_page_number: int
         raise HTTPException(status_code=400, detail="PDF render failed. Try uploading images.") from exc
 
     return rendered_paths
+
+
+def _render_bulk_pages(input_path: Path, output_dir: Path) -> list[Path]:
+    extension = input_path.suffix.lower()
+    if extension == ".pdf":
+        return _render_pdf_pages(input_path, output_dir, start_page_number=1, max_pages=500)
+    if extension in {".png", ".jpg", ".jpeg"}:
+        output_path = output_dir / "page_0001.png"
+        _normalize_to_png(input_path, output_path)
+        return [output_path]
+    raise HTTPException(status_code=400, detail="Bulk upload requires a PDF, PNG, or JPG file")
+
+
+def _remove_tree(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _delete_exam_resources(exam_id: int, session: Session) -> None:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id)).all()
+    questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
+    parse_jobs = session.exec(select(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id)).all()
+    bulk_uploads = session.exec(select(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id)).all()
+
+    for submission in submissions:
+        session.exec(delete(SubmissionPage).where(SubmissionPage.submission_id == submission.id))
+        session.exec(delete(SubmissionFile).where(SubmissionFile.submission_id == submission.id))
+        session.exec(delete(AnswerCrop).where(AnswerCrop.submission_id == submission.id))
+        session.exec(delete(Transcription).where(Transcription.submission_id == submission.id))
+        session.exec(delete(GradeResult).where(GradeResult.submission_id == submission.id))
+
+    for question in questions:
+        session.exec(delete(QuestionRegion).where(QuestionRegion.question_id == question.id))
+        session.exec(delete(QuestionParseEvidence).where(QuestionParseEvidence.question_id == question.id))
+        session.exec(delete(AnswerCrop).where(AnswerCrop.question_id == question.id))
+        session.exec(delete(Transcription).where(Transcription.question_id == question.id))
+        session.exec(delete(GradeResult).where(GradeResult.question_id == question.id))
+
+    for job in parse_jobs:
+        session.exec(delete(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id))
+
+    for bulk_upload in bulk_uploads:
+        session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload.id))
+
+    session.exec(delete(Submission).where(Submission.exam_id == exam_id))
+    session.exec(delete(Question).where(Question.exam_id == exam_id))
+    session.exec(delete(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id))
+    session.exec(delete(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id))
+    session.exec(delete(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id))
+    session.exec(delete(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id))
+    session.delete(exam)
+    session.commit()
+
+    _exam_question_locks.pop(exam_id, None)
+    for job in parse_jobs:
+        _parse_job_runner_locks.pop(job.id or 0, None)
+
+    _remove_tree(settings.data_path / "exams" / str(exam_id))
+    _remove_tree(settings.data_path / "pages" / str(exam_id))
+    _remove_tree(settings.data_path / "crops" / str(exam_id))
+    _remove_tree(settings.data_path / "uploads" / str(exam_id))
+    _remove_tree(settings.data_path / "cache" / "keys" / str(exam_id))
+    _remove_tree(settings.data_path / "cache" / "key-pages" / str(exam_id))
+    _remove_tree(settings.data_path / "objects" / "exams" / str(exam_id))
 
 
 def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
@@ -313,10 +399,11 @@ def _validate_parse_payload(payload: dict[str, Any]) -> tuple[float, list[dict[s
         if question.get("marks_source") not in {"explicit", "inferred", "unknown"}:
             question["marks_source"] = "unknown"
 
-        criteria = question.get("criteria", [])
-        if not isinstance(criteria, list):
-            raise ValueError("question criteria must be list")
-        question["criteria"] = [c for c in criteria if isinstance(c, dict) and isinstance(c.get("marks"), (int, float))]
+        objective_codes = question.get("objective_codes", [])
+        if not isinstance(objective_codes, list):
+            question["objective_codes"] = []
+        else:
+            question["objective_codes"] = [str(code).strip() for code in objective_codes if str(code).strip()]
 
         evidence = question.get("evidence", [])
         if not isinstance(evidence, list):
@@ -332,6 +419,11 @@ def _allowed_parse_models() -> list[str]:
 
 
 def _resolve_models() -> tuple[str, str]:
+    nano_override = os.getenv("SUPERMARKS_KEY_PARSE_NANO_MODEL", "").strip()
+    mini_override = os.getenv("SUPERMARKS_KEY_PARSE_MINI_MODEL", "").strip()
+    if nano_override and mini_override:
+        return nano_override, mini_override
+
     allowed = _allowed_parse_models()
     expected = ["gpt-5-nano", "gpt-5-mini"]
     for model in expected:
@@ -382,6 +474,8 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
                 exam_id=sub.exam_id,
                 student_name=sub.student_name,
                 status=sub.status,
+                capture_mode=sub.capture_mode,
+                front_page_totals=front_page_totals_read(sub),
                 created_at=sub.created_at,
                 files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
                 pages=[],
@@ -427,6 +521,12 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
     )
 
 
+@router.delete("/{exam_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_exam(exam_id: int, session: Session = Depends(get_session)) -> Response:
+    _delete_exam_resources(exam_id, session)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/{exam_id}/submissions", response_model=list[SubmissionRead])
 def list_exam_submissions(exam_id: int, session: Session = Depends(get_session)) -> list[SubmissionRead]:
     exam = session.get(Exam, exam_id)
@@ -448,12 +548,88 @@ def list_exam_submissions(exam_id: int, session: Session = Depends(get_session))
                 exam_id=sub.exam_id,
                 student_name=sub.student_name,
                 status=sub.status,
+                capture_mode=sub.capture_mode,
+                front_page_totals=front_page_totals_read(sub),
                 created_at=sub.created_at,
                 files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
                 pages=[],
             )
         )
     return output
+
+
+def _write_csv_export(buffer: StringIO, export_spec: CsvExportSpec[CsvExportRow]) -> None:
+    write_csv_export(buffer, export_spec)
+
+
+def _attachment_headers(filename: str) -> dict[str, str]:
+    return {"Content-Disposition": f'attachment; filename="{filename}"'}
+
+
+def _export_attachment_response(*, content: str | bytes, media_type: str, filename: str) -> Response:
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers=_attachment_headers(filename),
+    )
+
+
+def _csv_export_response(artifact) -> Response:
+    buffer = StringIO()
+    _write_csv_export(buffer, artifact.export_spec)
+    return _export_attachment_response(
+        content=buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        filename=artifact.filename,
+    )
+
+
+@router.get("/{exam_id}/marking-dashboard", response_model=ExamMarkingDashboardResponse)
+def get_exam_marking_dashboard(exam_id: int, session: Session = Depends(get_session)) -> ExamMarkingDashboardResponse:
+    dashboard = build_exam_marking_dashboard_response(exam_id, session)
+    if dashboard is None:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    return dashboard
+
+
+@router.get("/{exam_id}/export.csv")
+def export_exam_marks_csv(exam_id: int, session: Session = Depends(get_session)) -> Response:
+    artifact = build_exam_marks_export_artifact(exam_id, session)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    return _csv_export_response(artifact)
+
+
+@router.get("/{exam_id}/export-summary.csv")
+def export_exam_summary_csv(exam_id: int, session: Session = Depends(get_session)) -> Response:
+    artifact = build_exam_summary_export_artifact(exam_id, session)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    return _csv_export_response(artifact)
+
+
+@router.get("/{exam_id}/export-objectives-summary.csv")
+def export_exam_objectives_summary_csv(exam_id: int, session: Session = Depends(get_session)) -> Response:
+    artifact = build_exam_objectives_summary_export_artifact(exam_id, session)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    return _csv_export_response(artifact)
+
+@router.get("/{exam_id}/export-student-summaries.zip")
+def export_exam_student_summaries_zip(exam_id: int, session: Session = Depends(get_session)) -> Response:
+    artifact = build_exam_student_summaries_zip_export_artifact(exam_id, session)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    return _export_attachment_response(
+        content=build_zip_export_content(artifact.artifact_specs),
+        media_type="application/zip",
+        filename=artifact.filename,
+    )
+
 
 
 @router.post("/{exam_id}/submissions", response_model=SubmissionRead, status_code=status.HTTP_201_CREATED)
@@ -469,18 +645,26 @@ async def create_submission(
     student_name = ""
     files: list[UploadFile] = []
     content_type = request.headers.get("content-type", "")
+    capture_mode = SubmissionCaptureMode.QUESTION_LEVEL
     if "application/json" in content_type:
         payload = await request.json()
         student_name = str(payload.get("student_name", "")).strip() if isinstance(payload, dict) else ""
+        requested_mode = str(payload.get("capture_mode", SubmissionCaptureMode.QUESTION_LEVEL.value)).strip()
     else:
         form = await request.form()
         student_name = str(form.get("student_name", "")).strip()
+        requested_mode = str(form.get("capture_mode", SubmissionCaptureMode.QUESTION_LEVEL.value)).strip()
         files = [item for item in form.getlist("files") if hasattr(item, "filename") and hasattr(item, "file")]
+
+    if requested_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS.value:
+        capture_mode = SubmissionCaptureMode.FRONT_PAGE_TOTALS
+    elif requested_mode != SubmissionCaptureMode.QUESTION_LEVEL.value:
+        raise HTTPException(status_code=400, detail="Unsupported capture_mode")
 
     if not student_name:
         raise HTTPException(status_code=400, detail="student_name is required")
 
-    submission = Submission(exam_id=exam_id, student_name=student_name, status=SubmissionStatus.UPLOADED)
+    submission = Submission(exam_id=exam_id, student_name=student_name, status=SubmissionStatus.UPLOADED, capture_mode=capture_mode)
     session.add(submission)
     session.commit()
     session.refresh(submission)
@@ -524,6 +708,8 @@ async def create_submission(
         exam_id=submission.exam_id,
         student_name=submission.student_name,
         status=submission.status,
+        capture_mode=submission.capture_mode,
+        front_page_totals=front_page_totals_read(submission),
         created_at=submission.created_at,
         files=created_files,
         pages=[],
@@ -661,9 +847,10 @@ def create_bulk_submission_preview(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    filename = _sanitize_filename(file.filename or "bulk.pdf")
-    if Path(filename).suffix.lower() != ".pdf":
-        raise HTTPException(status_code=400, detail="Bulk upload requires a single PDF file")
+    filename = _sanitize_filename(file.filename or "bulk-upload")
+    extension = Path(filename).suffix.lower()
+    if extension not in _ALLOWED_BULK_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Bulk upload requires a PDF, PNG, or JPG file")
 
     payload = file.file.read()
     storage = get_storage_provider()
@@ -673,7 +860,7 @@ def create_bulk_submission_preview(
     session.refresh(bulk)
 
     object_key = f"exams/{exam_id}/bulk/{bulk.id}/{uuid.uuid4().hex}_{filename}"
-    stored = _run_async(storage.put_bytes(object_key, payload, content_type=file.content_type or "application/pdf"))
+    stored = _run_async(storage.put_bytes(object_key, payload, content_type=file.content_type or "application/octet-stream"))
     bulk.stored_path = stored["key"]
     session.add(bulk)
     session.commit()
@@ -683,7 +870,7 @@ def create_bulk_submission_preview(
         source_path = _run_async(materialize_object_to_path(bulk.stored_path, settings.data_path / "cache" / "bulk" / str(exam_id) / str(bulk.id)))
     except BlobDownloadError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    rendered_paths = _render_pdf_pages(source_path, output_dir, start_page_number=1, max_pages=500)
+    rendered_paths = _render_bulk_pages(source_path, output_dir)
     session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id))
 
     detections: list[BulkNameDetectionResult] = []
@@ -693,9 +880,9 @@ def create_bulk_submission_preview(
             w, h = image.width, image.height
         detection: BulkNameDetectionResult | None = None
         try:
-            detection = detector.detect(page_path, idx, model="gpt-5-nano", request_id=uuid.uuid4().hex)
+            detection = detector.detect(page_path, idx, model=_front_page_model(), request_id=uuid.uuid4().hex)
             if detection.student_name is None or detection.confidence < 0.5:
-                detection = detector.detect(page_path, idx, model="gpt-5-mini", request_id=uuid.uuid4().hex)
+                detection = detector.detect(page_path, idx, model=_front_page_model(), request_id=uuid.uuid4().hex)
         except OpenAIRequestError:
             detection = BulkNameDetectionResult(page_number=idx, student_name=None, confidence=0.0, evidence=None)
         row = BulkUploadPage(
@@ -795,17 +982,20 @@ def finalize_bulk_submission_preview(
         warnings.append("Candidate ranges do not cover all pages.")
 
     for candidate in payload.candidates:
-        submission = Submission(exam_id=exam_id, student_name=candidate.student_name, status=SubmissionStatus.UPLOADED)
+        submission = Submission(exam_id=exam_id, student_name=candidate.student_name, status=SubmissionStatus.UPLOADED, capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS)
         session.add(submission)
         session.flush()
 
+        bulk_extension = Path(bulk.original_filename or "").suffix.lower()
+        file_kind = "pdf" if bulk_extension == ".pdf" else "image"
+        content_type = "application/pdf" if file_kind == "pdf" else "image/jpeg"
         page_reads = []
         file_row = SubmissionFile(
             submission_id=submission.id,
-            file_kind="pdf",
+            file_kind=file_kind,
             original_filename=bulk.original_filename,
             stored_path=bulk.stored_path,
-            content_type="application/pdf",
+            content_type=content_type,
             size_bytes=0,
         )
         session.add(file_row)
@@ -824,6 +1014,8 @@ def finalize_bulk_submission_preview(
                 exam_id=submission.exam_id,
                 student_name=submission.student_name,
                 status=submission.status,
+                capture_mode=submission.capture_mode,
+                front_page_totals=front_page_totals_read(submission),
                 created_at=submission.created_at,
                 files=[SubmissionFileRead(id=file_row.id, file_kind="pdf", original_filename=bulk.original_filename, stored_path=bulk.stored_path, blob_url=file_row.blob_url, content_type=file_row.content_type, size_bytes=file_row.size_bytes)],
                 pages=page_reads,
@@ -1199,6 +1391,90 @@ def _ensure_unique_label(existing_labels: set[str], label: str, page_number: int
     return f"{candidate} #{suffix}", True
 
 
+def _looks_like_objective_code(value: str) -> bool:
+    upper = value.strip().upper()
+    return bool(re.match(r"^(OB|LO|SO|OUTCOME)\s*-?\s*\d+[A-Z]?$", upper))
+
+
+def _should_escalate_parse_result(*, confidence: float, questions_payload: list[dict[str, Any]], warnings: list[str]) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+    if not questions_payload:
+        reasons.append("no_questions")
+    if confidence < 0.60:
+        reasons.append("low_confidence")
+
+    labels: list[str] = []
+    max_marks: list[int] = []
+    objective_hits = 0
+    fallback_count = 0
+    empty_answer_key_count = 0
+
+    for question in questions_payload:
+        label = str(question.get("label") or "").strip()
+        if not label:
+            reasons.append("missing_label")
+        else:
+            labels.append(label)
+            if label.upper() in {"Q?", "Q1"} and int(question.get("max_marks") or 0) == 0:
+                fallback_count += 1
+
+        marks = int(question.get("max_marks") or 0)
+        max_marks.append(marks)
+        if marks <= 0:
+            reasons.append("non_positive_marks")
+
+        answer_key = str(question.get("answer_key") or "").strip()
+        if len(answer_key) < 2:
+            empty_answer_key_count += 1
+
+        objective_codes = question.get("objective_codes") if isinstance(question.get("objective_codes"), list) else []
+        if any(_looks_like_objective_code(str(code)) for code in objective_codes):
+            objective_hits += 1
+
+    if len(set(labels)) != len(labels):
+        reasons.append("duplicate_labels")
+    if fallback_count == len(questions_payload) and fallback_count > 0:
+        reasons.append("fallback_only")
+    if empty_answer_key_count == len(questions_payload) and questions_payload:
+        reasons.append("empty_answer_keys")
+    if len(warnings) >= 3:
+        reasons.append("warning_heavy")
+    if len(set(max_marks)) > 1 and any(m == 0 for m in max_marks):
+        reasons.append("inconsistent_marks")
+    if objective_hits == 0 and any("OB" in str(q.get("question_text") or "").upper() for q in questions_payload):
+        reasons.append("missed_objective_codes")
+
+    deduped = []
+    for reason in reasons:
+        if reason not in deduped:
+            deduped.append(reason)
+    return (len(deduped) > 0, deduped)
+
+
+def _questions_for_parse_page(exam_id: int, page_number: int, session: Session) -> list[Question]:
+    page_questions: list[Question] = []
+    for question in session.exec(select(Question).where(Question.exam_id == exam_id)).all():
+        try:
+            rubric = json.loads(question.rubric_json)
+        except json.JSONDecodeError:
+            continue
+        source_page_number = int(rubric.get("source_page_number") or rubric.get("key_page_number") or 0)
+        if source_page_number == page_number:
+            page_questions.append(question)
+    return page_questions
+
+
+def _clear_parse_artifacts_for_page(exam_id: int, page_number: int, session: Session) -> None:
+    for question in _questions_for_parse_page(exam_id, page_number, session):
+        session.exec(delete(QuestionRegion).where(QuestionRegion.question_id == question.id))
+        session.exec(delete(QuestionParseEvidence).where(QuestionParseEvidence.question_id == question.id))
+        session.exec(delete(AnswerCrop).where(AnswerCrop.question_id == question.id))
+        session.exec(delete(Transcription).where(Transcription.question_id == question.id))
+        session.exec(delete(GradeResult).where(GradeResult.question_id == question.id))
+        session.delete(question)
+    session.flush()
+
+
 def _upsert_questions_for_page(exam_id: int, page_number: int, questions_payload: list[dict[str, Any]], session: Session) -> list[dict[str, Any]]:
     existing = {q.label: q for q in session.exec(select(Question).where(Question.exam_id == exam_id)).all()}
     existing_labels = set(existing.keys())
@@ -1219,10 +1495,11 @@ def _upsert_questions_for_page(exam_id: int, page_number: int, questions_payload
 
         rubric = {
             "total_marks": max_marks,
-            "criteria": parsed.get("criteria", []),
+            "criteria": [],
             "answer_key": parsed.get("answer_key", ""),
-            "model_solution": parsed.get("model_solution", ""),
+            "model_solution": "",
             "question_text": parsed.get("question_text", ""),
+            "objective_codes": parsed.get("objective_codes", []),
             "marks_source": marks_source,
             "marks_confidence": marks_confidence,
             "warnings": parsed_warnings,
@@ -1355,8 +1632,9 @@ def _process_single_parse_page_task(
             )
         ).first()
 
+        queued_started_at = utcnow()
         target_parse_page.status = "running"
-        target_parse_page.updated_at = utcnow()
+        target_parse_page.updated_at = queued_started_at
         session.add(target_parse_page)
         session.commit()
 
@@ -1425,9 +1703,14 @@ def _process_single_parse_page_task(
                 confidence, questions_payload, warnings = _validate_parse_payload(result.payload)
                 if len(tried_models) == 1:
                     first_attempt_confidence = confidence
-                if model_name == nano_model and (not questions_payload or confidence < 0.60):
-                    warnings.append("Low confidence on nano; escalating")
-                    logger.info("nano questions=0 or low confidence -> escalating to mini")
+                should_escalate, escalate_reasons = _should_escalate_parse_result(
+                    confidence=confidence,
+                    questions_payload=questions_payload,
+                    warnings=warnings,
+                )
+                if model_name == nano_model and should_escalate:
+                    warnings.append("Escalated from fast pass: " + ", ".join(escalate_reasons))
+                    logger.info("fast parse escalated to stronger model page=%s reasons=%s", page_number, ",".join(escalate_reasons))
                     continue
                 break
             except (OpenAIRequestError, ValueError, SchemaBuildError) as exc:
@@ -1446,19 +1729,38 @@ def _process_single_parse_page_task(
                     _upsert_questions_for_page(exam_id, page_number, questions_payload, question_session)
                     question_session.commit()
 
+        elapsed_ms = int((time.perf_counter() - parse_started_at) * 1000)
+        finished_at = utcnow()
         target_parse_page.model_used = used_model
         target_parse_page.confidence = confidence
         target_parse_page.status = page_status
         target_parse_page.cost = cost
         target_parse_page.input_tokens = input_tokens
         target_parse_page.output_tokens = output_tokens
-        target_parse_page.result_json = {"questions": questions_payload, "warnings": warnings}
+        final_should_escalate, final_escalation_reasons = _should_escalate_parse_result(
+            confidence=confidence,
+            questions_payload=questions_payload,
+            warnings=warnings,
+        )
+        target_parse_page.result_json = {
+            "questions": questions_payload,
+            "warnings": warnings,
+            "timing": {
+                "elapsed_ms": elapsed_ms,
+                "started_at": queued_started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+            },
+            "quality": {
+                "should_escalate": final_should_escalate,
+                "reasons": final_escalation_reasons,
+                "tried_models": tried_models,
+            },
+        }
         target_parse_page.error_json = error_payload
-        target_parse_page.updated_at = utcnow()
+        target_parse_page.updated_at = finished_at
         session.add(target_parse_page)
         session.commit()
 
-        elapsed_ms = int((time.perf_counter() - parse_started_at) * 1000)
         logger.info("parse_page_done job_id=%s page=%s status=%s model=%s ms=%s", job.id, page_number, page_status, used_model, elapsed_ms)
         return {
             "page_number": page_number,
@@ -1496,6 +1798,33 @@ async def _process_parse_pages_concurrently(
 
     tasks = [asyncio.create_task(_run_one(parse_page.page_number)) for parse_page in target_parse_pages]
     return await asyncio.gather(*tasks, return_exceptions=False)
+
+
+def _run_parse_job_background(exam_id: int, job_id: int, parser: AnswerKeyParser | None = None) -> None:
+    runner_lock = _get_parse_job_runner_lock(job_id)
+    if not runner_lock.acquire(blocking=False):
+        logger.info("parse_background_skip_already_running job_id=%s", job_id)
+        return
+    try:
+        resolved_parser = parser or get_answer_key_parser()
+        while True:
+            with Session(db_state.engine) as session:
+                job = _get_job_for_exam_or_error(exam_id, job_id, session)
+                remaining = session.exec(
+                    select(ExamKeyParsePage)
+                    .where(ExamKeyParsePage.job_id == job.id, ExamKeyParsePage.status == "pending")
+                    .order_by(ExamKeyParsePage.page_number)
+                    .limit(3)
+                ).all()
+                if not remaining:
+                    break
+            with Session(db_state.engine) as background_session:
+                _run_async(parse_answer_key_next_page(exam_id=exam_id, job_id=job_id, session=background_session, parser=resolved_parser))
+        _recompute_parse_job_state(exam_id, job_id)
+    except Exception:
+        logger.exception("parse_background_failed job_id=%s exam_id=%s", job_id, exam_id)
+    finally:
+        runner_lock.release()
 
 
 def _recompute_parse_job_state(exam_id: int, job_id: int) -> dict[str, Any]:
@@ -1625,11 +1954,7 @@ async def parse_answer_key_next_page(
 
     page_results: list[dict[str, Any]] = []
     if target_parse_pages:
-        parser_factory: Callable[[], AnswerKeyParser]
-        if os.getenv("OPENAI_MOCK", "").strip() == "1":
-            parser_factory = lambda: parser
-        else:
-            parser_factory = get_answer_key_parser
+        parser_factory: Callable[[], AnswerKeyParser] = lambda: parser
         page_results = await _process_parse_pages_concurrently(
             exam_id=exam_id,
             job_id=job.id,
@@ -1678,31 +2003,66 @@ def get_answer_key_parse_status(exam_id: int, job_id: int | None = None, request
         _raise_parse_validation_error(status_code=404, detail="Parse job not found", exam_exists=True, job_exists=False)
     if job.exam_id != exam_id:
         _raise_parse_validation_error(status_code=409, detail="Parse job does not belong to this exam", exam_exists=True, job_exists=True, job_exam_id=job.exam_id)
+    job_state = _recompute_parse_job_state(exam_id, job.id)
+    session.refresh(job)
     pages = session.exec(
         select(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id).order_by(ExamKeyParsePage.page_number)
     ).all()
     warnings = [f"Page {p.page_number} failed" for p in pages if p.status == "failed"]
+    page_items = []
+    for p in pages:
+        timing = p.result_json.get("timing", {}) if isinstance(p.result_json, dict) else {}
+        quality = p.result_json.get("quality", {}) if isinstance(p.result_json, dict) else {}
+        page_items.append({
+            "page_number": p.page_number,
+            "status": p.status,
+            "model_used": p.model_used,
+            "confidence": p.confidence,
+            "elapsed_ms": timing.get("elapsed_ms"),
+            "started_at": timing.get("started_at"),
+            "finished_at": timing.get("finished_at"),
+            "input_tokens": p.input_tokens,
+            "output_tokens": p.output_tokens,
+            "cost": p.cost,
+            "should_escalate": quality.get("should_escalate"),
+            "escalation_reasons": quality.get("reasons", []),
+            "tried_models": quality.get("tried_models", []),
+        })
     return {
         "job_id": job.id,
         "request_id": str(job.id),
         "exam_exists": True,
         "job_exists": True,
-        "page_count": job.page_count,
-        "pages_done": job.pages_done,
-        "status": job.status,
-        "pages": [{"page_number": p.page_number, "status": p.status} for p in pages],
-        "totals": {"cost_total": job.cost_total, "input_tokens_total": job.input_tokens_total, "output_tokens_total": job.output_tokens_total},
+        "page_count": job_state["page_count"],
+        "pages_done": job_state["pages_done"],
+        "status": job_state["status"],
+        "pages": page_items,
+        "totals": {"cost_total": job_state["cost_total"], "input_tokens_total": job_state["input_tokens_total"], "output_tokens_total": job_state["output_tokens_total"]},
         "warnings": warnings,
     }
 
 
 @router.post("/{exam_id}/key/parse/retry")
-def retry_answer_key_parse_page(exam_id: int, job_id: int | None = None, page_number: int = 0, request_id: str | None = None, session: Session = Depends(get_session)) -> dict[str, object]:
+def retry_answer_key_parse_page(
+    exam_id: int,
+    job_id: int | None = None,
+    page_number: int = 0,
+    request_id: str | None = None,
+    session: Session = Depends(get_session),
+    parser: AnswerKeyParser = Depends(get_answer_key_parser),
+) -> dict[str, object]:
+    if page_number <= 0:
+        raise HTTPException(status_code=422, detail="page_number is required")
+
+    exam = _get_exam_or_404(exam_id, session)
     resolved_job_id = job_id or (int(request_id) if request_id and request_id.isdigit() else None)
     if not resolved_job_id:
-        raise HTTPException(status_code=422, detail="job_id is required")
-    _get_exam_or_404(exam_id, session)
-    _get_job_for_exam_or_error(exam_id, resolved_job_id, session)
+        latest_job = _get_latest_job_for_exam(exam_id, session)
+        if not latest_job:
+            raise HTTPException(status_code=404, detail="Parse job not found")
+        resolved_job_id = latest_job.id
+
+    job = _get_job_for_exam_or_error(exam_id, resolved_job_id, session)
     parse_page = session.exec(
         select(ExamKeyParsePage).where(
             ExamKeyParsePage.job_id == resolved_job_id,
@@ -1711,14 +2071,55 @@ def retry_answer_key_parse_page(exam_id: int, job_id: int | None = None, page_nu
     ).first()
     if not parse_page:
         raise HTTPException(status_code=404, detail="Parse page not found")
+    if parse_page.status == "running":
+        raise HTTPException(status_code=409, detail="Parse page is already running")
 
-    parse_page.status = "pending"
-    parse_page.error_json = None
-    parse_page.result_json = None
-    parse_page.updated_at = utcnow()
-    session.add(parse_page)
-    session.commit()
-    return {"job_id": resolved_job_id, "request_id": str(resolved_job_id), "page_number": page_number, "status": "pending"}
+    with _get_exam_question_lock(exam_id):
+        _clear_parse_artifacts_for_page(exam_id, page_number, session)
+        parse_page.status = "pending"
+        parse_page.confidence = 0.0
+        parse_page.model_used = None
+        parse_page.error_json = None
+        parse_page.result_json = None
+        parse_page.cost = 0.0
+        parse_page.input_tokens = 0
+        parse_page.output_tokens = 0
+        parse_page.updated_at = utcnow()
+        session.add(parse_page)
+        session.commit()
+
+    page_result = _process_single_parse_page_task(
+        exam_id=exam_id,
+        job_id=job.id,
+        page_number=page_number,
+        parser=parser,
+    )
+    job_state = _recompute_parse_job_state(exam_id, job.id)
+    refreshed_questions = list_questions(exam_id, session)
+    refreshed_page = get_answer_key_parse_status(exam_id=exam_id, job_id=job.id, session=session)
+    page_status = next((page for page in refreshed_page["pages"] if int(page["page_number"]) == page_number), None)
+
+    if job_state["status"] == "done":
+        exam.status = ExamStatus.REVIEWING
+        session.add(exam)
+        session.commit()
+
+    return {
+        "job_id": job.id,
+        "request_id": str(job.id),
+        "page_number": page_number,
+        "status": page_result.get("status", "failed"),
+        "page": page_status,
+        "pages_done": job_state["pages_done"],
+        "page_count": job_state["page_count"],
+        "job_status": job_state["status"],
+        "totals": {
+            "cost_total": job_state["cost_total"],
+            "input_tokens_total": job_state["input_tokens_total"],
+            "output_tokens_total": job_state["output_tokens_total"],
+        },
+        "questions": [q.model_dump() for q in refreshed_questions],
+    }
 
 
 
@@ -1800,41 +2201,21 @@ def parse_answer_key(exam_id: int, session: Session = Depends(get_session), pars
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail, "stage": "build_key_pages", "request_id": str(uuid.uuid4())})
 
     job_id = int(started["job_id"])
-    page_count = int(started["page_count"])
-    attempts: list[dict[str, object]] = []
-    for _ in range(page_count):
-        next_result = _run_async(parse_answer_key_next_page(exam_id=exam_id, job_id=job_id, session=session, parser=parser))
-        pages_processed = next_result.get("pages_processed") if isinstance(next_result.get("pages_processed"), list) else []
-        if not pages_processed:
-            break
-        all_page_results = next_result.get("page_results") if isinstance(next_result.get("page_results"), list) else []
-        for page_result in all_page_results:
-            if not isinstance(page_result, dict):
-                continue
-            tried = page_result.get("tried_models") if isinstance(page_result.get("tried_models"), list) else []
-            first_conf = float(page_result.get("first_attempt_confidence") or 0.0)
-            final_conf = float(page_result.get("confidence") or 0.0)
-            page_number = int(page_result.get("page_number") or 0)
-            for idx, model in enumerate(tried):
-                attempts.append({"page_index": page_number, "model": model, "confidence_score": first_conf if idx == 0 else final_conf})
-
+    thread = threading.Thread(target=_run_parse_job_background, args=(exam_id, job_id, parser), daemon=True)
+    thread.start()
     status = get_answer_key_parse_status(exam_id=exam_id, job_id=job_id, session=session)
-    questions = list_questions(exam_id, session)
     return {
         "ok": True,
         "deprecated": True,
         "job_id": job_id,
         "request_id": str(job_id),
-        "status": status.get("status", "done"),
-        "stage": "save_questions",
-        "model_used": "gpt-5-mini",
-        "confidence_score": 0.0,
+        "status": status.get("status", "running"),
+        "stage": "job_started",
         "warnings": status.get("warnings", []),
-        "timings": {"openai_ms": 0, "save_ms": 0, "build_pages_ms": 0, "validate_ms": 0},
-        "attempts": attempts,
-        "questions": [q.model_dump() for q in questions],
-        "questions_count": len(questions),
-        "page_count": page_count,
+        "questions": [],
+        "questions_count": 0,
+        "page_count": started.get("page_count", 0),
+        "pages_done": status.get("pages_done", 0),
     }
 
 

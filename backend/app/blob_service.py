@@ -65,27 +65,37 @@ async def download_blob_bytes(pathname: str) -> tuple[bytes, str | None]:
     normalized_pathname = normalize_blob_path(pathname)
     logger.info("blob_private_read pathname=%s", normalized_pathname)
 
-    if blob_mock_enabled():
-        local_object = settings.data_path / "objects" / normalized_pathname
-        if not local_object.exists():
-            raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}")
-        return local_object.read_bytes(), "image/png"
-
-    client = AsyncBlobClient()
+    result = None
+    sdk_exc: Exception | None = None
     try:
+        client = AsyncBlobClient()
         result = await client.get(normalized_pathname, access="private")
     except Exception as exc:
-        logger.exception("Blob SDK get failed pathname=%s", normalized_pathname)
-        raise BlobDownloadError(
-            f"Blob SDK get failed pathname={normalized_pathname} error={exc}"
-        ) from exc
+        sdk_exc = exc
+        if not blob_mock_enabled():
+            logger.exception("Blob SDK get failed pathname=%s", normalized_pathname)
+            raise BlobDownloadError(
+                f"Blob SDK get failed pathname={normalized_pathname} error={exc}"
+            ) from exc
+
+    if result is None and blob_mock_enabled():
+        local_object = settings.data_path / "objects" / normalized_pathname
+        if local_object.exists():
+            content_type = None
+            if local_object.suffix.lower() == ".png":
+                content_type = "image/png"
+            elif local_object.suffix.lower() in {".jpg", ".jpeg"}:
+                content_type = "image/jpeg"
+            elif local_object.suffix.lower() == ".pdf":
+                content_type = "application/pdf"
+            return local_object.read_bytes(), content_type
 
     if result is None:
-        try:
-            raise RuntimeError("blob result missing/invalid")
-        except RuntimeError as exc:
+        if sdk_exc is not None:
+            logger.exception("Blob SDK get failed pathname=%s", normalized_pathname)
+        else:
             logger.exception("Blob not found or unreadable pathname=%s", normalized_pathname)
-            raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}") from exc
+        raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}")
 
     public_attrs = sorted(name for name in dir(result) if not name.startswith("_"))
     logger.info(
