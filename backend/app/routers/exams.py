@@ -193,6 +193,36 @@ def _render_bulk_pages(input_path: Path, output_dir: Path) -> list[Path]:
     raise HTTPException(status_code=400, detail="Bulk upload requires a PDF, PNG, or JPG file")
 
 
+def _render_bulk_upload_files(files: list[UploadFile], output_dir: Path) -> tuple[list[Path], str, str]:
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
+
+    filenames = [_sanitize_filename(file.filename or f"bulk-upload-{index + 1}") for index, file in enumerate(files)]
+    extensions = [Path(filename).suffix.lower() for filename in filenames]
+    if any(extension not in _ALLOWED_BULK_EXTENSIONS for extension in extensions):
+        raise HTTPException(status_code=400, detail="Bulk upload requires PDF, PNG, or JPG files")
+
+    if any(extension == ".pdf" for extension in extensions):
+        if len(files) != 1:
+            raise HTTPException(status_code=400, detail="Upload one PDF or multiple images, not both")
+
+        source_path = output_dir / filenames[0]
+        payload = files[0].file.read()
+        source_path.write_bytes(payload)
+        return _render_bulk_pages(source_path, output_dir), filenames[0], source_path.name
+
+    rendered_paths: list[Path] = []
+    for index, (upload, filename) in enumerate(zip(files, filenames, strict=True), start=1):
+        source_path = output_dir / f"source_{index:04d}{Path(filename).suffix.lower()}"
+        source_path.write_bytes(upload.file.read())
+        output_path = output_dir / f"page_{index:04d}.png"
+        _normalize_to_png(source_path, output_path)
+        rendered_paths.append(output_path)
+
+    label = filenames[0] if len(filenames) == 1 else f"{len(filenames)} uploaded images"
+    return rendered_paths, label, ""
+
+
 def _remove_tree(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path, ignore_errors=True)
@@ -584,7 +614,11 @@ def _csv_export_response(artifact) -> Response:
     )
 
 
-@router.get("/{exam_id}/marking-dashboard", response_model=ExamMarkingDashboardResponse)
+@router.get(
+    "/{exam_id}/marking-dashboard",
+    response_model=ExamMarkingDashboardResponse,
+    response_model_exclude_unset=True,
+)
 def get_exam_marking_dashboard(exam_id: int, session: Session = Depends(get_session)) -> ExamMarkingDashboardResponse:
     dashboard = build_exam_marking_dashboard_response(exam_id, session)
     if dashboard is None:
@@ -760,6 +794,14 @@ def _nearest_roster_name(name: str, roster: list[str]) -> str:
     return best if best_score >= 0.65 else name
 
 
+def _normalize_exam_title(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _looks_like_same_name(left: str | None, right: str | None) -> bool:
+    return _normalize_exam_title(left).casefold() == _normalize_exam_title(right).casefold()
+
+
 def _segment_bulk_candidates(
     detections: list[BulkNameDetectionResult],
     roster: list[str],
@@ -836,7 +878,8 @@ def _segment_bulk_candidates(
 @router.post("/{exam_id}/submissions/bulk", response_model=BulkUploadPreviewResponse, status_code=status.HTTP_201_CREATED)
 def create_bulk_submission_preview(
     exam_id: int,
-    file: UploadFile = File(...),
+    files: list[UploadFile] | None = File(default=None),
+    file: UploadFile | None = File(default=None),
     name_hint_regex: str | None = Form(default=None),
     roster: str | None = Form(default=None),
     min_pages_per_student: int = Form(default=1),
@@ -847,34 +890,28 @@ def create_bulk_submission_preview(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    filename = _sanitize_filename(file.filename or "bulk-upload")
-    extension = Path(filename).suffix.lower()
-    if extension not in _ALLOWED_BULK_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Bulk upload requires a PDF, PNG, or JPG file")
+    upload_files = list(files or [])
+    if file is not None:
+        upload_files.append(file)
+    if not upload_files:
+        raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
 
-    payload = file.file.read()
-    storage = get_storage_provider()
-    bulk = ExamBulkUploadFile(exam_id=exam_id, original_filename=filename, stored_path="")
+    bulk = ExamBulkUploadFile(exam_id=exam_id, original_filename="bulk-upload", stored_path="")
     session.add(bulk)
     session.commit()
     session.refresh(bulk)
 
-    object_key = f"exams/{exam_id}/bulk/{bulk.id}/{uuid.uuid4().hex}_{filename}"
-    stored = _run_async(storage.put_bytes(object_key, payload, content_type=file.content_type or "application/octet-stream"))
-    bulk.stored_path = stored["key"]
+    output_dir = reset_dir(_bulk_pages_dir(exam_id, bulk.id))
+    rendered_paths, filename, stored_path = _render_bulk_upload_files(upload_files, output_dir)
+    bulk.original_filename = filename
+    bulk.stored_path = stored_path
     session.add(bulk)
     session.commit()
-
-    output_dir = reset_dir(_bulk_pages_dir(exam_id, bulk.id))
-    try:
-        source_path = _run_async(materialize_object_to_path(bulk.stored_path, settings.data_path / "cache" / "bulk" / str(exam_id) / str(bulk.id)))
-    except BlobDownloadError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    rendered_paths = _render_bulk_pages(source_path, output_dir)
     session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id))
 
     detections: list[BulkNameDetectionResult] = []
     detector = get_bulk_name_detector()
+    detected_exam_title = ""
     for idx, page_path in enumerate(rendered_paths, start=1):
         with Image.open(page_path) as image:
             w, h = image.width, image.height
@@ -884,7 +921,10 @@ def create_bulk_submission_preview(
             if detection.student_name is None or detection.confidence < 0.5:
                 detection = detector.detect(page_path, idx, model=_front_page_model(), request_id=uuid.uuid4().hex)
         except OpenAIRequestError:
-            detection = BulkNameDetectionResult(page_number=idx, student_name=None, confidence=0.0, evidence=None)
+            detection = BulkNameDetectionResult(page_number=idx, student_name=None, exam_name=None, confidence=0.0, evidence=None)
+        normalized_detected_exam_title = _normalize_exam_title(detection.exam_name)
+        if normalized_detected_exam_title and not _looks_like_same_name(normalized_detected_exam_title, detection.student_name):
+            detected_exam_title = normalized_detected_exam_title
         row = BulkUploadPage(
             bulk_upload_id=bulk.id,
             page_number=idx,
@@ -897,6 +937,10 @@ def create_bulk_submission_preview(
         )
         session.add(row)
         detections.append(detection)
+
+    if detected_exam_title:
+        exam.name = detected_exam_title
+        session.add(exam)
 
     session.commit()
 
@@ -925,7 +969,7 @@ def get_bulk_submission_preview(exam_id: int, bulk_upload_id: int, session: Sess
         raise HTTPException(status_code=404, detail="Bulk upload not found")
 
     pages = session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload_id).order_by(BulkUploadPage.page_number)).all()
-    detections = [BulkNameDetectionResult(page_number=p.page_number, student_name=p.detected_student_name, confidence=p.detection_confidence, evidence=json.loads(p.detection_evidence_json or "{}")) for p in pages]
+    detections = [BulkNameDetectionResult(page_number=p.page_number, student_name=p.detected_student_name, exam_name=None, confidence=p.detection_confidence, evidence=json.loads(p.detection_evidence_json or "{}")) for p in pages]
     candidates, warnings = _segment_bulk_candidates(detections, roster=[], min_pages_per_student=1)
     return BulkUploadPreviewResponse(bulk_upload_id=bulk_upload_id, page_count=len(pages), candidates=candidates, warnings=warnings)
 
@@ -986,23 +1030,59 @@ def finalize_bulk_submission_preview(
         session.add(submission)
         session.flush()
 
-        bulk_extension = Path(bulk.original_filename or "").suffix.lower()
-        file_kind = "pdf" if bulk_extension == ".pdf" else "image"
-        content_type = "application/pdf" if file_kind == "pdf" else "image/jpeg"
         page_reads = []
-        file_row = SubmissionFile(
-            submission_id=submission.id,
-            file_kind=file_kind,
-            original_filename=bulk.original_filename,
-            stored_path=bulk.stored_path,
-            content_type=content_type,
-            size_bytes=0,
-        )
-        session.add(file_row)
-        session.flush()
+        submission_files: list[SubmissionFileRead] = []
+        if bulk.stored_path:
+            bulk_extension = Path(bulk.original_filename or "").suffix.lower()
+            file_kind = "pdf" if bulk_extension == ".pdf" else "image"
+            content_type = "application/pdf" if file_kind == "pdf" else "image/jpeg"
+            file_row = SubmissionFile(
+                submission_id=submission.id,
+                file_kind=file_kind,
+                original_filename=bulk.original_filename,
+                stored_path=bulk.stored_path,
+                content_type=content_type,
+                size_bytes=0,
+            )
+            session.add(file_row)
+            session.flush()
+            submission_files.append(
+                SubmissionFileRead(
+                    id=file_row.id,
+                    file_kind=file_row.file_kind,
+                    original_filename=file_row.original_filename,
+                    stored_path=file_row.stored_path,
+                    blob_url=file_row.blob_url,
+                    content_type=file_row.content_type,
+                    size_bytes=file_row.size_bytes,
+                )
+            )
 
         for idx, page_num in enumerate(range(candidate.page_start, candidate.page_end + 1), start=1):
             src = page_map[page_num]
+            if not bulk.stored_path:
+                src_path = Path(src.image_path)
+                file_row = SubmissionFile(
+                    submission_id=submission.id,
+                    file_kind="image",
+                    original_filename=src_path.name,
+                    stored_path=str(src_path),
+                    content_type="image/png",
+                    size_bytes=src_path.stat().st_size if src_path.exists() else 0,
+                )
+                session.add(file_row)
+                session.flush()
+                submission_files.append(
+                    SubmissionFileRead(
+                        id=file_row.id,
+                        file_kind=file_row.file_kind,
+                        original_filename=file_row.original_filename,
+                        stored_path=file_row.stored_path,
+                        blob_url=file_row.blob_url,
+                        content_type=file_row.content_type,
+                        size_bytes=file_row.size_bytes,
+                    )
+                )
             sp = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=src.image_path, width=src.width, height=src.height)
             session.add(sp)
             session.flush()
@@ -1017,7 +1097,7 @@ def finalize_bulk_submission_preview(
                 capture_mode=submission.capture_mode,
                 front_page_totals=front_page_totals_read(submission),
                 created_at=submission.created_at,
-                files=[SubmissionFileRead(id=file_row.id, file_kind="pdf", original_filename=bulk.original_filename, stored_path=bulk.stored_path, blob_url=file_row.blob_url, content_type=file_row.content_type, size_bytes=file_row.size_bytes)],
+                files=submission_files,
                 pages=page_reads,
             )
         )

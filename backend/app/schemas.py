@@ -86,6 +86,7 @@ class FrontPageTotalsRead(BaseModel):
 
 
 class FrontPageTotalsUpsert(BaseModel):
+    student_name: str | None = None
     overall_marks_awarded: float = Field(ge=0)
     overall_max_marks: float | None = Field(default=None, ge=0)
     objective_scores: list[FrontPageObjectiveScore] = Field(default_factory=list)

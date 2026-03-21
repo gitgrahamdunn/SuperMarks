@@ -806,6 +806,7 @@ def get_answer_key_parser() -> AnswerKeyParser:
 class BulkNameDetectionResult:
     page_number: int
     student_name: str | None
+    exam_name: str | None
     confidence: float
     evidence: dict[str, float] | None
 
@@ -840,8 +841,11 @@ class OpenAIBulkNameDetector:
 
     def _build_prompt(self) -> str:
         return (
-            "Extract the student name from this exam page. Look for fields like 'Name: ____' and typical top header boxes. "
-            "Return strict JSON only with keys: page_number (int), student_name (string or null), confidence (0..1), "
+            "Extract two things from this exam page: "
+            "1. the student name from fields like 'Name: ____' and typical top header boxes, and "
+            "2. the test or exam title shown in the page header, such as the course exam name, assignment title, or assessment title. "
+            "Do not return the student's name as the exam title. "
+            "Return strict JSON only with keys: page_number (int), student_name (string or null), exam_name (string or null), confidence (0..1), "
             "evidence ({x,y,w,h} normalized 0..1 or null)."
         )
 
@@ -851,10 +855,11 @@ class OpenAIBulkNameDetector:
         schema = {
             "type": "object",
             "additionalProperties": False,
-            "required": ["page_number", "student_name", "confidence", "evidence"],
+            "required": ["page_number", "student_name", "exam_name", "confidence", "evidence"],
             "properties": {
                 "page_number": {"type": "integer"},
                 "student_name": {"type": ["string", "null"]},
+                "exam_name": {"type": ["string", "null"]},
                 "confidence": {"type": "number"},
                 "evidence": {
                     "type": ["object", "null"],
@@ -888,6 +893,7 @@ class OpenAIBulkNameDetector:
             return BulkNameDetectionResult(
                 page_number=page_number,
                 student_name=parsed.get("student_name"),
+                exam_name=parsed.get("exam_name"),
                 confidence=float(parsed.get("confidence") or 0.0),
                 evidence=parsed.get("evidence"),
             )
@@ -902,8 +908,8 @@ class MockBulkNameDetector:
     def detect(self, image_path: Path, page_number: int, model: str, request_id: str) -> BulkNameDetectionResult:
         _ = (image_path, model, request_id)
         if page_number <= 2:
-            return BulkNameDetectionResult(page_number=page_number, student_name="Alice Johnson", confidence=0.92, evidence={"x": 0.1, "y": 0.05, "w": 0.3, "h": 0.08})
-        return BulkNameDetectionResult(page_number=page_number, student_name="Bob Smith", confidence=0.89, evidence={"x": 0.12, "y": 0.05, "w": 0.32, "h": 0.08})
+            return BulkNameDetectionResult(page_number=page_number, student_name="Alice Johnson", exam_name="Math 20-1 Unit Test", confidence=0.92, evidence={"x": 0.1, "y": 0.05, "w": 0.3, "h": 0.08})
+        return BulkNameDetectionResult(page_number=page_number, student_name="Bob Smith", exam_name="Math 20-1 Unit Test", confidence=0.89, evidence={"x": 0.12, "y": 0.05, "w": 0.32, "h": 0.08})
 
 
 def _front_page_candidate_value_schema() -> dict[str, Any]:

@@ -469,6 +469,24 @@ export const api = {
     body: JSON.stringify({ student_name: studentName, capture_mode: captureMode }),
   }, DEFAULT_TIMEOUT_MS),
   getBlobUploadToken: () => request<{ token: string }>('blob/upload-token', { method: 'POST' }),
+  uploadExamKeyFiles: (examId: number, files: File[], options?: RequestInit) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    return request<{ uploaded: number; urls: string[] }>(`exams/${examId}/key/upload`, {
+      method: 'POST',
+      body: formData,
+      ...options,
+    }, KEY_UPLOAD_TIMEOUT_MS);
+  },
+  uploadSubmissionFiles: (submissionId: number, files: File[], options?: RequestInit) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    return request<{ uploaded: number; urls: string[] }>(`submissions/${submissionId}/files/upload`, {
+      method: 'POST',
+      body: formData,
+      ...options,
+    }, KEY_UPLOAD_TIMEOUT_MS);
+  },
   registerExamKeyFiles: (examId: number, files: Array<{ original_filename: string; blob_pathname: string; content_type: string; size_bytes: number }>) => request<{ registered: number }>(`exams/${examId}/key/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -480,21 +498,22 @@ export const api = {
     body: JSON.stringify({ files }),
   }),
 
-  uploadBulkSubmissionsFile: async (examId: number, file: File, rosterText?: string) => {
+  uploadBulkSubmissionsFile: async (examId: number, files: File[], rosterText?: string, options?: RequestInit) => {
     const formData = new FormData();
-    formData.append('file', file);
+    files.forEach((file) => formData.append('files', file));
     if (rosterText && rosterText.trim()) {
       formData.append('roster', rosterText);
     }
-    return request<BulkUploadPreview>(`exams/${examId}/submissions/bulk`, { method: 'POST', body: formData }, BUILD_PAGES_TIMEOUT_MS);
+    return request<BulkUploadPreview>(`exams/${examId}/submissions/bulk`, { method: 'POST', body: formData, ...options }, BUILD_PAGES_TIMEOUT_MS);
   },
   getBulkSubmissionPreview: (examId: number, bulkUploadId: number) => request<BulkUploadPreview>(`exams/${examId}/submissions/bulk/${bulkUploadId}`),
-  finalizeBulkSubmissions: (examId: number, bulkUploadId: number, candidates: BulkFinalizePayloadCandidate[]) => request<BulkFinalizeResponse>(
+  finalizeBulkSubmissions: (examId: number, bulkUploadId: number, candidates: BulkFinalizePayloadCandidate[], options?: RequestInit) => request<BulkFinalizeResponse>(
     `exams/${examId}/submissions/bulk/${bulkUploadId}/finalize`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ candidates }),
+      ...options,
     },
     EXAM_CREATE_TIMEOUT_MS,
   ),
@@ -632,7 +651,7 @@ export const api = {
     {},
     FRONT_PAGE_CANDIDATES_TIMEOUT_MS,
   ),
-  saveFrontPageTotals: (submissionId: number, payload: { overall_marks_awarded: number; overall_max_marks?: number | null; objective_scores: Array<{ objective_code: string; marks_awarded: number; max_marks?: number | null }>; teacher_note: string; confirmed: boolean }) => request<FrontPageTotals>(`submissions/${submissionId}/front-page-totals`, {
+  saveFrontPageTotals: (submissionId: number, payload: { student_name?: string; overall_marks_awarded: number; overall_max_marks?: number | null; objective_scores: Array<{ objective_code: string; marks_awarded: number; max_marks?: number | null }>; teacher_note: string; confirmed: boolean }) => request<FrontPageTotals>(`submissions/${submissionId}/front-page-totals`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

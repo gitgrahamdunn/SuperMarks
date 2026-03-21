@@ -31,9 +31,6 @@ export function ExamDetailPage() {
   const [isExportingSummary, setIsExportingSummary] = useState(false);
   const [isExportingObjectivesSummary, setIsExportingObjectivesSummary] = useState(false);
   const [isExportingStudentSummaries, setIsExportingStudentSummaries] = useState(false);
-  const [studentName, setStudentName] = useState('');
-  const [studentFiles, setStudentFiles] = useState<File[]>([]);
-  const [studentCaptureMode, setStudentCaptureMode] = useState<'question_level' | 'front_page_totals'>('front_page_totals');
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const { showError, showSuccess, showWarning } = useToast();
@@ -431,7 +428,7 @@ export function ExamDetailPage() {
     setElapsedSeconds(0);
     setProgressMessage('Rendering pages...');
     try {
-      const nextPreview = await api.uploadBulkSubmissionsFile(examId, bulkFile, rosterText);
+      const nextPreview = await api.uploadBulkSubmissionsFile(examId, [bulkFile], rosterText);
       setProgressMessage(`Extracting names (${nextPreview.page_count}/${nextPreview.page_count})...`);
       setPreview(nextPreview);
       setActiveCandidateId(nextPreview.candidates[0]?.candidate_id || '');
@@ -552,38 +549,6 @@ export function ExamDetailPage() {
     }
   };
 
-  const onUploadStudentSubmission = async () => {
-    if (!studentName.trim() || studentFiles.length === 0) {
-      showWarning('Provide student name and at least one file');
-      return;
-    }
-
-    try {
-      const submission = await api.createSubmission(examId, studentName.trim(), studentCaptureMode);
-      const { token } = await api.getBlobUploadToken();
-      const uploaded = await Promise.all(
-        studentFiles.map((file) => uploadToBlob(file, `exams/${examId}/submissions/${submission.id}/${crypto.randomUUID()}-${file.name}`, token)),
-      );
-      await api.registerSubmissionFiles(
-        submission.id,
-        uploaded.map((file, index) => ({
-          original_filename: studentFiles[index].name,
-          blob_pathname: file.pathname,
-          content_type: file.contentType,
-          size_bytes: file.size,
-        })),
-      );
-
-      showSuccess(studentCaptureMode === 'front_page_totals' ? 'Submission uploaded for front-page totals capture' : 'Submission files uploaded');
-      setStudentName('');
-      setStudentFiles([]);
-      setStudentCaptureMode('front_page_totals');
-      navigate(buildSubmissionWorkflowLink(submission.id, 'front_page_totals'));
-    } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to upload submission files');
-    }
-  };
-
   if (isLoading) return <p>Loading exam details…</p>;
 
   if (notFound) {
@@ -603,6 +568,10 @@ export function ExamDetailPage() {
   const frontPagePendingRows = frontPageRows.filter((row) => row.workflow_status !== 'complete');
   const nextTotalsRow = frontPagePendingRows[0] ?? frontPageRows[0] ?? null;
   const confirmedTotalsCount = frontPageRows.filter((row) => row.workflow_status === 'complete').length;
+  const nextTotalsSubmission = nextTotalsRow
+    ? submissions.find((submission) => submission.id === nextTotalsRow.submission_id) ?? null
+    : null;
+  const nextTotalsPreviewPage = nextTotalsSubmission?.pages[0] ?? null;
 
   return (
     <div className="page-stack">
@@ -612,7 +581,7 @@ export function ExamDetailPage() {
             <p className="page-eyebrow">Exam workspace</p>
             <p style={{ margin: 0 }}><Link to="/">← Back to Exams</Link></p>
             <h1 className="page-title">{detail.exam.name}</h1>
-            <p className="page-subtitle">Upload graded papers, let the app parse names and totals, then confirm each paper in one queue.</p>
+            <p className="page-subtitle">Review the detected student names, capture and confirm the front-page totals, then export the class table.</p>
           </div>
           <div className="page-toolbar">
             {nextTotalsRow && (
@@ -624,9 +593,9 @@ export function ExamDetailPage() {
         </div>
         <div className="metric-grid">
           <article className="metric-card">
-            <p className="metric-label">Uploaded papers</p>
+            <p className="metric-label">Parsed papers</p>
             <p className="metric-value">{submissions.length}</p>
-            <p className="metric-meta">Student records currently in this exam</p>
+            <p className="metric-meta">Student records currently loaded for review</p>
           </article>
           <article className="metric-card">
             <p className="metric-label">Need confirmation</p>
@@ -641,57 +610,62 @@ export function ExamDetailPage() {
           <article className="metric-card">
             <p className="metric-label">Flow</p>
             <p className="metric-value">{markingDashboard ? `${markingDashboard.completion.completion_percent}%` : '—'}</p>
-            <p className="metric-meta">{'Upload -> parse -> confirm -> export'}</p>
+            <p className="metric-meta">{'Detect names -> capture totals -> confirm -> export'}</p>
           </article>
         </div>
       </section>
-
-      <div className="grid-2 intake-grid">
-        <section className="card stack intake-card intake-card-primary">
-          <div className="panel-title-row">
-            <div>
-              <h2 className="section-title">1. Upload graded papers</h2>
-              <p className="subtle-text">Main workflow for the class set.</p>
-            </div>
-            <span className="status-pill status-ready">Primary</span>
-          </div>
-          <input type="file" accept="application/pdf,image/png,image/jpeg" onChange={(event) => setBulkFile(event.target.files?.[0] || null)} />
-          <textarea placeholder="Optional roster: one student name per line" rows={4} value={rosterText} onChange={(event) => setRosterText(event.target.value)} />
-          <button type="button" className="btn btn-primary" onClick={onUploadBulk} disabled={isUploading}>
-            {isUploading ? 'Uploading…' : 'Upload papers'}
-          </button>
-          <p className="subtle-text" style={{ margin: 0 }}>
-            Accepted now: one PDF, one JPG, or one PNG.
-          </p>
-          {isUploading && (
-            <div className="metric-card">
-              <progress max={100} value={60} style={{ width: '100%' }} />
-              <p className="metric-meta">{progressMessage} Elapsed: {elapsedSeconds}s</p>
-            </div>
-          )}
-        </section>
-
-        <section className="card stack intake-card intake-card-secondary">
-          <div className="panel-title-row">
-            <div>
-              <h2 className="section-title">Single paper</h2>
-              <p className="subtle-text">Only for late papers or one-off fixes.</p>
-            </div>
-            <span className="status-pill status-neutral">Optional</span>
-          </div>
-          <input value={studentName} onChange={(event) => setStudentName(event.target.value)} placeholder="Student name" />
-          <input type="file" multiple onChange={(event) => setStudentFiles(Array.from(event.target.files || []))} />
-          <button type="button" className="btn btn-secondary" onClick={onUploadStudentSubmission}>Upload single paper</button>
-        </section>
-      </div>
 
       {!preview && (
         <>
           <section className="card stack">
             <div className="panel-title-row">
               <div>
-                <h2 className="section-title">2. Confirm parsed totals</h2>
-                <p className="subtle-text">Open the next paper, verify the parsed name and totals, confirm, and continue.</p>
+                <h2 className="section-title">Paper preview</h2>
+                <p className="subtle-text">See the next paper first, then move into name and totals confirmation.</p>
+              </div>
+              {nextTotalsRow && (
+                <span className={`status-pill ${statusClassName(nextTotalsRow.workflow_status) || 'status-neutral'}`}>
+                  {formatWorkflowStatus(nextTotalsRow.workflow_status)}
+                </span>
+              )}
+            </div>
+            {nextTotalsRow ? (
+              <div className="stack" style={{ gap: '.85rem' }}>
+                <div className="review-readonly-block">
+                  <strong>{nextTotalsRow.student_name}</strong>
+                  <div className="subtle-text" style={{ marginTop: '.3rem' }}>
+                    {nextTotalsRow.workflow_status === 'complete'
+                      ? `Confirmed total ${nextTotalsRow.running_total}/${nextTotalsRow.total_possible}`
+                      : nextTotalsRow.next_action || 'Ready for name and totals confirmation'}
+                  </div>
+                </div>
+                {nextTotalsPreviewPage ? (
+                  <div className="image-frame">
+                    <img
+                      src={api.getPageImageUrl(nextTotalsSubmission!.id, nextTotalsPreviewPage.page_number)}
+                      alt={`Preview for ${nextTotalsRow.student_name}`}
+                      style={{ maxWidth: '100%', display: 'block', borderRadius: 10 }}
+                    />
+                  </div>
+                ) : (
+                  <div className="review-readonly-block">No rendered paper preview is available yet for this submission.</div>
+                )}
+                <div className="actions-row" style={{ marginTop: 0 }}>
+                  <Link className="btn btn-primary" to={buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)}>
+                    {nextTotalsRow.workflow_status === 'complete' ? 'Open paper' : `Confirm ${nextTotalsRow.student_name}`}
+                  </Link>
+                </div>
+              </div>
+            ) : (
+              <p className="subtle-text">No papers are waiting in the confirmation queue yet.</p>
+            )}
+          </section>
+
+          <section className="card stack">
+            <div className="panel-title-row">
+              <div>
+                <h2 className="section-title">1. Confirm names and capture totals</h2>
+                <p className="subtle-text">Open the next paper, verify the detected student name, enter or confirm the front-page totals, then continue through the queue.</p>
               </div>
               {nextTotalsRow && (
                 <Link className="btn btn-primary" to={buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)}>
@@ -700,7 +674,7 @@ export function ExamDetailPage() {
               )}
             </div>
             {frontPageRows.length === 0 ? (
-              <p className="subtle-text">No papers in the confirmation queue yet. Upload a class set above to begin.</p>
+              <p className="subtle-text">No papers are waiting in the confirmation queue yet.</p>
             ) : (
               <div className="stack" style={{ gap: '.75rem' }}>
                 {frontPageRows.slice(0, 8).map((row) => (
@@ -731,7 +705,7 @@ export function ExamDetailPage() {
           <section className="card stack">
             <div className="panel-title-row">
               <div>
-                <h2 className="section-title">3. Export class table</h2>
+                <h2 className="section-title">2. Export class table</h2>
                 <p className="subtle-text">Once confirmations are done, export the results.</p>
               </div>
             </div>
@@ -1305,59 +1279,6 @@ export function ExamDetailPage() {
       </div>
       )}
 
-      {preview && (
-        <section className="card stack">
-          <div className="panel-title-row">
-            <div>
-              <h3 className="section-title">2. Review upload split</h3>
-              <p className="subtle-text">Fix any obvious name or page-range mistakes, then create the confirmation queue.</p>
-            </div>
-            <span className={`status-pill ${preview.candidates.some((candidate) => candidate.needs_review) ? 'status-flagged' : 'status-complete'}`}>
-              {preview.candidates.length} papers
-            </span>
-          </div>
-          {preview.warnings.length > 0 && (
-            <ul>
-              {preview.warnings.map((warning) => <li key={warning}>{warning}</li>)}
-            </ul>
-          )}
-          <table className="bulk-preview-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Confidence</th>
-                <th>Page start</th>
-                <th>Page end</th>
-                <th>Review</th>
-              </tr>
-            </thead>
-            <tbody>
-              {preview.candidates.map((candidate) => (
-                <tr key={candidate.candidate_id} className={candidate.candidate_id === activeCandidateId ? 'bulk-preview-row-active' : undefined} onClick={() => setActiveCandidateId(candidate.candidate_id)} style={{ cursor: 'pointer' }}>
-                  <td><input value={candidate.student_name} onChange={(event) => updateCandidate(candidate.candidate_id, { student_name: event.target.value })} /></td>
-                  <td>{Math.round(candidate.confidence * 100)}%</td>
-                  <td><input type="number" min={1} value={candidate.page_start} onChange={(event) => updateCandidate(candidate.candidate_id, { page_start: Number(event.target.value) })} /></td>
-                  <td><input type="number" min={1} value={candidate.page_end} onChange={(event) => updateCandidate(candidate.candidate_id, { page_end: Number(event.target.value) })} /></td>
-                  <td>{candidate.needs_review ? 'Needs review' : 'OK'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {activeCandidate && (
-            <div className="stack">
-              <strong>Selected paper preview</strong>
-              <div className="image-frame">
-                <img alt={`Candidate ${activeCandidate.student_name} first page`} src={api.getBulkUploadPageUrl(examId, preview.bulk_upload_id, activeCandidate.page_start)} style={{ maxWidth: '100%', display: 'block', borderRadius: 10 }} />
-              </div>
-            </div>
-          )}
-
-          <button type="button" className="btn btn-primary" onClick={onFinalize} disabled={isFinalizing}>
-            {isFinalizing ? 'Creating queue…' : 'Create confirmation queue'}
-          </button>
-        </section>
-      )}
     </div>
   );
 }

@@ -8,13 +8,23 @@ interface FileUploaderProps {
   onChange: (files: File[]) => void;
   maxBytesPerFile: number;
   onReject: (message: string) => void;
+  multiple?: boolean;
+  singularLabel?: string;
 }
 
 function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export function FileUploader({ files, disabled, onChange, maxBytesPerFile, onReject }: FileUploaderProps) {
+export function FileUploader({
+  files,
+  disabled,
+  onChange,
+  maxBytesPerFile,
+  onReject,
+  multiple = true,
+  singularLabel = 'file',
+}: FileUploaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
@@ -56,7 +66,7 @@ export function FileUploader({ files, disabled, onChange, maxBytesPerFile, onRej
     }
 
     if (validFiles.length > 0) {
-      onChange([...files, ...validFiles]);
+      onChange(multiple ? [...files, ...validFiles] : [validFiles[0]]);
     }
   };
 
@@ -90,7 +100,7 @@ export function FileUploader({ files, disabled, onChange, maxBytesPerFile, onRej
         }}
         onClick={() => !disabled && inputRef.current?.click()}
       >
-        <p><strong>Drag & drop files</strong> or click to browse.</p>
+        <p><strong>{multiple ? 'Drag & drop files' : `Drag & drop one ${singularLabel}`}</strong> or click to browse.</p>
         <p className="subtle-text">Accepted: PDF, PNG, JPG, JPEG</p>
         <input
           ref={inputRef}
@@ -98,7 +108,7 @@ export function FileUploader({ files, disabled, onChange, maxBytesPerFile, onRej
           name="exam-key-files"
           type="file"
           accept="application/pdf,image/png,image/jpeg,image/jpg"
-          multiple
+          multiple={multiple}
           disabled={disabled}
           onChange={(event) => addFiles(event.target.files || [])}
           className="visually-hidden"
@@ -107,7 +117,7 @@ export function FileUploader({ files, disabled, onChange, maxBytesPerFile, onRej
 
       {files.length > 0 && (
         <div className="file-list-block">
-          <strong>Selected files</strong>
+          <strong>{multiple ? 'Selected files' : `Selected ${singularLabel}`}</strong>
           <ul className="file-list">
             {files.map((file) => {
               const isImage = file.type.startsWith('image/');

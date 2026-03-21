@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import os
+import threading
+import time
 from io import StringIO
 
 from fastapi.testclient import TestClient
@@ -183,6 +185,122 @@ def test_front_page_totals_candidates_split_ratio_objective_scores(tmp_path, mon
     assert payload['objective_scores'][0]['max_marks']['value_text'] == '25'
 
 
+def test_front_page_totals_candidates_are_cached_after_first_extraction(tmp_path, monkeypatch) -> None:
+    setup_test_db(tmp_path)
+    calls: list[str] = []
+
+    class StubExtractor:
+        def extract(self, image_path, request_id):
+            calls.append(f"{image_path}:{request_id}")
+            return FrontPageTotalsExtractResult(
+                payload={
+                    'student_name': {
+                        'value_text': 'Jordan Lee',
+                        'confidence': 0.93,
+                        'evidence': [],
+                    },
+                    'overall_marks_awarded': {
+                        'value_text': '42',
+                        'confidence': 0.95,
+                        'evidence': [],
+                    },
+                    'overall_max_marks': {
+                        'value_text': '50',
+                        'confidence': 0.95,
+                        'evidence': [],
+                    },
+                    'objective_scores': [],
+                    'warnings': [],
+                },
+                model='stub-front-page',
+            )
+
+    monkeypatch.setattr('app.routers.submissions.get_front_page_totals_extractor', lambda: StubExtractor())
+
+    with TestClient(app) as client:
+        exam_id = client.post('/api/exams', json={'name': 'ELA 20'}).json()['id']
+        submission_id = client.post(
+            f'/api/exams/{exam_id}/submissions',
+            json={'student_name': 'Jordan', 'capture_mode': 'front_page_totals'},
+        ).json()['id']
+
+        image_path = tmp_path / 'front-page.png'
+        Image.new('RGB', (1200, 1600), color='white').save(image_path)
+        with Session(db.engine) as session:
+            session.add(SubmissionPage(submission_id=submission_id, page_number=1, image_path=str(image_path), width=1200, height=1600))
+            session.commit()
+
+        first_response = client.get(f'/api/submissions/{submission_id}/front-page-totals-candidates')
+        second_response = client.get(f'/api/submissions/{submission_id}/front-page-totals-candidates')
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert first_response.json() == second_response.json()
+    assert len(calls) == 1
+
+    with Session(db.engine) as session:
+        stored = session.exec(select(Submission).where(Submission.id == submission_id)).one()
+        assert stored.front_page_candidates_json is not None
+
+
+def test_front_page_totals_candidates_do_not_double_parse_under_concurrent_requests(tmp_path, monkeypatch) -> None:
+    setup_test_db(tmp_path)
+    calls: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+
+    class StubExtractor:
+        def extract(self, image_path, request_id):
+            calls.append(f"{image_path}:{request_id}")
+            started.set()
+            release.wait(timeout=2)
+            time.sleep(0.05)
+            return FrontPageTotalsExtractResult(
+                payload={
+                    'student_name': {'value_text': 'Jordan Lee', 'confidence': 0.93, 'evidence': []},
+                    'overall_marks_awarded': {'value_text': '42', 'confidence': 0.95, 'evidence': []},
+                    'overall_max_marks': {'value_text': '50', 'confidence': 0.95, 'evidence': []},
+                    'objective_scores': [],
+                    'warnings': [],
+                },
+                model='stub-front-page',
+            )
+
+    monkeypatch.setattr('app.routers.submissions.get_front_page_totals_extractor', lambda: StubExtractor())
+
+    with TestClient(app) as client:
+        exam_id = client.post('/api/exams', json={'name': 'ELA 20'}).json()['id']
+        submission_id = client.post(
+            f'/api/exams/{exam_id}/submissions',
+            json={'student_name': 'Jordan', 'capture_mode': 'front_page_totals'},
+        ).json()['id']
+
+        image_path = tmp_path / 'front-page.png'
+        Image.new('RGB', (1200, 1600), color='white').save(image_path)
+        with Session(db.engine) as session:
+            session.add(SubmissionPage(submission_id=submission_id, page_number=1, image_path=str(image_path), width=1200, height=1600))
+            session.commit()
+
+        responses: list[dict] = []
+
+        def fetch_candidate() -> None:
+            responses.append(client.get(f'/api/submissions/{submission_id}/front-page-totals-candidates').json())
+
+        first_thread = threading.Thread(target=fetch_candidate)
+        second_thread = threading.Thread(target=fetch_candidate)
+
+        first_thread.start()
+        started.wait(timeout=1)
+        second_thread.start()
+        release.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+
+    assert len(calls) == 1
+    assert len(responses) == 2
+    assert responses[0] == responses[1]
+
+
 def test_front_page_totals_drive_results_and_dashboard(tmp_path) -> None:
     setup_test_db(tmp_path)
 
@@ -233,6 +351,35 @@ def test_front_page_totals_drive_results_and_dashboard(tmp_path) -> None:
         stored = session.exec(select(Submission).where(Submission.id == submission_id)).one()
         assert stored.front_page_totals_json is not None
         assert stored.front_page_reviewed_at is not None
+
+
+def test_front_page_totals_save_can_correct_student_name(tmp_path) -> None:
+    setup_test_db(tmp_path)
+
+    with TestClient(app) as client:
+        exam_id = client.post('/api/exams', json={'name': 'Math 30'}).json()['id']
+        submission_id = client.post(
+            f'/api/exams/{exam_id}/submissions',
+            json={'student_name': 'Jordan Maybe', 'capture_mode': 'front_page_totals'},
+        ).json()['id']
+
+        save = client.put(
+            f'/api/submissions/{submission_id}/front-page-totals',
+            json={
+                'student_name': 'Jordan Smith',
+                'overall_marks_awarded': 42,
+                'overall_max_marks': 50,
+                'objective_scores': [],
+                'teacher_note': 'Corrected during validation.',
+                'confirmed': True,
+            },
+        )
+
+        assert save.status_code == 200
+
+        submission = client.get(f'/api/submissions/{submission_id}')
+        assert submission.status_code == 200
+        assert submission.json()['student_name'] == 'Jordan Smith'
 
 
 def test_mixed_mode_dashboard_and_summary_export_reflect_front_page_confirmation_state(tmp_path) -> None:
@@ -310,6 +457,26 @@ def test_mixed_mode_dashboard_and_summary_export_reflect_front_page_confirmation
                 'weakest_complete_percent': '',
                 'weakest_complete_submission': None,
                 'teacher_summary': '0/2 results export-ready; complete average —%; 2 result(s) still in progress',
+                'attention_submissions': [
+                    {
+                        'submission_id': question_level_submission_id,
+                        'student_name': 'Ada',
+                        'capture_mode': 'question_level',
+                        'workflow_status': 'in_progress',
+                        'objective_percent': 100.0,
+                        'next_return_point': 'Q1',
+                        'next_action': 'Resume marking at Q1.',
+                    },
+                    {
+                        'submission_id': front_page_submission_id,
+                        'student_name': 'Byron',
+                        'capture_mode': 'front_page_totals',
+                        'workflow_status': 'ready',
+                        'objective_percent': 80.0,
+                        'next_return_point': '',
+                        'next_action': 'Capture and confirm the front-page totals.',
+                    },
+                ],
             },
             {
                 'objective_code': 'OB2',
@@ -332,6 +499,26 @@ def test_mixed_mode_dashboard_and_summary_export_reflect_front_page_confirmation
                 'weakest_complete_percent': '',
                 'weakest_complete_submission': None,
                 'teacher_summary': '0/2 results export-ready; complete average —%; 2 result(s) still in progress',
+                'attention_submissions': [
+                    {
+                        'submission_id': question_level_submission_id,
+                        'student_name': 'Ada',
+                        'capture_mode': 'question_level',
+                        'workflow_status': 'in_progress',
+                        'objective_percent': 0.0,
+                        'next_return_point': 'Q1',
+                        'next_action': 'Resume marking at Q1.',
+                    },
+                    {
+                        'submission_id': front_page_submission_id,
+                        'student_name': 'Byron',
+                        'capture_mode': 'front_page_totals',
+                        'workflow_status': 'ready',
+                        'objective_percent': 100.0,
+                        'next_return_point': '',
+                        'next_action': 'Capture and confirm the front-page totals.',
+                    },
+                ],
             },
         ]
         assert rows['Ada']['workflow_status'] == 'in_progress'
@@ -478,11 +665,5 @@ def test_mixed_mode_dashboard_and_summary_export_reflect_front_page_confirmation
             'strongest_complete_percent': '100.0',
             'weakest_complete_student': 'Byron',
             'weakest_complete_percent': '100.0',
-            'weakest_complete_submission': {
-                'submission_id': front_page_submission_id,
-                'student_name': 'Byron',
-                'capture_mode': 'front_page_totals',
-                'objective_percent': 100.0,
-            },
             'teacher_summary': '1/2 results export-ready; complete average 100.0%; strongest Byron (100.0%), weakest Byron (100.0%)',
         }

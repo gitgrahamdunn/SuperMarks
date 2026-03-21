@@ -103,6 +103,7 @@ def create_db_and_tables() -> None:
     _ensure_column("examkeypage", "blob_pathname", "blob_pathname VARCHAR")
     _ensure_column("submission", "capture_mode", "capture_mode VARCHAR DEFAULT 'question_level'")
     _ensure_column("submission", "front_page_totals_json", "front_page_totals_json TEXT")
+    _ensure_column("submission", "front_page_candidates_json", "front_page_candidates_json TEXT")
     _ensure_column("submission", "front_page_reviewed_at", "front_page_reviewed_at VARCHAR")
 
 

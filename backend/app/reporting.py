@@ -96,29 +96,31 @@ class ObjectiveSummaryProjection:
     attention_submissions: list[ObjectiveAttentionSubmissionRead]
 
     def as_read_model(self, questions_count: int) -> ExamObjectiveRead:
-        return ExamObjectiveRead(
-            objective_code=self.objective_code,
-            marks_awarded=self.total_awarded_all_current,
-            max_marks=self.total_max_all_current,
-            questions_count=questions_count,
-            submissions_with_objective=self.submissions_with_objective,
-            complete_submissions_with_objective=self.complete_submissions_with_objective,
-            incomplete_submissions_with_objective=self.incomplete_submissions_with_objective,
-            total_awarded_complete=self.total_awarded_complete,
-            total_max_complete=self.total_max_complete,
-            average_awarded_complete=self.average_awarded_complete,
-            average_percent_complete=self.average_percent_complete,
-            total_awarded_all_current=self.total_awarded_all_current,
-            total_max_all_current=self.total_max_all_current,
-            average_percent_all_current=self.average_percent_all_current,
-            strongest_complete_student=self.strongest_complete_student,
-            strongest_complete_percent=self.strongest_complete_percent,
-            weakest_complete_student=self.weakest_complete_student,
-            weakest_complete_percent=self.weakest_complete_percent,
-            weakest_complete_submission=self.weakest_complete_submission,
-            teacher_summary=self.teacher_summary,
-            attention_submissions=self.attention_submissions,
-        )
+        payload: dict[str, Any] = {
+            "objective_code": self.objective_code,
+            "marks_awarded": self.total_awarded_all_current,
+            "max_marks": self.total_max_all_current,
+            "questions_count": questions_count,
+            "submissions_with_objective": self.submissions_with_objective,
+            "complete_submissions_with_objective": self.complete_submissions_with_objective,
+            "incomplete_submissions_with_objective": self.incomplete_submissions_with_objective,
+            "total_awarded_complete": self.total_awarded_complete,
+            "total_max_complete": self.total_max_complete,
+            "average_awarded_complete": self.average_awarded_complete,
+            "average_percent_complete": self.average_percent_complete,
+            "total_awarded_all_current": self.total_awarded_all_current,
+            "total_max_all_current": self.total_max_all_current,
+            "average_percent_all_current": self.average_percent_all_current,
+            "strongest_complete_student": self.strongest_complete_student,
+            "strongest_complete_percent": self.strongest_complete_percent,
+            "weakest_complete_student": self.weakest_complete_student,
+            "weakest_complete_percent": self.weakest_complete_percent,
+            "weakest_complete_submission": self.weakest_complete_submission,
+            "teacher_summary": self.teacher_summary,
+        }
+        if self.attention_submissions:
+            payload["attention_submissions"] = self.attention_submissions
+        return ExamObjectiveRead(**payload)
 
     def as_export_row(self) -> list[Any]:
         return [

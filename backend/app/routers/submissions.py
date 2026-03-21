@@ -7,14 +7,17 @@ import json
 import logging
 from pathlib import Path
 import re
+import threading
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlmodel import Session, delete, select
 
 from app.db import get_session
 from app.blob_service import create_signed_blob_url, normalize_blob_path
 from app.blob_service import BlobDownloadError
+from app.blob_store import BlobUploadError, upload_bytes
 from app.models import (
     AnswerCrop,
     Exam,
@@ -38,6 +41,7 @@ from app.reporting import accumulate_objective_totals, front_page_objective_tota
 from app.schemas import (
     BlobRegisterRequest,
     BlobRegisterResponse,
+    ExamKeyUploadResponse,
     FrontPageCandidateValue,
     FrontPageExtractionEvidence,
     FrontPageObjectiveScoreCandidate,
@@ -62,6 +66,24 @@ router = APIRouter(prefix="/submissions", tags=["submissions"])
 logger = logging.getLogger(__name__)
 
 _RATIO_VALUE_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$")
+_ALLOWED_SUBMISSION_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
+_VERCEL_SERVER_UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024
+_FRONT_PAGE_CANDIDATE_LOCKS: dict[int, threading.Lock] = {}
+_FRONT_PAGE_CANDIDATE_LOCKS_GUARD = threading.Lock()
+
+
+def _sanitize_filename(filename: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("._") or "upload.bin"
+
+
+def _front_page_candidate_lock(submission_id: int) -> threading.Lock:
+    with _FRONT_PAGE_CANDIDATE_LOCKS_GUARD:
+        existing = _FRONT_PAGE_CANDIDATE_LOCKS.get(submission_id)
+        if existing is not None:
+            return existing
+        created = threading.Lock()
+        _FRONT_PAGE_CANDIDATE_LOCKS[submission_id] = created
+        return created
 
 def _submission_read(submission: Submission, files: list[SubmissionFile], pages: list[SubmissionPage]) -> SubmissionRead:
     return SubmissionRead(
@@ -139,7 +161,8 @@ def _build_pages_for_submission(submission: Submission, session: Session) -> lis
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         try:
-            source_path = _run_async(materialize_object_to_path(files[0].stored_path, out_dir / "source"))
+            local_source_path = Path(files[0].stored_path)
+            source_path = local_source_path if local_source_path.exists() else _run_async(materialize_object_to_path(files[0].stored_path, out_dir / "source"))
         except BlobDownloadError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         page_paths = converter.convert(source_path, out_dir)
@@ -153,7 +176,8 @@ def _build_pages_for_submission(submission: Submission, session: Session) -> lis
         for idx, file in enumerate(files, 1):
             out_path = out_dir / f"page_{idx:04d}.png"
             try:
-                source_path = _run_async(materialize_object_to_path(file.stored_path, out_dir / "source"))
+                local_source_path = Path(file.stored_path)
+                source_path = local_source_path if local_source_path.exists() else _run_async(materialize_object_to_path(file.stored_path, out_dir / "source"))
             except BlobDownloadError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             w, h = normalize_image_to_png(source_path, out_path)
@@ -445,6 +469,58 @@ def register_submission_files(submission_id: int, payload: BlobRegisterRequest, 
     return BlobRegisterResponse(registered=registered)
 
 
+@router.post("/{submission_id}/files/upload", response_model=ExamKeyUploadResponse)
+def upload_submission_files(
+    submission_id: int,
+    files: list[UploadFile] = File(...),
+    session: Session = Depends(get_session),
+) -> ExamKeyUploadResponse:
+    submission = session.get(Submission, submission_id)
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    uploaded = 0
+    urls: list[str] = []
+
+    for idx, upload in enumerate(files, start=1):
+        filename = _sanitize_filename(upload.filename or f"submission-{idx}")
+        extension = Path(filename).suffix.lower()
+        if extension not in _ALLOWED_SUBMISSION_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Unsupported file type. Use pdf/png/jpg/jpeg")
+
+        content_type = upload.content_type or "application/octet-stream"
+        payload = upload.file.read()
+        if len(payload) > _VERCEL_SERVER_UPLOAD_LIMIT_BYTES:
+            raise HTTPException(status_code=413, detail="File too large for server upload on Vercel.")
+
+        object_key = f"exams/{submission.exam_id}/submissions/{submission_id}/{uuid.uuid4().hex}_{filename}"
+        try:
+            stored = upload_bytes(object_key, payload, content_type)
+        except BlobUploadError as exc:
+            raise HTTPException(status_code=500, detail=f"Blob upload failed: {exc}") from exc
+
+        kind = "pdf" if extension == ".pdf" else "image"
+        row = SubmissionFile(
+            submission_id=submission_id,
+            file_kind=kind,
+            original_filename=filename,
+            stored_path=stored["pathname"],
+            blob_url=stored["url"],
+            blob_pathname=stored["pathname"],
+            content_type=stored["contentType"],
+            size_bytes=len(payload),
+        )
+        session.add(row)
+        uploaded += 1
+        urls.append(stored["url"])
+
+    session.commit()
+    return ExamKeyUploadResponse(uploaded=uploaded, urls=urls)
+
+
 @router.post("/{submission_id}/build-pages", response_model=list[SubmissionPageRead])
 def build_pages(submission_id: int, session: Session = Depends(get_session)) -> list[SubmissionPageRead]:
     submission = session.get(Submission, submission_id)
@@ -663,69 +739,95 @@ def _candidate_value(payload: object, *, page_width: float | None = None, page_h
     )
 
 
+def _front_page_candidate_cache_read(submission: Submission) -> FrontPageTotalsCandidateRead | None:
+    raw_payload = (submission.front_page_candidates_json or "").strip()
+    if not raw_payload:
+        return None
+    try:
+        return FrontPageTotalsCandidateRead.model_validate_json(raw_payload)
+    except Exception:
+        logger.warning("invalid cached front-page candidate payload for submission %s", submission.id)
+        return None
+
+
 @router.get("/{submission_id}/front-page-totals-candidates", response_model=FrontPageTotalsCandidateRead)
 def get_front_page_totals_candidates(submission_id: int, session: Session = Depends(get_session)) -> FrontPageTotalsCandidateRead:
     submission = session.get(Submission, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    page = session.exec(
-        select(SubmissionPage).where(SubmissionPage.submission_id == submission_id).order_by(SubmissionPage.page_number)
-    ).first()
-    if not page:
-        raise HTTPException(status_code=400, detail="Build submission pages first")
+    cached_payload = _front_page_candidate_cache_read(submission)
+    if cached_payload is not None:
+        return cached_payload
 
-    image_path = Path(page.image_path)
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Front page image not found")
+    extraction_lock = _front_page_candidate_lock(submission_id)
+    with extraction_lock:
+        session.refresh(submission)
+        cached_payload = _front_page_candidate_cache_read(submission)
+        if cached_payload is not None:
+            return cached_payload
 
-    extractor = get_front_page_totals_extractor()
-    try:
-        result = extractor.extract(image_path=image_path, request_id=f"submission-{submission_id}-front-page")
-    except OpenAIRequestError as exc:
-        logger.warning("front-page totals extractor failed for submission %s: %s", submission_id, exc)
-        return FrontPageTotalsCandidateRead(
-            objective_scores=[],
-            warnings=["Extractor unavailable for this paper right now. You can still confirm totals manually."],
-            source="extractor_unavailable",
-        )
-    except Exception as exc:  # pragma: no cover
-        logger.exception("unexpected front-page totals extractor failure for submission %s", submission_id)
-        return FrontPageTotalsCandidateRead(
-            objective_scores=[],
-            warnings=["Extractor failed for this paper. You can still confirm totals manually."],
-            source="extractor_unavailable",
-        )
+        page = session.exec(
+            select(SubmissionPage).where(SubmissionPage.submission_id == submission_id).order_by(SubmissionPage.page_number)
+        ).first()
+        if not page:
+            raise HTTPException(status_code=400, detail="Build submission pages first")
 
-    objective_scores: list[FrontPageObjectiveScoreCandidate] = []
-    raw_objectives = result.payload.get("objective_scores")
-    if isinstance(raw_objectives, list):
-        for item in raw_objectives:
-            if not isinstance(item, dict):
-                continue
-            objective_code = _candidate_value(item.get("objective_code"), page_width=page.width, page_height=page.height)
-            marks_awarded = _candidate_value(item.get("marks_awarded"), page_width=page.width, page_height=page.height)
-            max_marks = _candidate_value(item.get("max_marks"), page_width=page.width, page_height=page.height)
-            objective_code, marks_awarded, max_marks = _normalize_objective_candidate(objective_code, marks_awarded, max_marks)
-            if objective_code is None or marks_awarded is None:
-                continue
-            objective_scores.append(
-                FrontPageObjectiveScoreCandidate(
-                    objective_code=objective_code,
-                    marks_awarded=marks_awarded,
-                    max_marks=max_marks,
-                )
+        image_path = Path(page.image_path)
+        if not image_path.exists():
+            raise HTTPException(status_code=404, detail="Front page image not found")
+
+        extractor = get_front_page_totals_extractor()
+        try:
+            result = extractor.extract(image_path=image_path, request_id=f"submission-{submission_id}-front-page")
+        except OpenAIRequestError as exc:
+            logger.warning("front-page totals extractor failed for submission %s: %s", submission_id, exc)
+            return FrontPageTotalsCandidateRead(
+                objective_scores=[],
+                warnings=["Extractor unavailable for this paper right now. You can still confirm totals manually."],
+                source="extractor_unavailable",
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.exception("unexpected front-page totals extractor failure for submission %s", submission_id)
+            return FrontPageTotalsCandidateRead(
+                objective_scores=[],
+                warnings=["Extractor failed for this paper. You can still confirm totals manually."],
+                source="extractor_unavailable",
             )
 
-    warnings = result.payload.get("warnings")
-    return FrontPageTotalsCandidateRead(
-        student_name=_candidate_value(result.payload.get("student_name"), page_width=page.width, page_height=page.height),
-        overall_marks_awarded=_candidate_value(result.payload.get("overall_marks_awarded"), page_width=page.width, page_height=page.height),
-        overall_max_marks=_candidate_value(result.payload.get("overall_max_marks"), page_width=page.width, page_height=page.height),
-        objective_scores=objective_scores,
-        warnings=[str(item) for item in warnings] if isinstance(warnings, list) else [],
-        source=result.model,
-    )
+        objective_scores: list[FrontPageObjectiveScoreCandidate] = []
+        raw_objectives = result.payload.get("objective_scores")
+        if isinstance(raw_objectives, list):
+            for item in raw_objectives:
+                if not isinstance(item, dict):
+                    continue
+                objective_code = _candidate_value(item.get("objective_code"), page_width=page.width, page_height=page.height)
+                marks_awarded = _candidate_value(item.get("marks_awarded"), page_width=page.width, page_height=page.height)
+                max_marks = _candidate_value(item.get("max_marks"), page_width=page.width, page_height=page.height)
+                objective_code, marks_awarded, max_marks = _normalize_objective_candidate(objective_code, marks_awarded, max_marks)
+                if objective_code is None or marks_awarded is None:
+                    continue
+                objective_scores.append(
+                    FrontPageObjectiveScoreCandidate(
+                        objective_code=objective_code,
+                        marks_awarded=marks_awarded,
+                        max_marks=max_marks,
+                    )
+                )
+
+        warnings = result.payload.get("warnings")
+        candidate_payload = FrontPageTotalsCandidateRead(
+            student_name=_candidate_value(result.payload.get("student_name"), page_width=page.width, page_height=page.height),
+            overall_marks_awarded=_candidate_value(result.payload.get("overall_marks_awarded"), page_width=page.width, page_height=page.height),
+            overall_max_marks=_candidate_value(result.payload.get("overall_max_marks"), page_width=page.width, page_height=page.height),
+            objective_scores=objective_scores,
+            warnings=[str(item) for item in warnings] if isinstance(warnings, list) else [],
+            source=result.model,
+        )
+        submission.front_page_candidates_json = candidate_payload.model_dump_json()
+        session.add(submission)
+        session.commit()
+        return candidate_payload
 
 
 @router.put("/{submission_id}/front-page-totals", response_model=FrontPageTotalsRead)
@@ -737,6 +839,12 @@ def upsert_front_page_totals(
     submission = session.get(Submission, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
+
+    if payload.student_name is not None:
+        normalized_student_name = payload.student_name.strip()
+        if not normalized_student_name:
+            raise HTTPException(status_code=400, detail="Student name cannot be blank")
+        submission.student_name = normalized_student_name
 
     cleaned_scores: list[dict[str, float | str | None]] = []
     for score in payload.objective_scores:

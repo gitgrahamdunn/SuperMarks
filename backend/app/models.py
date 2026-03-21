@@ -53,6 +53,7 @@ class Submission(SQLModel, table=True):
     status: SubmissionStatus = Field(default=SubmissionStatus.UPLOADED)
     capture_mode: SubmissionCaptureMode = Field(default=SubmissionCaptureMode.QUESTION_LEVEL)
     front_page_totals_json: Optional[str] = None
+    front_page_candidates_json: Optional[str] = None
     front_page_reviewed_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=utcnow)
 
