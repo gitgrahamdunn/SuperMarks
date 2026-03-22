@@ -531,8 +531,8 @@ export const api = {
   listExamKeyFiles: (examId: number) => request<StoredFileRead[]>(`exams/${examId}/key/files`),
   listExamSubmissions: (examId: number) => request<SubmissionRead[]>(`exams/${examId}/submissions`),
   getExamMarkingDashboard: (examId: number) => request<ExamMarkingDashboardResponse>(`exams/${examId}/marking-dashboard`),
-  downloadExamExportCsv: async (examId: number) => {
-    const url = buildApiUrl(`exams/${examId}/export.csv`);
+  downloadExamExportWorkbook: async (examId: number) => {
+    const url = buildApiUrl(`exams/${examId}/export.xlsx`);
     const { response, clear } = await fetchWithTimeout(url, buildRequestOptions(), DEFAULT_TIMEOUT_MS);
     try {
       if (!response.ok) {
@@ -540,7 +540,7 @@ export const api = {
       }
       return {
         blob: await response.blob(),
-        filename: response.headers.get('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] || `exam-${examId}-marks.csv`,
+        filename: response.headers.get('content-disposition')?.match(/filename="?([^";]+)"?/)?.[1] || `exam-${examId}-grades.xlsx`,
       };
     } finally {
       clear();

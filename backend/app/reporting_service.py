@@ -10,6 +10,7 @@ from html import escape
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Generic, TypeVar
+from xml.sax.saxutils import escape as xml_escape
 
 from sqlmodel import Session, select
 
@@ -1042,6 +1043,101 @@ def build_exam_summary_export_artifact(exam_id: int, session: Session) -> CsvExp
         filename=f"exam-{exam_id}-summary.csv",
         export_spec=build_exam_summary_export_spec(context),
     )
+
+
+def _xlsx_column_name(index: int) -> str:
+    name = ""
+    current = index
+    while current > 0:
+        current, remainder = divmod(current - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def _xlsx_inline_string_cell(cell_ref: str, value: Any) -> str:
+    text = xml_escape("" if value is None else str(value))
+    return f'<c r="{cell_ref}" t="inlineStr"><is><t>{text}</t></is></c>'
+
+
+def build_exam_gradebook_xlsx_bytes(context: ExamReportingContext) -> bytes:
+    headers = ["test_name", "name", "grade"]
+    rows: list[list[str]] = [headers]
+    for projection in context.submission_projections:
+        export_row = projection.export_row
+        total_awarded = round(float(export_row.total_awarded), 2)
+        total_possible = round(float(export_row.total_possible), 2)
+        rows.append([
+            context.exam.name,
+            export_row.student,
+            f"{total_awarded:g}/{total_possible:g}",
+        ])
+
+    sheet_rows: list[str] = []
+    for row_index, row in enumerate(rows, start=1):
+        cells = [
+          _xlsx_inline_string_cell(f"{_xlsx_column_name(column_index)}{row_index}", value)
+          for column_index, value in enumerate(row, start=1)
+        ]
+        sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+
+    worksheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetData>'
+        f'{"".join(sheet_rows)}'
+        '</sheetData>'
+        '</worksheet>'
+    )
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="Grades" sheetId="1" r:id="rId1"/></sheets>'
+        '</workbook>'
+    )
+    workbook_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet1.xml"/>'
+        '</Relationships>'
+    )
+    root_rels_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="xl/workbook.xml"/>'
+        '</Relationships>'
+    )
+    content_types_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '</Types>'
+    )
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types_xml)
+        archive.writestr("_rels/.rels", root_rels_xml)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels_xml)
+        archive.writestr("xl/worksheets/sheet1.xml", worksheet_xml)
+    return buffer.getvalue()
+
+
+def build_exam_gradebook_xlsx_artifact(exam_id: int, session: Session) -> tuple[str, bytes] | None:
+    context = load_exam_reporting_context(exam_id, session)
+    if context is None:
+        return None
+    return (f"exam-{exam_id}-grades.xlsx", build_exam_gradebook_xlsx_bytes(context))
 
 
 def build_student_summary_manifest_export_spec(

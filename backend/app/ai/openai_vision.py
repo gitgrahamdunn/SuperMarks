@@ -979,12 +979,18 @@ class OpenAIFrontPageTotalsExtractor:
         schema = build_front_page_totals_response_schema()
         model = _front_page_model()
         prompt = (
-            "Extract only front-page score summary candidates from this exam paper page for a teacher confirmation workflow. "
-            "This is an internal teacher-owned workflow, not a public disclosure. If a student name is visible, return it exactly; do not redact, mask, or suppress it for privacy. "
-            "Target only: student name, overall awarded total, overall possible total, and objective/category totals when visibly summarized on the page. "
-            "Do not infer question-level marks. Do not hallucinate hidden totals. If something is not visible, return null or an empty list. "
-            "For each returned value provide the exact visible text in value_text, a 0..1 confidence, and brief evidence quotes plus normalized box coordinates when possible. "
-            "Objective/category totals should only include rows actually visible on the front page summary. Return strict JSON only."
+            "You are extracting only the teacher-visible front-page score summary from a single student exam paper page. "
+            "This is for a fast teacher confirmation workflow. If a student name is visible, return it exactly; do not redact or suppress it. "
+            "Look only for summary information that a teacher would copy from the front page: student name, overall awarded total, overall possible total, and objective/category/outcome totals shown in a summary area or score table. "
+            "Strongly prefer values near labels such as Name, Student, Total, Final, Score, Marks, Result, Outcome, Objective, Category, Strand, LO, or OB. "
+            "If the page contains detailed questions, written answers, rubric text, worked solutions, or answer-key content, ignore those. Do not pull numbers from question bodies or per-question marks unless they are clearly repeated in a front-page summary table. "
+            "When a total is shown as a ratio like 42/50, return 42 as overall_marks_awarded and 50 as overall_max_marks. "
+            "When an objective row is shown as a ratio like OB1 18/20, return objective_code='OB1', marks_awarded='18', and max_marks='20'. "
+            "Do not invent missing rows. Do not infer hidden totals. Do not sum values yourself unless the page explicitly shows the summary you are returning. "
+            "If a field is not clearly visible, return null for that field or an empty list for objective_scores. "
+            "For each returned value, copy the exact visible text into value_text, set a 0..1 confidence, and include short evidence quotes with normalized box coordinates when possible. "
+            "If there is ambiguity between multiple candidate totals, choose the one most clearly presented as the final overall summary and add a warning describing the ambiguity. "
+            "Return strict JSON only."
         )
         request_builder = (
             build_front_page_extract_chat_request

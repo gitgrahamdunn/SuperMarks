@@ -62,7 +62,7 @@ export default function App() {
               end
               className={({ isActive }) => `nav-link ${isActive ? 'nav-link-active' : ''}`}
             >
-              Exams
+              Home
             </NavLink>
           </nav>
         </div>

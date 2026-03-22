@@ -603,7 +603,7 @@ export function ExamsPage() {
         <div className="page-header">
           <div>
             <p className="page-eyebrow">Teacher workspace</p>
-            <h1 className="page-title">Exams</h1>
+            <h1 className="page-title">Home</h1>
             <p className="page-subtitle">Set up an exam, upload marked papers, confirm the extracted totals, and export the class table. The interface should feel calm enough to use during real school admin, not like a debug console.</p>
           </div>
         </div>

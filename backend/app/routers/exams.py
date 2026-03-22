@@ -40,7 +40,7 @@ from app import db as db_state
 from app.db import get_session
 from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
 from app.reporting import front_page_totals_read
-from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, write_csv_export
+from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_gradebook_xlsx_artifact, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, write_csv_export
 from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
@@ -633,6 +633,20 @@ def export_exam_marks_csv(exam_id: int, session: Session = Depends(get_session))
         raise HTTPException(status_code=404, detail="Exam not found")
 
     return _csv_export_response(artifact)
+
+
+@router.get("/{exam_id}/export.xlsx")
+def export_exam_gradebook_xlsx(exam_id: int, session: Session = Depends(get_session)) -> Response:
+    artifact = build_exam_gradebook_xlsx_artifact(exam_id, session)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    filename, content = artifact
+    return _export_attachment_response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename,
+    )
 
 
 @router.get("/{exam_id}/export-summary.csv")

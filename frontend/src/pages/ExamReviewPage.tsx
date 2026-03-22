@@ -315,7 +315,7 @@ export function ExamReviewPage() {
     return (
       <div className="card stack">
         <p>This exam record is unavailable.</p>
-        <p><Link className="btn btn-secondary" to="/">Back to Exams</Link></p>
+        <p><Link className="btn btn-secondary" to="/">Back to Home</Link></p>
       </div>
     );
   }
@@ -324,7 +324,7 @@ export function ExamReviewPage() {
     return (
       <div className="card">
         <p>No parsed questions available.</p>
-        <p><Link to="/">Back to Exams</Link></p>
+        <p><Link to="/">Back to Home</Link></p>
       </div>
     );
   }

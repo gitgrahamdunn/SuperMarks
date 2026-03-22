@@ -1688,6 +1688,41 @@ def test_exam_export_csv_includes_question_rows_and_total_score(tmp_path) -> Non
         assert "Ada,question_level,in_progress,no,2,1,2,1/2 marked,3.0,10.0,30.0,OB1 3.0/4.0 | OB2 0.0/6.0 | OB3 0.0/6.0,3,No submission pages have been built yet.,Q1,Resume marking at Q1.,3.0,4.0,0.0,6.0,0.0,6.0,3.0,4.0,OB1,,6.0,OB2; OB3" in body
 
 
+def test_exam_export_xlsx_contains_only_test_name_name_and_grade(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_id = client.post("/api/exams", json={"name": "Midterm 1"}).json()["id"]
+        q1 = client.post(
+            f"/api/exams/{exam_id}/questions",
+            json={"label": "Q1", "max_marks": 20, "rubric_json": {"objective_codes": ["OB1"], "criteria": []}},
+        ).json()["id"]
+        submission_id = client.post(f"/api/exams/{exam_id}/submissions", json={"student_name": "Ada"}).json()["id"]
+        client.put(f"/api/submissions/{submission_id}/questions/{q1}/manual-grade", json={"marks_awarded": 15, "teacher_note": "solid"})
+
+        export = client.get(f"/api/exams/{exam_id}/export.xlsx")
+        assert export.status_code == 200
+        assert export.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        archive = zipfile.ZipFile(BytesIO(export.content))
+        sheet_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+
+        assert "test_name" in sheet_xml
+        assert "name" in sheet_xml
+        assert "grade" in sheet_xml
+        assert "Midterm 1" in sheet_xml
+        assert "Ada" in sheet_xml
+        assert "15/20" in sheet_xml
+        assert "percent" not in sheet_xml
+        assert "capture_mode" not in sheet_xml
+        assert "workflow_status" not in sheet_xml
+        assert "objective_summary" not in sheet_xml
+
+
 def test_exam_export_objectives_summary_csv_rolls_up_objective_posture(tmp_path) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")

@@ -497,14 +497,14 @@ export function ExamDetailPage() {
     URL.revokeObjectURL(url);
   };
 
-  const onExportCsv = async () => {
+  const onExportWorkbook = async () => {
     try {
       setIsExporting(true);
-      const { blob, filename } = await api.downloadExamExportCsv(examId);
+      const { blob, filename } = await api.downloadExamExportWorkbook(examId);
       downloadBlob(blob, filename);
-      showSuccess('Full-detail CSV export downloaded.');
+      showSuccess('Excel grade export downloaded.');
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to export CSV');
+      showError(error instanceof Error ? error.message : 'Failed to export Excel file');
     } finally {
       setIsExporting(false);
     }
@@ -557,7 +557,7 @@ export function ExamDetailPage() {
         <h1>Exam unavailable</h1>
         <p>This exam record no longer exists.</p>
         <p>
-          <Link className="btn btn-secondary" to="/">Back to Exams</Link>
+          <Link className="btn btn-secondary" to="/">Back to Home</Link>
         </p>
       </div>
     );
@@ -568,6 +568,9 @@ export function ExamDetailPage() {
   const frontPagePendingRows = frontPageRows.filter((row) => row.workflow_status !== 'complete');
   const nextTotalsRow = frontPagePendingRows[0] ?? frontPageRows[0] ?? null;
   const confirmedTotalsCount = frontPageRows.filter((row) => row.workflow_status === 'complete').length;
+  const frontPageCompletionPercent = frontPageRows.length > 0
+    ? Math.round((confirmedTotalsCount / frontPageRows.length) * 100)
+    : 0;
   const nextTotalsSubmission = nextTotalsRow
     ? submissions.find((submission) => submission.id === nextTotalsRow.submission_id) ?? null
     : null;
@@ -579,14 +582,14 @@ export function ExamDetailPage() {
         <div className="page-header">
           <div>
             <p className="page-eyebrow">Exam workspace</p>
-            <p style={{ margin: 0 }}><Link to="/">← Back to Exams</Link></p>
+            <p style={{ margin: 0 }}><Link to="/">← Back to Home</Link></p>
             <h1 className="page-title">{detail.exam.name}</h1>
             <p className="page-subtitle">Review the detected student names, capture and confirm the front-page totals, then export the class table.</p>
           </div>
           <div className="page-toolbar">
             {nextTotalsRow && (
               <Link className="btn btn-primary" to={buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)}>
-                {nextTotalsRow.workflow_status === 'complete' ? 'Open paper' : `Continue confirmation: ${nextTotalsRow.student_name}`}
+                Open test
               </Link>
             )}
           </div>
@@ -620,85 +623,26 @@ export function ExamDetailPage() {
           <section className="card stack">
             <div className="panel-title-row">
               <div>
-                <h2 className="section-title">Paper preview</h2>
-                <p className="subtle-text">See the next paper first, then move into name and totals confirmation.</p>
-              </div>
-              {nextTotalsRow && (
-                <span className={`status-pill ${statusClassName(nextTotalsRow.workflow_status) || 'status-neutral'}`}>
-                  {formatWorkflowStatus(nextTotalsRow.workflow_status)}
-                </span>
-              )}
-            </div>
-            {nextTotalsRow ? (
-              <div className="stack" style={{ gap: '.85rem' }}>
-                <div className="review-readonly-block">
-                  <strong>{nextTotalsRow.student_name}</strong>
-                  <div className="subtle-text" style={{ marginTop: '.3rem' }}>
-                    {nextTotalsRow.workflow_status === 'complete'
-                      ? `Confirmed total ${nextTotalsRow.running_total}/${nextTotalsRow.total_possible}`
-                      : nextTotalsRow.next_action || 'Ready for name and totals confirmation'}
-                  </div>
-                </div>
-                {nextTotalsPreviewPage ? (
-                  <div className="image-frame">
-                    <img
-                      src={api.getPageImageUrl(nextTotalsSubmission!.id, nextTotalsPreviewPage.page_number)}
-                      alt={`Preview for ${nextTotalsRow.student_name}`}
-                      style={{ maxWidth: '100%', display: 'block', borderRadius: 10 }}
-                    />
-                  </div>
-                ) : (
-                  <div className="review-readonly-block">No rendered paper preview is available yet for this submission.</div>
-                )}
-                <div className="actions-row" style={{ marginTop: 0 }}>
-                  <Link className="btn btn-primary" to={buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)}>
-                    {nextTotalsRow.workflow_status === 'complete' ? 'Open paper' : `Confirm ${nextTotalsRow.student_name}`}
-                  </Link>
-                </div>
-              </div>
-            ) : (
-              <p className="subtle-text">No papers are waiting in the confirmation queue yet.</p>
-            )}
-          </section>
-
-          <section className="card stack">
-            <div className="panel-title-row">
-              <div>
                 <h2 className="section-title">1. Confirm names and capture totals</h2>
                 <p className="subtle-text">Open the next paper, verify the detected student name, enter or confirm the front-page totals, then continue through the queue.</p>
               </div>
               {nextTotalsRow && (
                 <Link className="btn btn-primary" to={buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)}>
-                  {nextTotalsRow.workflow_status === 'complete' ? 'Open paper' : `Open next: ${nextTotalsRow.student_name}`}
+                  Open test
                 </Link>
               )}
             </div>
             {frontPageRows.length === 0 ? (
               <p className="subtle-text">No papers are waiting in the confirmation queue yet.</p>
             ) : (
-              <div className="stack" style={{ gap: '.75rem' }}>
-                {frontPageRows.slice(0, 8).map((row) => (
-                  <div key={`queue-row-${row.submission_id}`} className="review-readonly-block">
-                    <div className="panel-title-row">
-                      <div>
-                        <strong>{row.student_name}</strong>
-                        <div className="subtle-text" style={{ marginTop: '.2rem' }}>
-                          {row.workflow_status === 'complete'
-                            ? `Confirmed total ${row.running_total}/${row.total_possible}`
-                            : row.next_action || 'Waiting for teacher confirmation'}
-                        </div>
-                      </div>
-                      <div className="actions-row" style={{ marginTop: 0 }}>
-                        <span className={`status-pill ${statusClassName(row.workflow_status) || 'status-neutral'}`}>{formatWorkflowStatus(row.workflow_status)}</span>
-                        <Link className="btn btn-secondary btn-sm" to={buildSubmissionWorkflowLink(row.submission_id, row.capture_mode, row.next_question_id)}>
-                          {row.workflow_status === 'complete' ? 'Open' : 'Confirm'}
-                        </Link>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {frontPageRows.length > 8 && <p className="subtle-text">Showing the first 8 papers in the queue.</p>}
-              </div>
+              <>
+                <p className="subtle-text">
+                  {frontPageCompletionPercent}% complete ({confirmedTotalsCount}/{frontPageRows.length} confirmed).
+                </p>
+                <p className="subtle-text">
+                  Opening the test resumes at the next unconfirmed paper after the last one already completed.
+                </p>
+              </>
             )}
           </section>
 
@@ -713,8 +657,8 @@ export function ExamDetailPage() {
               <button type="button" className="btn btn-secondary" onClick={() => void onExportSummaryCsv()} disabled={isExportingSummary}>
                 {isExportingSummary ? 'Exporting…' : 'Export class summary CSV'}
               </button>
-              <button type="button" className="btn btn-primary" onClick={() => void onExportCsv()} disabled={isExporting}>
-                {isExporting ? 'Exporting…' : 'Export totals CSV'}
+              <button type="button" className="btn btn-primary" onClick={() => void onExportWorkbook()} disabled={isExporting}>
+                {isExporting ? 'Exporting…' : 'Export grades Excel'}
               </button>
             </div>
           </section>
