@@ -41,6 +41,7 @@ from app.db import get_session
 from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
 from app.reporting import front_page_totals_read
 from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_gradebook_xlsx_artifact, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, write_csv_export
+from app.name_utils import normalize_student_name
 from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
@@ -472,7 +473,11 @@ def _invoke_parser(parser: AnswerKeyParser, image_paths: list[Path], model: str,
 
 @router.post("", response_model=ExamRead, status_code=status.HTTP_201_CREATED)
 def create_exam(payload: ExamCreate, session: Session = Depends(get_session)) -> Exam:
-    exam = Exam(name=payload.name)
+    exam_name = "Untitled Test"
+    normalized_name = " ".join(str(payload.name or "").strip().split())
+    if normalized_name:
+        exam_name = normalized_name
+    exam = Exam(name=exam_name)
     session.add(exam)
     session.commit()
     session.refresh(exam)
@@ -502,7 +507,7 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
             SubmissionRead(
                 id=sub.id,
                 exam_id=sub.exam_id,
-                student_name=sub.student_name,
+                student_name=normalize_student_name(sub.student_name),
                 status=sub.status,
                 capture_mode=sub.capture_mode,
                 front_page_totals=front_page_totals_read(sub),
@@ -576,7 +581,7 @@ def list_exam_submissions(exam_id: int, session: Session = Depends(get_session))
             SubmissionRead(
                 id=sub.id,
                 exam_id=sub.exam_id,
-                student_name=sub.student_name,
+                student_name=normalize_student_name(sub.student_name),
                 status=sub.status,
                 capture_mode=sub.capture_mode,
                 front_page_totals=front_page_totals_read(sub),
@@ -696,11 +701,11 @@ async def create_submission(
     capture_mode = SubmissionCaptureMode.QUESTION_LEVEL
     if "application/json" in content_type:
         payload = await request.json()
-        student_name = str(payload.get("student_name", "")).strip() if isinstance(payload, dict) else ""
+        student_name = normalize_student_name(str(payload.get("student_name", ""))) if isinstance(payload, dict) else ""
         requested_mode = str(payload.get("capture_mode", SubmissionCaptureMode.QUESTION_LEVEL.value)).strip()
     else:
         form = await request.form()
-        student_name = str(form.get("student_name", "")).strip()
+        student_name = normalize_student_name(str(form.get("student_name", "")))
         requested_mode = str(form.get("capture_mode", SubmissionCaptureMode.QUESTION_LEVEL.value)).strip()
         files = [item for item in form.getlist("files") if hasattr(item, "filename") and hasattr(item, "file")]
 
@@ -754,7 +759,7 @@ async def create_submission(
     return SubmissionRead(
         id=submission.id,
         exam_id=submission.exam_id,
-        student_name=submission.student_name,
+        student_name=normalize_student_name(submission.student_name),
         status=submission.status,
         capture_mode=submission.capture_mode,
         front_page_totals=front_page_totals_read(submission),
@@ -840,7 +845,7 @@ def _segment_bulk_candidates(
         avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
         candidate = BulkUploadCandidate(
             candidate_id=uuid.uuid4().hex,
-            student_name=current_name,
+            student_name=normalize_student_name(current_name),
             confidence=round(avg_conf, 3),
             page_start=current_start,
             page_end=end_page,
@@ -1040,7 +1045,12 @@ def finalize_bulk_submission_preview(
         warnings.append("Candidate ranges do not cover all pages.")
 
     for candidate in payload.candidates:
-        submission = Submission(exam_id=exam_id, student_name=candidate.student_name, status=SubmissionStatus.UPLOADED, capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS)
+        submission = Submission(
+            exam_id=exam_id,
+            student_name=normalize_student_name(candidate.student_name),
+            status=SubmissionStatus.UPLOADED,
+            capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+        )
         session.add(submission)
         session.flush()
 
@@ -1106,7 +1116,7 @@ def finalize_bulk_submission_preview(
             SubmissionRead(
                 id=submission.id,
                 exam_id=submission.exam_id,
-                student_name=submission.student_name,
+                student_name=normalize_student_name(submission.student_name),
                 status=submission.status,
                 capture_mode=submission.capture_mode,
                 front_page_totals=front_page_totals_read(submission),

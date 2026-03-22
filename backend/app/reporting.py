@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.models import Question, Submission
+from app.name_utils import normalize_student_name
 from app.schemas import ExamObjectiveRead, FrontPageObjectiveScore, FrontPageTotalsRead, ObjectiveAttentionSubmissionRead, ObjectiveCompleteSubmissionRead, ObjectiveTotalRead, SubmissionDashboardRow
 
 
@@ -199,22 +200,22 @@ def build_objective_summary_projections(rows: list[SubmissionDashboardRow]) -> l
                     bucket["strongest_complete_percent"] is None or percent > bucket["strongest_complete_percent"]
                 ):
                     bucket["strongest_complete_percent"] = percent
-                    bucket["strongest_complete_student"] = row.student_name
+                    bucket["strongest_complete_student"] = normalize_student_name(row.student_name)
                 if percent is not None and (
                     bucket["weakest_complete_percent"] is None or percent < bucket["weakest_complete_percent"]
                 ):
                     bucket["weakest_complete_percent"] = percent
-                    bucket["weakest_complete_student"] = row.student_name
+                    bucket["weakest_complete_student"] = normalize_student_name(row.student_name)
                     bucket["weakest_complete_submission"] = ObjectiveCompleteSubmissionRead(
                         submission_id=row.submission_id,
-                        student_name=row.student_name,
+                        student_name=normalize_student_name(row.student_name),
                         capture_mode=row.capture_mode,
                         objective_percent=percent,
                     )
             else:
                 bucket["attention_submissions"].append(ObjectiveAttentionSubmissionRead(
                     submission_id=row.submission_id,
-                    student_name=row.student_name,
+                    student_name=normalize_student_name(row.student_name),
                     capture_mode=row.capture_mode,
                     workflow_status=row.workflow_status,
                     objective_percent="" if percent is None else percent,

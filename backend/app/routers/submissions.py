@@ -38,6 +38,7 @@ from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
 from app.pipeline.transcribe import get_ocr_provider
 from app.ai.openai_vision import OpenAIRequestError, get_front_page_totals_extractor
 from app.reporting import accumulate_objective_totals, front_page_objective_totals, front_page_totals_read, objective_totals_read
+from app.name_utils import normalize_student_name
 from app.schemas import (
     BlobRegisterRequest,
     BlobRegisterResponse,
@@ -89,7 +90,7 @@ def _submission_read(submission: Submission, files: list[SubmissionFile], pages:
     return SubmissionRead(
         id=submission.id,
         exam_id=submission.exam_id,
-        student_name=submission.student_name,
+        student_name=normalize_student_name(submission.student_name),
         status=submission.status,
         capture_mode=submission.capture_mode,
         front_page_totals=front_page_totals_read(submission),
@@ -841,7 +842,7 @@ def upsert_front_page_totals(
         raise HTTPException(status_code=404, detail="Submission not found")
 
     if payload.student_name is not None:
-        normalized_student_name = payload.student_name.strip()
+        normalized_student_name = normalize_student_name(payload.student_name)
         if not normalized_student_name:
             raise HTTPException(status_code=400, detail="Student name cannot be blank")
         submission.student_name = normalized_student_name

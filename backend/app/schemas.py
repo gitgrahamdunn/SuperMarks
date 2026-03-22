@@ -11,7 +11,7 @@ from app.models import ExamStatus, SubmissionCaptureMode, SubmissionStatus
 
 
 class ExamCreate(BaseModel):
-    name: str
+    name: str = ""
 
 
 class ExamRead(BaseModel):

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import { uploadToBlob } from '../blob/upload';
+import { compareStudentNamesByLastName, formatStudentName } from '../lib/nameFormat';
 import { useToast } from '../components/ToastProvider';
 import type { BulkUploadPreview, ExamDetail, ExamMarkingDashboardResponse, ExamObjectiveRead, ParseLatestResponse, QuestionRead, StoredFileRead, SubmissionDashboardRow, SubmissionRead } from '../types/api';
 
@@ -149,7 +150,7 @@ export function ExamDetailPage() {
     const blockedRow = blockedRows[0];
     if (blockedRow) {
       return {
-        title: `Unblock ${blockedRow.student_name}`,
+        title: `Unblock ${formatStudentName(blockedRow.student_name)}`,
         detail: blockedRow.next_action || blockedRow.summary_reasons[0] || 'Open the blocked submission and clear the first flagged question.',
         href: buildSubmissionWorkflowLink(blockedRow.submission_id, blockedRow.capture_mode, blockedRow.next_question_id),
         cta: blockedRow.next_return_point ? `Open ${blockedRow.next_return_point}` : 'Open blocker',
@@ -160,7 +161,7 @@ export function ExamDetailPage() {
     const inProgressRow = inProgressRows[0];
     if (inProgressRow) {
       return {
-        title: `Resume ${inProgressRow.student_name}`,
+        title: `Resume ${formatStudentName(inProgressRow.student_name)}`,
         detail: inProgressRow.next_action || 'Continue the next question that still needs teacher entry.',
         href: buildSubmissionWorkflowLink(inProgressRow.submission_id, inProgressRow.capture_mode, inProgressRow.next_question_id),
         cta: inProgressRow.next_return_point ? `Resume at ${inProgressRow.next_return_point}` : 'Resume marking',
@@ -171,7 +172,7 @@ export function ExamDetailPage() {
     const readyRow = readyRows[0];
     if (readyRow) {
       return {
-        title: `Start ${readyRow.student_name}`,
+        title: `Start ${formatStudentName(readyRow.student_name)}`,
         detail: readyRow.next_action || 'This submission is prepared and ready for teacher marking.',
         href: buildSubmissionWorkflowLink(readyRow.submission_id, readyRow.capture_mode, readyRow.next_question_id),
         cta: readyRow.next_return_point ? `Start at ${readyRow.next_return_point}` : 'Open marking',
@@ -269,7 +270,7 @@ export function ExamDetailPage() {
         if (a.workflow_status === 'complete' && b.workflow_status !== 'complete') return -1;
         if (a.workflow_status !== 'complete' && b.workflow_status === 'complete') return 1;
         if ((b.percentValue ?? -1) !== (a.percentValue ?? -1)) return (b.percentValue ?? -1) - (a.percentValue ?? -1);
-        return a.student_name.localeCompare(b.student_name);
+        return compareStudentNamesByLastName(a.student_name, b.student_name);
       });
   }, [markingDashboard]);
 
@@ -566,6 +567,7 @@ export function ExamDetailPage() {
   if (!detail) return <p>Unable to load exam details.</p>;
 
   const frontPagePendingRows = frontPageRows.filter((row) => row.workflow_status !== 'complete');
+  const firstFrontPageSubmission = submissions.find((submission) => submission.capture_mode === 'front_page_totals') ?? null;
   const nextTotalsRow = frontPagePendingRows[0] ?? frontPageRows[0] ?? null;
   const confirmedTotalsCount = frontPageRows.filter((row) => row.workflow_status === 'complete').length;
   const frontPageCompletionPercent = frontPageRows.length > 0
@@ -573,7 +575,10 @@ export function ExamDetailPage() {
     : 0;
   const nextTotalsSubmission = nextTotalsRow
     ? submissions.find((submission) => submission.id === nextTotalsRow.submission_id) ?? null
-    : null;
+    : firstFrontPageSubmission;
+  const nextTotalsLink = nextTotalsRow
+    ? buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)
+    : (nextTotalsSubmission ? buildSubmissionWorkflowLink(nextTotalsSubmission.id, nextTotalsSubmission.capture_mode) : null);
   const nextTotalsPreviewPage = nextTotalsSubmission?.pages[0] ?? null;
 
   return (
@@ -584,11 +589,11 @@ export function ExamDetailPage() {
             <p className="page-eyebrow">Exam workspace</p>
             <p style={{ margin: 0 }}><Link to="/">← Back to Home</Link></p>
             <h1 className="page-title">{detail.exam.name}</h1>
-            <p className="page-subtitle">Review the detected student names, capture and confirm the front-page totals, then export the class table.</p>
+            <p className="page-subtitle">Confirm totals, then export.</p>
           </div>
           <div className="page-toolbar">
-            {nextTotalsRow && (
-              <Link className="btn btn-primary" to={buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)}>
+            {nextTotalsLink && (
+              <Link className="btn btn-primary" to={nextTotalsLink}>
                 Open test
               </Link>
             )}
@@ -598,22 +603,22 @@ export function ExamDetailPage() {
           <article className="metric-card">
             <p className="metric-label">Parsed papers</p>
             <p className="metric-value">{submissions.length}</p>
-            <p className="metric-meta">Student records currently loaded for review</p>
+            <p className="metric-meta">Ready to review</p>
           </article>
           <article className="metric-card">
             <p className="metric-label">Need confirmation</p>
             <p className="metric-value">{frontPagePendingRows.length}</p>
-            <p className="metric-meta">Papers still waiting for teacher review</p>
+            <p className="metric-meta">Still waiting</p>
           </article>
           <article className="metric-card">
             <p className="metric-label">Confirmed</p>
             <p className="metric-value">{confirmedTotalsCount}</p>
-            <p className="metric-meta">Papers ready for export</p>
+            <p className="metric-meta">Done</p>
           </article>
           <article className="metric-card">
             <p className="metric-label">Flow</p>
             <p className="metric-value">{markingDashboard ? `${markingDashboard.completion.completion_percent}%` : '—'}</p>
-            <p className="metric-meta">{'Detect names -> capture totals -> confirm -> export'}</p>
+            <p className="metric-meta">Complete</p>
           </article>
         </div>
       </section>
@@ -624,10 +629,10 @@ export function ExamDetailPage() {
             <div className="panel-title-row">
               <div>
                 <h2 className="section-title">1. Confirm names and capture totals</h2>
-                <p className="subtle-text">Open the next paper, verify the detected student name, enter or confirm the front-page totals, then continue through the queue.</p>
+                <p className="subtle-text">Open the next paper.</p>
               </div>
-              {nextTotalsRow && (
-                <Link className="btn btn-primary" to={buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)}>
+              {nextTotalsLink && (
+                <Link className="btn btn-primary" to={nextTotalsLink}>
                   Open test
                 </Link>
               )}
@@ -639,9 +644,7 @@ export function ExamDetailPage() {
                 <p className="subtle-text">
                   {frontPageCompletionPercent}% complete ({confirmedTotalsCount}/{frontPageRows.length} confirmed).
                 </p>
-                <p className="subtle-text">
-                  Opening the test resumes at the next unconfirmed paper after the last one already completed.
-                </p>
+                <p className="subtle-text">Resumes where you left off.</p>
               </>
             )}
           </section>
@@ -650,7 +653,7 @@ export function ExamDetailPage() {
             <div className="panel-title-row">
               <div>
                 <h2 className="section-title">2. Export class table</h2>
-                <p className="subtle-text">Once confirmations are done, export the results.</p>
+                <p className="subtle-text">Export when ready.</p>
               </div>
             </div>
             <div className="actions-row" style={{ marginTop: 0 }}>
@@ -747,7 +750,7 @@ export function ExamDetailPage() {
                       {lane.summary.nextRow ? (
                         <div className="command-lane-next-step">
                           <div>
-                            <strong>Next up: {lane.summary.nextRow.student_name}</strong>
+                            <strong>Next up: {formatStudentName(lane.summary.nextRow.student_name)}</strong>
                             <p className="subtle-text" style={{ marginTop: '.2rem' }}>{reportingNextActionLabel(lane.summary.nextRow)}</p>
                           </div>
                           <Link className="btn btn-secondary" to={buildSubmissionWorkflowLink(lane.summary.nextRow.submission_id, lane.summary.nextRow.capture_mode, lane.summary.nextRow.next_question_id)}>
@@ -827,12 +830,12 @@ export function ExamDetailPage() {
                       </div>
                       <div className="queue-lane-summary-stat">
                         <span className="queue-lane-summary-label">Strongest confirmed result</span>
-                        <strong>{reportReadinessSummary.strongestRow ? reportReadinessSummary.strongestRow.student_name : '—'}</strong>
+                        <strong>{reportReadinessSummary.strongestRow ? formatStudentName(reportReadinessSummary.strongestRow.student_name) : '—'}</strong>
                         <span className="subtle-text">{reportReadinessSummary.strongestRow ? `${reportReadinessSummary.strongestRow.running_total}/${reportReadinessSummary.strongestRow.total_possible} · ${formatPercent(reportReadinessSummary.strongestRow.running_total, reportReadinessSummary.strongestRow.total_possible)}` : 'No complete scored result yet'}</span>
                       </div>
                       <div className="queue-lane-summary-stat queue-lane-summary-stat--next">
                         <span className="queue-lane-summary-label">Reporting attention</span>
-                        <strong>{reportReadinessSummary.attentionRow ? reportReadinessSummary.attentionRow!.student_name : 'Queue clear'}</strong>
+                        <strong>{reportReadinessSummary.attentionRow ? formatStudentName(reportReadinessSummary.attentionRow!.student_name) : 'Queue clear'}</strong>
                         <span className="subtle-text">{reportReadinessSummary.attentionRow ? issuesLabel(reportReadinessSummary.attentionRow!) : 'Every submission currently has a complete result'}</span>
                       </div>
                     </div>
@@ -860,7 +863,7 @@ export function ExamDetailPage() {
                                 <td>
                                   <div className="dashboard-student dashboard-student--queue">
                                     <div className="dashboard-student-topline">
-                                      <Link to={`/submissions/${row.submission_id}/results?examId=${examId}`}>{row.student_name}</Link>
+                                      <Link to={`/submissions/${row.submission_id}/results?examId=${examId}`}>{formatStudentName(row.student_name)}</Link>
                                       <span className="status-pill status-neutral">{workflowLaneLabel(row.capture_mode)}</span>
                                       <span className={`review-status-pill ${statusClassName(row.workflow_status)}`}>{formatWorkflowStatus(row.workflow_status)}</span>
                                     </div>
@@ -981,7 +984,7 @@ export function ExamDetailPage() {
                               if (priorityDifference !== 0) {
                                 return priorityDifference;
                               }
-                              return left.student_name.localeCompare(right.student_name);
+                              return compareStudentNamesByLastName(left.student_name, right.student_name);
                             });
                             const primaryAttentionSubmission = prioritizedAttentionSubmissions[0] ?? null;
                             const hasWeakestCompleteFollowUp = !!objective.weakest_complete_submission;
@@ -1021,7 +1024,7 @@ export function ExamDetailPage() {
                                           <div key={`${objective.objective_code}-${submission.submission_id}`} className="stack" style={{ gap: '.15rem' }}>
                                             <div className="panel-title-row" style={{ marginBottom: 0 }}>
                                               <Link to={buildSubmissionWorkflowLink(submission.submission_id, submission.capture_mode)}>
-                                                {submission.student_name}
+                                                {formatStudentName(submission.student_name)}
                                               </Link>
                                               <span className={`status-pill ${index === 0 ? 'status-blocked' : 'status-neutral'}`}>{priorityLabel}</span>
                                             </div>
@@ -1037,7 +1040,7 @@ export function ExamDetailPage() {
                                         <div className="stack" style={{ gap: '.15rem' }}>
                                           <div className="panel-title-row" style={{ marginBottom: 0 }}>
                                             <Link to={buildSubmissionResultsLink(objective.weakest_complete_submission.submission_id)}>
-                                              Weakest complete: {objective.weakest_complete_submission.student_name}
+                                              Weakest complete: {formatStudentName(objective.weakest_complete_submission.student_name)}
                                             </Link>
                                             <span className={`status-pill ${prioritizedAttentionSubmissions.length > 0 ? 'status-neutral' : 'status-ready'}`}>
                                               {prioritizedAttentionSubmissions.length > 0 ? 'Then review' : 'Review next'}
@@ -1101,7 +1104,7 @@ export function ExamDetailPage() {
                           {section.summary.nextRow && (
                             <div className="queue-lane-summary-stat queue-lane-summary-stat--next">
                               <span className="queue-lane-summary-label">Next suggested item</span>
-                              <strong>{section.summary.nextRow.student_name}</strong>
+                              <strong>{formatStudentName(section.summary.nextRow.student_name)}</strong>
                               <span className="subtle-text">{section.summary.nextRow.next_return_point || primaryActionLabel(section.summary.nextRow)}</span>
                             </div>
                           )}
@@ -1130,7 +1133,7 @@ export function ExamDetailPage() {
                                       <td>
                                         <div className="dashboard-student dashboard-student--queue">
                                           <div className="dashboard-student-topline">
-                                            <Link to={`/submissions/${row.submission_id}`}>{row.student_name}</Link>
+                                            <Link to={`/submissions/${row.submission_id}`}>{formatStudentName(row.student_name)}</Link>
                                             <span className="status-pill status-neutral">{workflowLaneLabel(row.capture_mode)}</span>
                                             <span className={`review-status-pill ${statusClassName(row.workflow_status)}`}>{formatWorkflowStatus(row.workflow_status)}</span>
                                           </div>

@@ -2,23 +2,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { AutoGrowTextarea } from '../components/AutoGrowTextarea';
+import { formatStudentName } from '../lib/nameFormat';
 import { useToast } from '../components/ToastProvider';
 import type {
-  FrontPageExtractionEvidence,
   FrontPageObjectiveScore,
   FrontPageTotalsCandidate,
   QuestionRead,
   SubmissionRead,
 } from '../types/api';
-
-type PreviewMode = 'focused' | 'full';
-
-type FocusedPreviewRect = {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-};
 
 const frontPageCandidateValueCache = new Map<number, FrontPageTotalsCandidate>();
 const frontPageCandidatePromiseCache = new Map<number, Promise<FrontPageTotalsCandidate>>();
@@ -112,75 +103,10 @@ function normalizeCode(value: string): string {
   return value.trim().toLowerCase();
 }
 
-function confidenceLabel(confidence: number | undefined): string {
-  if (confidence == null) return 'No confidence';
-  return `${Math.round(confidence * 100)}% confidence`;
-}
-
-function clampNormalized(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
-
-function getUsableEvidence(
-  evidence: FrontPageExtractionEvidence[] | undefined,
-  pageNumber: number,
-): FocusedPreviewRect[] {
-  if (!Array.isArray(evidence)) return [];
-
-  return evidence
-    .filter((item) => item.page_number === pageNumber)
-    .map((item) => ({
-      x: Number(item.x),
-      y: Number(item.y),
-      w: Number(item.w),
-      h: Number(item.h),
-    }))
-    .filter((item) => (
-      Number.isFinite(item.x)
-      && Number.isFinite(item.y)
-      && Number.isFinite(item.w)
-      && Number.isFinite(item.h)
-      && item.w > 0
-      && item.h > 0
-    ));
-}
-
-function buildFocusedPreviewRect(
-  candidateTotals: FrontPageTotalsCandidate | null,
-  pageNumber: number,
-): FocusedPreviewRect | null {
-  if (!candidateTotals) return null;
-
-  const evidenceRects = [
-    ...getUsableEvidence(candidateTotals.student_name?.evidence, pageNumber),
-    ...getUsableEvidence(candidateTotals.overall_marks_awarded?.evidence, pageNumber),
-    ...getUsableEvidence(candidateTotals.overall_max_marks?.evidence, pageNumber),
-    ...candidateTotals.objective_scores.flatMap((row) => [
-      ...getUsableEvidence(row.objective_code.evidence, pageNumber),
-      ...getUsableEvidence(row.marks_awarded.evidence, pageNumber),
-      ...getUsableEvidence(row.max_marks?.evidence, pageNumber),
-    ]),
-  ];
-
-  if (evidenceRects.length === 0) return null;
-
-  const minX = Math.min(...evidenceRects.map((item) => item.x));
-  const minY = Math.min(...evidenceRects.map((item) => item.y));
-  const maxX = Math.max(...evidenceRects.map((item) => item.x + item.w));
-  const maxY = Math.max(...evidenceRects.map((item) => item.y + item.h));
-  const padding = 0.04;
-
-  const paddedMinX = clampNormalized(minX - padding);
-  const paddedMinY = clampNormalized(minY - padding);
-  const paddedMaxX = clampNormalized(maxX + padding);
-  const paddedMaxY = clampNormalized(maxY + padding);
-
-  return {
-    x: paddedMinX,
-    y: paddedMinY,
-    w: Math.min(Math.max(paddedMaxX - paddedMinX, 0.12), 1 - paddedMinX),
-    h: Math.min(Math.max(paddedMaxY - paddedMinY, 0.12), 1 - paddedMinY),
-  };
+function formatOutcomeLabel(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return 'Outcome';
+  return /^outcome\b/i.test(trimmed) ? trimmed : `Outcome ${trimmed}`;
 }
 
 function buildInitialFrontPageFormState(
@@ -265,7 +191,6 @@ export function SubmissionFrontPageTotalsPage() {
   const [teacherNote, setTeacherNote] = useState('');
   const [objectiveScores, setObjectiveScores] = useState<FrontPageObjectiveScore[]>([]);
   const [selectedPageNumber, setSelectedPageNumber] = useState(1);
-  const [previewMode, setPreviewMode] = useState<PreviewMode>('focused');
   const [saving, setSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
 
@@ -401,14 +326,9 @@ export function SubmissionFrontPageTotalsPage() {
   const savedTotals = submission?.front_page_totals ?? null;
   const currentOverallRead = parseNumeric(overallMarksAwarded);
   const currentOverallMaxRead = parseNumeric(overallMaxMarks);
-  const seededObjectiveScores = useMemo(() => buildSeededObjectiveScores(questions), [questions]);
   const selectedPage = useMemo(
     () => submission?.pages.find((page) => page.page_number === selectedPageNumber) ?? submission?.pages[0] ?? null,
     [selectedPageNumber, submission?.pages],
-  );
-  const focusedPreviewRect = useMemo(
-    () => (selectedPage ? buildFocusedPreviewRect(candidateTotals, selectedPage.page_number) : null),
-    [candidateTotals, selectedPage],
   );
   const pageImageUrl = selectedPage ? api.getPageImageUrl(submissionId, selectedPage.page_number) : '';
 
@@ -457,27 +377,25 @@ export function SubmissionFrontPageTotalsPage() {
   );
 
   const candidateOutcomeRows = candidateTotals?.objective_scores ?? [];
-  const extractedOutcomeCodes = candidateOutcomeRows.map((row) => row.objective_code.value_text.trim()).filter(Boolean);
-  const configuredOutcomeCodes = seededObjectiveScores.map((row) => row.objective_code).filter(Boolean);
-  const missingConfiguredOutcomes = configuredOutcomeCodes.filter((code) => !extractedOutcomeCodes.some((item) => normalizeCode(item) === normalizeCode(code)));
-  const unexpectedExtractedOutcomes = extractedOutcomeCodes.filter((code) => !configuredOutcomeCodes.some((item) => normalizeCode(item) === normalizeCode(code)));
-  const studentNameMismatch = Boolean(
-    candidateTotals?.student_name?.value_text?.trim()
-    && submission?.student_name?.trim()
-    && normalizeCode(candidateTotals.student_name.value_text) !== normalizeCode(submission.student_name)
-  );
-  const extractedOverall = parseNumeric(candidateTotals?.overall_marks_awarded?.value_text ?? '');
-  const extractedOverallMax = parseNumeric(candidateTotals?.overall_max_marks?.value_text ?? '');
-  const totalMismatch = extractedOverall != null && currentOverallRead != null && extractedOverall !== currentOverallRead;
-  const maxMismatch = extractedOverallMax != null && currentOverallMaxRead != null && extractedOverallMax !== currentOverallMaxRead;
-  const reviewFlags = [
-    studentNameMismatch ? 'Student name differs from the queued submission name.' : null,
-    totalMismatch ? 'Parsed total differs from the current saved/working total.' : null,
-    maxMismatch ? 'Parsed max differs from the current saved/working max.' : null,
-    missingConfiguredOutcomes.length > 0 ? `Missing expected outcomes: ${missingConfiguredOutcomes.join(', ')}` : null,
-    unexpectedExtractedOutcomes.length > 0 ? `Extra parsed outcomes: ${unexpectedExtractedOutcomes.join(', ')}` : null,
-    ...(candidateTotals?.warnings ?? []),
-  ].filter((item): item is string => Boolean(item));
+  const displayOutcomeRows = useMemo(() => {
+    if (candidateOutcomeRows.length > 0) {
+      return candidateOutcomeRows.map((row, index) => ({
+        key: `candidate-${index}`,
+        label: formatOutcomeLabel(row.objective_code.value_text || ''),
+        awarded: row.marks_awarded.value_text?.trim() || '—',
+        max: row.max_marks?.value_text?.trim() || '—',
+      }));
+    }
+
+    return objectiveScores
+      .filter((row) => row.objective_code.trim())
+      .map((row, index) => ({
+        key: `working-${index}`,
+        label: formatOutcomeLabel(row.objective_code),
+        awarded: formatMaybeNumber(row.marks_awarded),
+        max: formatMaybeNumber(row.max_marks),
+      }));
+  }, [candidateOutcomeRows, objectiveScores]);
 
   const hasPassableInterpretation = Boolean(candidateTotals || savedTotals);
   const queueRemainingAfterThis = Math.max(queueRemainingCount - (savedTotals?.confirmed ? 0 : 1), 0);
@@ -488,12 +406,6 @@ export function SubmissionFrontPageTotalsPage() {
     if (candidateLoadSeconds < 20) return 88 + (candidateLoadSeconds - 10) * 0.4;
     return 92;
   }, [candidateLoadSeconds, isCandidateLoading]);
-
-  useEffect(() => {
-    if (previewMode === 'focused' && !focusedPreviewRect) {
-      setPreviewMode('full');
-    }
-  }, [focusedPreviewRect, previewMode]);
 
   const resetCorrectionForm = () => {
     if (!submission) return;
@@ -581,7 +493,7 @@ export function SubmissionFrontPageTotalsPage() {
           loadFrontPageSubmissionCached(refreshedNextFrontPageSubmission.id),
           loadFrontPageCandidatesCached(refreshedNextFrontPageSubmission.id),
         ]);
-        showSuccess(`Confirmed ${refreshedSubmission.student_name}. Next up: ${refreshedNextFrontPageSubmission.student_name}.`);
+        showSuccess(`Confirmed ${formatStudentName(refreshedSubmission.student_name)}. Next up: ${formatStudentName(refreshedNextFrontPageSubmission.student_name)}.`);
         navigate(`/submissions/${refreshedNextFrontPageSubmission.id}/front-page-totals?examId=${examId}&returnTo=${encodeURIComponent(returnTo)}&returnLabel=${encodeURIComponent(returnLabel)}`);
         return;
       }
@@ -633,8 +545,8 @@ export function SubmissionFrontPageTotalsPage() {
           <div className="page-header">
             <div>
               <p className="page-eyebrow">Front-page validation</p>
-              <h1 className="page-title">{submission.student_name}</h1>
-              <p className="page-subtitle">SuperMarks is reading this paper before review opens.</p>
+              <h1 className="page-title">{formatStudentName(submission.student_name)}</h1>
+              <p className="page-subtitle">Reading paper…</p>
             </div>
             <div className="page-toolbar">
               <span className="status-pill status-in-progress">Thinking</span>
@@ -646,7 +558,7 @@ export function SubmissionFrontPageTotalsPage() {
           <div className="panel-title-row">
             <div>
               <h2 className="section-title">Preparing validation</h2>
-              <p className="subtle-text">This will open automatically as soon as the parsed values are ready.</p>
+              <p className="subtle-text">Opening automatically.</p>
             </div>
             <strong>{Math.round(candidateLoadProgress)}%</strong>
           </div>
@@ -660,9 +572,6 @@ export function SubmissionFrontPageTotalsPage() {
           </div>
           <div className="review-readonly-block">
             <strong>Loading parsed values</strong>
-            <p className="subtle-text" style={{ marginTop: '.35rem' }}>
-              SuperMarks is extracting the student name, total score, and visible outcome scores before review begins.
-            </p>
           </div>
         </section>
       </div>
@@ -677,8 +586,8 @@ export function SubmissionFrontPageTotalsPage() {
           <div className="page-header">
             <div>
               <p className="page-eyebrow">Front-page validation</p>
-              <h1 className="page-title">{submission.student_name}</h1>
-              <p className="page-subtitle">Parsed values did not load for this paper.</p>
+              <h1 className="page-title">{formatStudentName(submission.student_name)}</h1>
+              <p className="page-subtitle">Couldn’t load this paper.</p>
             </div>
           </div>
         </section>
@@ -703,36 +612,18 @@ export function SubmissionFrontPageTotalsPage() {
 
   return (
     <div className="workflow-shell workflow-shell--compact">
-      <section className="card card--hero stack">
-        <p style={{ margin: 0 }}><Link to={returnTo}>← {returnLabel}</Link></p>
-        <div className="page-header">
-          <div>
-            <p className="page-eyebrow">Front-page validation</p>
-            <h1 className="page-title">{submission.student_name}</h1>
-            <p className="page-subtitle">Look at the paper, compare it to SuperMarks&apos; read, then pass or fail this paper in one move.</p>
-          </div>
-          <div className="page-toolbar">
-            <span className={`status-pill ${savedTotals?.confirmed ? 'status-complete' : 'status-in-progress'}`}>
-              {savedTotals?.confirmed ? 'Confirmed' : 'Waiting validation'}
-            </span>
-            <span className="status-pill status-neutral">
-              {queueRemainingAfterThis > 0 ? `${queueRemainingAfterThis} after this` : 'Last paper in queue'}
-            </span>
-            {nextFrontPageSubmission && <span className="status-pill status-in-progress">Next: {nextFrontPageSubmission.student_name}</span>}
-          </div>
-        </div>
-      </section>
-
       <div className="front-page-swipe-layout">
         <section className="card stack">
-          <div className="panel-title-row">
-            <div>
-              <h2 className="section-title">Actual paper</h2>
-              <p className="subtle-text">Keep the paper visible while you decide if the interpretation is right.</p>
+          <div className="front-page-swipe-header">
+            <p style={{ margin: 0 }}><Link to={returnTo}>← {returnLabel}</Link></p>
+            <div className="page-toolbar">
+              <span className={`status-pill ${savedTotals?.confirmed ? 'status-complete' : 'status-in-progress'}`}>
+                {savedTotals?.confirmed ? 'Confirmed' : 'Waiting'}
+              </span>
+              <span className="status-pill status-neutral">
+                {submission.pages.length > 0 ? `${submission.pages.length} page${submission.pages.length === 1 ? '' : 's'}` : 'No pages yet'}
+              </span>
             </div>
-            <span className="status-pill status-neutral">
-              {submission.pages.length > 0 ? `${submission.pages.length} page${submission.pages.length === 1 ? '' : 's'}` : 'No pages yet'}
-            </span>
           </div>
 
           {submission.pages.length > 1 && (
@@ -752,59 +643,13 @@ export function SubmissionFrontPageTotalsPage() {
 
           {selectedPage ? (
             <>
-              <div className="front-page-swipe-preview-bar">
-                {focusedPreviewRect ? (
-                  <div className="front-page-swipe-preview-toggle" role="tablist" aria-label="Preview mode">
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${previewMode === 'focused' ? 'btn-primary' : 'btn-secondary'}`}
-                      onClick={() => setPreviewMode('focused')}
-                    >
-                      Focused preview
-                    </button>
-                    <button
-                      type="button"
-                      className={`btn btn-sm ${previewMode === 'full' ? 'btn-primary' : 'btn-secondary'}`}
-                      onClick={() => setPreviewMode('full')}
-                    >
-                      Full page
-                    </button>
-                  </div>
-                ) : (
-                  <p className="subtle-text front-page-swipe-preview-note">
-                    Full page shown because this paper did not return usable evidence coordinates.
-                  </p>
-                )}
-                {focusedPreviewRect && previewMode === 'focused' && (
-                  <span className="status-pill status-in-progress">Centered on parsed evidence</span>
-                )}
+              <div className="image-frame front-page-swipe-image">
+                <img
+                  src={pageImageUrl}
+                  alt={`Page ${selectedPage.page_number} for ${formatStudentName(submission.student_name)}`}
+                  className="front-page-swipe-page-image"
+                />
               </div>
-
-              {previewMode === 'focused' && focusedPreviewRect ? (
-                <div className="image-frame front-page-swipe-image front-page-swipe-image--focused">
-                  <div className="front-page-swipe-crop-frame">
-                    <img
-                      src={pageImageUrl}
-                      alt={`Focused preview for page ${selectedPage.page_number} for ${submission.student_name}`}
-                      className="front-page-swipe-crop-image"
-                      style={{
-                        width: `${100 / focusedPreviewRect.w}%`,
-                        maxWidth: 'none',
-                        left: `-${(focusedPreviewRect.x / focusedPreviewRect.w) * 100}%`,
-                        top: `-${(focusedPreviewRect.y / focusedPreviewRect.h) * 100}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div className="image-frame front-page-swipe-image">
-                  <img
-                    src={pageImageUrl}
-                    alt={`Page ${selectedPage.page_number} for ${submission.student_name}`}
-                    style={{ maxWidth: '100%', display: 'block', borderRadius: 10 }}
-                  />
-                </div>
-              )}
             </>
           ) : (
             <div className="review-readonly-block">No built page image yet. Add photos or a PDF, then rebuild this paper preview.</div>
@@ -812,65 +657,32 @@ export function SubmissionFrontPageTotalsPage() {
         </section>
 
         <section className="card stack">
-          <div className="panel-title-row">
-            <div>
-              <h2 className="section-title">SuperMarks read</h2>
-              <p className="subtle-text">If this looks right, pass it. If not, fail it and correct inline.</p>
+          <div className="front-page-swipe-summary-compact">
+            <div className="front-page-swipe-summary-row">
+              <span className="metric-label">Name</span>
+              <strong>{formatStudentName(candidateTotals?.student_name?.value_text?.trim() || submission.student_name)}</strong>
             </div>
-            <span className={`status-pill ${reviewFlags.length > 0 ? 'status-flagged' : 'status-complete'}`}>
-              {reviewFlags.length > 0 ? `${reviewFlags.length} review flag${reviewFlags.length === 1 ? '' : 's'}` : 'Looks aligned'}
-            </span>
-          </div>
-
-          <div className="front-page-swipe-summary">
-            <div className="front-page-swipe-stat">
-              <span className="metric-label">Student</span>
-              <strong>{submission.student_name}</strong>
-              <span className="subtle-text">
-                Parsed: {candidateTotals?.student_name?.value_text?.trim() || 'No parsed name'}
-              </span>
-            </div>
-            <div className="front-page-swipe-stat">
+            <div className="front-page-swipe-summary-row">
               <span className="metric-label">Total</span>
               <strong>
                 {candidateTotals?.overall_marks_awarded?.value_text || formatMaybeNumber(currentOverallRead)}
                 {' / '}
                 {candidateTotals?.overall_max_marks?.value_text || formatMaybeNumber(currentOverallMaxRead)}
               </strong>
-              <span className="subtle-text">
-                {candidateTotals?.overall_marks_awarded ? confidenceLabel(candidateTotals.overall_marks_awarded.confidence) : 'Manual fallback'}
-              </span>
             </div>
-          </div>
-
-          <div className="review-readonly-block">
-            <strong>Outcomes</strong>
-            {candidateOutcomeRows.length > 0 ? (
-              <div className="front-page-swipe-outcomes">
-                {candidateOutcomeRows.map((row, index) => (
-                  <div key={`candidate-outcome-${index}`} className="front-page-swipe-outcome-chip">
-                    <strong>{row.objective_code.value_text || 'Outcome'}</strong>
-                    <span>{row.marks_awarded.value_text || '—'} / {row.max_marks?.value_text || '—'}</span>
+            {displayOutcomeRows.length > 0 && (
+              <div className="front-page-swipe-outcomes-compact">
+                {displayOutcomeRows.map((row) => (
+                  <div key={row.key} className="front-page-swipe-outcome-row">
+                    <span>{row.label}</span>
+                    <strong>{row.awarded} / {row.max}</strong>
                   </div>
                 ))}
               </div>
-            ) : (
-              <p className="subtle-text" style={{ marginTop: '.45rem' }}>No parsed outcome rows. Use fail if you need to enter them manually.</p>
             )}
           </div>
 
           {candidateError && <div className="review-readonly-block">{candidateError}</div>}
-          {reviewFlags.length > 0 && (
-            <div className="review-readonly-block">
-              <strong>Review notes</strong>
-              <ul className="front-page-swipe-flags">
-                {reviewFlags.map((flag) => (
-                  <li key={flag}>{flag}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-
           <div className="front-page-swipe-actions">
             <button
               type="button"
@@ -890,16 +702,12 @@ export function SubmissionFrontPageTotalsPage() {
             </button>
           </div>
 
-          <p className="subtle-text">
-            Shortcut: `Cmd/Ctrl + Enter` confirms and advances. Press `F` to open correction.
-          </p>
-
           {isEditing && (
             <div className="front-page-fail-panel stack">
               <div className="panel-title-row">
                 <div>
                   <h3 className="section-title" style={{ marginBottom: 0 }}>Correction panel</h3>
-                  <p className="subtle-text" style={{ margin: 0 }}>Fix the student name, outcome rows, or total, then save and continue.</p>
+                  <p className="subtle-text" style={{ margin: 0 }}>Edit and save.</p>
                 </div>
                 <div className="actions-row" style={{ marginTop: 0 }}>
                   <button type="button" className="btn btn-secondary btn-sm" onClick={resetCorrectionForm} disabled={saving}>

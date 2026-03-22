@@ -446,7 +446,7 @@ export function resetApiContractCheckCache(): void {
 
 export const api = {
   getExams: (options?: RequestInit) => request<ExamRead[]>('exams', options, EXAM_READ_TIMEOUT_MS),
-  createExam: (name: string, options?: RequestInit) => request<ExamRead>('exams', {
+  createExam: (name = '', options?: RequestInit) => request<ExamRead>('exams', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),

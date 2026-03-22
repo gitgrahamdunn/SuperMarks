@@ -1,7 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
-import { Modal } from './components/Modal';
-import { clearClientLogs, getClientLogs, hasCapturedClientErrors, subscribeToClientLogs } from './logs/clientLogStore';
+import { NavLink, Route, Routes } from 'react-router-dom';
 
 const ExamsPage = lazy(async () => ({ default: (await import('./pages/ExamsPage')).ExamsPage }));
 const ExamDetailPage = lazy(async () => ({ default: (await import('./pages/ExamDetailPage')).ExamDetailPage }));
@@ -29,23 +27,13 @@ function getInitialTheme(): Theme {
 }
 
 export default function App() {
-  const showDevTools = import.meta.env.DEV;
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
-  const [logsOpen, setLogsOpen] = useState(false);
-  const [clientLogs, setClientLogs] = useState(() => getClientLogs());
-  const [showClientErrorBanner, setShowClientErrorBanner] = useState(() => hasCapturedClientErrors());
   const frontendVersion = useMemo(() => resolveFrontendVersionLabel(), []);
-  const location = useLocation();
 
   useEffect(() => {
     document.body.classList.toggle('theme-dark', theme === 'dark');
     localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
-
-  useEffect(() => subscribeToClientLogs(() => {
-    setClientLogs(getClientLogs());
-    setShowClientErrorBanner(hasCapturedClientErrors());
-  }), []);
 
   return (
     <div className="layout app-shell">
@@ -54,7 +42,6 @@ export default function App() {
         <div className="top-nav-left">
           <div className="brand-lockup">
             <NavLink to="/" className="brand">SuperMarks</NavLink>
-            <span className="brand-tag">Teacher totals capture</span>
           </div>
           <nav aria-label="Main navigation" className="main-nav-links">
             <NavLink
@@ -66,35 +53,7 @@ export default function App() {
             </NavLink>
           </nav>
         </div>
-        <div className="app-shell-meta">
-          <div className="actions-row app-shell-actions" style={{ marginTop: 0 }}>
-            {showDevTools && (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm btn-quiet"
-                onClick={() => setLogsOpen(true)}
-              >
-                Diagnostics ({clientLogs.length})
-              </button>
-            )}
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm btn-quiet"
-              onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
-              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
-            >
-              {theme === 'light' ? 'Dark mode' : 'Light mode'}
-            </button>
-          </div>
-          <small className="app-version">{frontendVersion}</small>
-        </div>
       </header>
-
-      {showDevTools && location.pathname === '/' && showClientErrorBanner && (
-        <p className="warning-text">
-          A client error occurred. Open Logs for details.
-        </p>
-      )}
 
       <main id="main-content" tabIndex={-1}>
         <Suspense fallback={<p className="subtle-text">Loading page…</p>}>
@@ -111,47 +70,21 @@ export default function App() {
         </Suspense>
       </main>
 
-      {showDevTools && logsOpen && (
-        <Modal title="Client Logs" onClose={() => setLogsOpen(false)}>
-          <div className="stack">
-            <h2 style={{ margin: 0 }}>Client Logs</h2>
-            <p className="subtle-text" style={{ margin: 0 }}>
-              Captures window errors and unhandled promise rejections for frontend debugging.
-            </p>
-            <div className="actions-row" style={{ marginTop: 0 }}>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => {
-                  clearClientLogs();
-                  setShowClientErrorBanner(false);
-                }}
-              >
-                Clear logs
-              </button>
-              <button type="button" className="btn btn-primary" onClick={() => setLogsOpen(false)}>
-                Close
-              </button>
-            </div>
-            <div className="client-log-list">
-              {clientLogs.length === 0 && <p className="subtle-text">No client logs captured yet.</p>}
-              {clientLogs.map((entry, index) => (
-                <article key={`${entry.timestamp}-${entry.type}-${index}`} className="client-log-item">
-                  <p><strong>{entry.type}</strong>{entry.count && entry.count > 1 ? ` (x${entry.count})` : ''}</p>
-                  <p>{entry.message}</p>
-                  <p className="subtle-text">{new Date(entry.timestamp).toLocaleString()}</p>
-                  {entry.filename && (
-                    <p className="subtle-text">
-                      {entry.filename}:{entry.lineno ?? '?'}:{entry.colno ?? '?'}
-                    </p>
-                  )}
-                  {entry.stack && <pre>{entry.stack}</pre>}
-                </article>
-              ))}
-            </div>
-          </div>
-        </Modal>
-      )}
+      <footer className="app-shell-footer">
+        <small className="app-version">{frontendVersion}</small>
+        <button
+          type="button"
+          className={`theme-switch ${theme === 'dark' ? 'is-dark' : ''}`}
+          onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
+          aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+          aria-pressed={theme === 'dark'}
+        >
+          <span className="theme-switch-icon" aria-hidden="true">{theme === 'light' ? '☀' : '☾'}</span>
+          <span className="theme-switch-track" aria-hidden="true">
+            <span className="theme-switch-thumb" />
+          </span>
+        </button>
+      </footer>
     </div>
   );
 }

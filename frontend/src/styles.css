@@ -225,62 +225,71 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
 .front-page-swipe-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(360px, .85fr);
-  gap: 1rem;
+  gap: .09rem;
   align-items: start;
 }
 
-.front-page-swipe-image {
-  min-height: 420px;
-  overflow: auto;
-}
-
-.front-page-swipe-image--focused {
-  overflow: hidden;
-  padding: .75rem;
-  background:
-    radial-gradient(circle at top left, rgba(31, 106, 83, 0.1), transparent 34%),
-    linear-gradient(180deg, color-mix(in srgb, var(--surface-alt), white 28%), var(--surface));
-}
-
-.front-page-swipe-preview-bar {
+.front-page-swipe-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: .75rem;
-  flex-wrap: wrap;
+  gap: .45rem;
+  margin-bottom: .12rem;
 }
 
-.front-page-swipe-preview-toggle {
+.front-page-swipe-image {
+  min-height: 0;
+  padding: .12rem;
   display: flex;
-  gap: .5rem;
-  flex-wrap: wrap;
+  justify-content: center;
 }
 
-.front-page-swipe-preview-note {
-  margin: 0;
-}
-
-.front-page-swipe-crop-frame {
-  position: relative;
-  width: 100%;
-  min-height: 440px;
-  overflow: hidden;
-  border-radius: .9rem;
-  border: 1px solid var(--border-soft);
-  background: #f4f0e7;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
-}
-
-.front-page-swipe-crop-image {
-  position: relative;
+.front-page-swipe-page-image {
   display: block;
-  border-radius: .85rem;
+  width: 100%;
+  max-width: 505px;
+  max-height: 58vh;
+  object-fit: contain;
+  border-radius: 10px;
 }
 
 .front-page-swipe-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .75rem;
+}
+
+.front-page-swipe-summary-compact {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+  padding: .6rem .7rem;
+  border: 1px solid var(--border-soft);
+  border-radius: .8rem;
+  background: var(--surface-alt);
+}
+
+.front-page-swipe-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: .75rem;
+}
+
+.front-page-swipe-outcomes-compact {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  padding-top: .15rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.front-page-swipe-outcome-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: .75rem;
+  font-size: .94rem;
 }
 
 .front-page-swipe-stat {
@@ -322,14 +331,16 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
 
 .front-page-swipe-actions {
   display: grid;
-  grid-template-columns: 1.2fr .8fr;
-  gap: .75rem;
+  grid-template-columns: 1fr 1fr;
+  gap: .35rem;
 }
 
 .front-page-swipe-pass,
 .front-page-swipe-fail {
-  min-height: 64px;
-  font-size: 1.05rem;
+  min-height: 34px;
+  font-size: .8rem;
+  padding-top: .2rem;
+  padding-bottom: .2rem;
 }
 
 .front-page-fail-panel {
@@ -409,17 +420,33 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
     grid-template-columns: 1fr;
   }
 
-  .front-page-swipe-summary,
-  .front-page-swipe-actions {
-    grid-template-columns: 1fr;
-  }
-
   .front-page-swipe-image {
     min-height: 0;
   }
 
-  .front-page-swipe-crop-frame {
-    min-height: 360px;
+  .front-page-swipe-header {
+    gap: .3rem;
+    margin-bottom: .15rem;
+  }
+
+  .front-page-swipe-page-image {
+    max-height: 44vh;
+  }
+
+  .front-page-swipe-summary-compact {
+    padding: .5rem .6rem;
+    gap: .25rem;
+  }
+
+  .front-page-swipe-summary-row,
+  .front-page-swipe-outcome-row {
+    font-size: .9rem;
+  }
+
+  .front-page-swipe-pass,
+  .front-page-swipe-fail {
+    min-height: 32px;
+    font-size: .76rem;
   }
 }
 .review-summary-pill.is-flagged, .review-status-pill.is-flagged { background: #fffbeb; border-color: #f59e0b; color: #92400e; }
@@ -778,7 +805,7 @@ body {
 .page-eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: .78rem; font-weight: 800; color: var(--primary); margin: 0 0 .35rem; }
 .page-title { margin: 0; font-size: clamp(2rem, 3.4vw, 3.2rem); line-height: .98; letter-spacing: -.04em; font-family: var(--font-display); font-weight: 700; }
 .page-subtitle { margin: .35rem 0 0; color: var(--muted); max-width: 72ch; }
-.page-toolbar { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+.page-toolbar { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
 .panel-title-row { display: flex; justify-content: space-between; gap: .75rem; align-items: flex-start; margin-bottom: .8rem; }
 .section-title { margin: 0; font-size: 1.1rem; line-height: 1.1; letter-spacing: -.02em; }
 .status-chip-grid, .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: .75rem; }
@@ -948,8 +975,9 @@ body {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.workflow-shell--compact { gap: .75rem; }
-.workflow-shell--compact .card { padding: .8rem; }
+.workflow-shell--compact { gap: .07rem; }
+.workflow-shell--compact .card { padding: .45rem; }
+.workflow-shell--compact .stack { gap: .28rem; }
 .workflow-shell--compact .page-header { gap: .75rem; margin-bottom: .35rem; }
 .workflow-shell--compact .page-title { font-size: 1.6rem; }
 .workflow-shell--compact .section-title { font-size: .98rem; }
@@ -959,7 +987,7 @@ body {
 .workflow-shell--compact .review-readonly-block { padding: .6rem; border-radius: .65rem; }
 .workflow-shell--compact .front-page-objective-row { gap: .5rem; }
 .workflow-shell--compact .btn { padding-top: .45rem; padding-bottom: .45rem; }
-.workflow-shell--compact .panel-title-row { margin-bottom: .45rem; }
+.workflow-shell--compact .panel-title-row { margin-bottom: .15rem; }
 .workflow-shell--compact .actions-row { gap: .45rem; }
 .submission-stage-track { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: .7rem; }
 .stage-card { border: 1px solid var(--border-soft); border-radius: .9rem; padding: .8rem; background: linear-gradient(180deg, var(--surface-raised), var(--surface-muted)); }
@@ -985,9 +1013,57 @@ body {
 .workspace-card-title:hover { color: var(--primary); }
 .workspace-card-meta { display: flex; flex-wrap: wrap; gap: .5rem .9rem; color: var(--muted); font-size: .88rem; }
 .app-shell { padding-top: .35rem; }
-.app-shell-meta { display: flex; flex-direction: column; align-items: flex-end; gap: .3rem; }
-.app-shell-actions { justify-content: flex-end; }
+.app-shell-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: .75rem;
+  margin-top: 1rem;
+  padding: .15rem .1rem .4rem;
+}
 .app-version { color: var(--muted); font-size: .76rem; letter-spacing: .03em; }
+.theme-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .25rem .35rem .25rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--surface), var(--surface-alt) 58%);
+  box-shadow: none;
+}
+.theme-switch:hover:not(:disabled) { transform: none; }
+.theme-switch-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  color: var(--muted);
+  font-size: .92rem;
+}
+.theme-switch-track {
+  position: relative;
+  width: 2.55rem;
+  height: 1.45rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--secondary), var(--border) 20%);
+  border: 1px solid color-mix(in srgb, var(--border), transparent 15%);
+}
+.theme-switch-thumb {
+  position: absolute;
+  top: 50%;
+  left: .15rem;
+  width: .95rem;
+  height: .95rem;
+  border-radius: 999px;
+  background: var(--surface);
+  transform: translateY(-50%);
+  transition: left .18s ease;
+  box-shadow: 0 2px 8px rgba(25, 22, 18, 0.16);
+}
+.theme-switch.is-dark .theme-switch-thumb {
+  left: 1.25rem;
+}
 .callout-card {
   border: 1px solid var(--border-soft);
   padding: 1rem 1.05rem;
@@ -1107,12 +1183,12 @@ body {
   .layout { padding: .8rem; }
   .page-header, .panel-title-row { flex-direction: column; align-items: stretch; }
   .top-nav { margin-top: .6rem; }
-  .app-shell-meta { align-items: stretch; }
+  .app-shell-footer { align-items: center; }
   .workflow-shell--compact .card { padding: .7rem; }
   .workflow-shell--compact .review-readonly-block { padding: .45rem .55rem; }
   .workflow-shell--compact .panel-title-row { margin-bottom: .3rem; gap: .45rem; }
   .workflow-shell--compact .actions-row { gap: .35rem; }
-  .workflow-shell--compact .image-frame { padding: .35rem; }
+.workflow-shell--compact .image-frame { padding: .15rem; }
   .workflow-shell--compact .front-page-candidate-card .code-box { display: none; }
   .workflow-shell--compact .front-page-candidate-card strong { font-size: .94rem; }
   .workflow-shell--compact .front-page-candidate-card > div:not(.panel-title-row):not(.subtle-text) { line-height: 1.25; }

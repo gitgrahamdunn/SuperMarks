@@ -15,6 +15,7 @@ from xml.sax.saxutils import escape as xml_escape
 from sqlmodel import Session, select
 
 from app.models import AnswerCrop, Exam, GradeResult, Question, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionPage, Transcription
+from app.name_utils import normalize_student_name, student_name_sort_key
 from app.reporting import accumulate_objective_totals, build_exam_objective_report, front_page_objective_totals, front_page_totals_read, objective_summary_text, objective_totals_read, question_objective_codes
 from app.schemas import ExamCompletionSummary, ExamMarkingDashboardResponse, SubmissionDashboardRow
 
@@ -665,7 +666,7 @@ def build_submission_dashboard_row(
         workflow_status = "complete" if confirmed else "ready"
         return attach_student_reporting_state(SubmissionDashboardRow(
             submission_id=submission.id,
-            student_name=submission.student_name,
+            student_name=normalize_student_name(submission.student_name),
             capture_mode=submission.capture_mode,
             workflow_status=workflow_status,
             flagged_count=0,
@@ -786,7 +787,7 @@ def build_submission_dashboard_row(
 
     return attach_student_reporting_state(SubmissionDashboardRow(
         submission_id=submission.id,
-        student_name=submission.student_name,
+        student_name=normalize_student_name(submission.student_name),
         capture_mode=submission.capture_mode,
         workflow_status=workflow_status,
         flagged_count=flagged_count,
@@ -1062,13 +1063,13 @@ def _xlsx_inline_string_cell(cell_ref: str, value: Any) -> str:
 def build_exam_gradebook_xlsx_bytes(context: ExamReportingContext) -> bytes:
     headers = ["test_name", "name", "grade"]
     rows: list[list[str]] = [headers]
-    for projection in context.submission_projections:
+    for projection in sorted(context.submission_projections, key=lambda item: student_name_sort_key(item.export_row.student)):
         export_row = projection.export_row
         total_awarded = round(float(export_row.total_awarded), 2)
         total_possible = round(float(export_row.total_possible), 2)
         rows.append([
             context.exam.name,
-            export_row.student,
+            normalize_student_name(export_row.student),
             f"{total_awarded:g}/{total_possible:g}",
         ])
 
@@ -1269,7 +1270,7 @@ def build_student_reporting_snapshot(row: SubmissionDashboardRow) -> StudentRepo
     total_percent = round((total_awarded_value / total_possible_value) * 100, 1) if total_possible_value > 0 else None
     objective_summary = objective_summary_text(row.objective_totals)
     return StudentReportingSnapshot(
-        student_name=row.student_name,
+        student_name=normalize_student_name(row.student_name),
         capture_mode=row.capture_mode.value if hasattr(row.capture_mode, "value") else str(row.capture_mode),
         workflow_status=row.workflow_status,
         export_ready=row.export_ready,
@@ -1333,7 +1334,7 @@ def build_student_summary_payload(
 
     return StudentSummaryPayload(
         exam_name=exam.name,
-        student_name=submission.student_name,
+        student_name=normalize_student_name(submission.student_name),
         capture_mode=snapshot.capture_mode,
         workflow_status=snapshot.workflow_status,
         workflow_status_label=workflow_status_label(snapshot.workflow_status),

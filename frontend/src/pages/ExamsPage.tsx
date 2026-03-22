@@ -1,7 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { API_BASE_URL, ApiError, api, buildApiUrl, getBackendVersion, maskApiBaseUrl, pingApiHealth } from '../api/client';
-import { DebugPanel } from '../components/DebugPanel';
+import { ApiError, api, buildApiUrl } from '../api/client';
 import { FileUploader } from '../components/FileUploader';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/ToastProvider';
@@ -17,14 +16,6 @@ type ParseChecklistStepId =
   | 'drafting_rubric'
   | 'finalizing';
 type ParseChecklistStatus = 'pending' | 'active' | 'done' | 'failed';
-
-type StepLog = {
-  step: WizardStep;
-  endpointUrl: string;
-  status: number | 'network-error';
-  responseSnippet: string;
-  exceptionMessage?: string;
-};
 
 type WizardError = {
   step: WizardStep;
@@ -44,16 +35,6 @@ type ParseErrorDetails = {
   page_count?: number;
 };
 
-type RawFetchProbeResult = {
-  attemptedUrl: string;
-  responseStatus?: number;
-  contentType?: string | null;
-  bodySnippet?: string;
-  finalUrl?: string;
-  errorName?: string;
-  errorMessage?: string;
-};
-
 type ParseChecklistStep = {
   id: ParseChecklistStepId;
   label: string;
@@ -63,8 +44,6 @@ type ParseChecklistStep = {
 const MB = 1024 * 1024;
 const LARGE_FILE_BYTES = 8 * MB;
 const LARGE_TOTAL_BYTES = 12 * MB;
-const RAW_FETCH_SNIPPET_LENGTH = 300;
-
 const CHECKLIST_ORDER: Array<{ id: ParseChecklistStepId; label: string }> = [
   { id: 'creating_exam', label: 'Creating test workspace' },
   { id: 'uploading_key', label: 'Uploading test bundle' },
@@ -145,36 +124,25 @@ const normalizeExamStatus = (status?: string | null) => {
 
 
 export function ExamsPage() {
-  const showDevTools = import.meta.env.DEV;
   const [exams, setExams] = useState<ExamRead[]>([]);
   const [loading, setLoading] = useState(true);
   const [deletingExamId, setDeletingExamId] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalName, setModalName] = useState('');
   const [modalFiles, setModalFiles] = useState<File[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [step, setStep] = useState<WizardStep>('creating');
   const [wizardError, setWizardError] = useState<WizardError | null>(null);
   const [currentExamId, setCurrentExamId] = useState<number | null>(null);
   const [parsedQuestionCount, setParsedQuestionCount] = useState<number | null>(null);
-  const [stepLogs, setStepLogs] = useState<StepLog[]>([]);
-  const [pingResult, setPingResult] = useState<string>('');
-  const [rawFetchProbeResult, setRawFetchProbeResult] = useState<RawFetchProbeResult | null>(null);
-  const [isRunningRawProbe, setIsRunningRawProbe] = useState(false);
-  const [isPingingApi, setIsPingingApi] = useState(false);
   const [allowLargeUpload, setAllowLargeUpload] = useState(false);
   const [parseProgress, setParseProgress] = useState(0);
   const [failedSummary, setFailedSummary] = useState<string | null>(null);
   const [parsePageCount, setParsePageCount] = useState(0);
   const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  const [backendVersion, setBackendVersion] = useState<string>('loading...');
-
   const requestControllerRef = useRef<AbortController | null>(null);
   const currentStepRef = useRef<WizardStep>('creating');
   const openWizardButtonRef = useRef<HTMLButtonElement>(null);
-  const examNameRef = useRef<HTMLInputElement>(null);
 
   const { showError, showSuccess, showWarning } = useToast();
   const navigate = useNavigate();
@@ -206,26 +174,6 @@ export function ExamsPage() {
     void loadExams();
   }, []);
 
-  const onCreateExamWorkspace = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!modalName.trim()) {
-      showWarning('Enter an exam name');
-      return;
-    }
-
-    try {
-      setIsRunning(true);
-      const exam = await api.createExam(modalName.trim());
-      showSuccess('Exam workspace created.');
-      closeModal();
-      navigate(`/exams/${exam.id}`);
-    } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to create exam workspace');
-    } finally {
-      setIsRunning(false);
-    }
-  };
-
   const handleDeleteExam = async (exam: ExamRead) => {
     const confirmed = window.confirm(`Delete "${exam.name}" and all of its submissions, parsing jobs, and results? This cannot be undone.`);
     if (!confirmed) return;
@@ -241,23 +189,6 @@ export function ExamsPage() {
       setDeletingExamId((current) => (current === exam.id ? null : current));
     }
   };
-
-  useEffect(() => {
-    const loadBackendVersion = async () => {
-      try {
-        const result = await getBackendVersion();
-        if (result.version) {
-          setBackendVersion(result.version);
-          return;
-        }
-        setBackendVersion(`unavailable (status ${result.status}) ${result.bodySnippet || ''}`.trim());
-      } catch (error) {
-        setBackendVersion(`unavailable (${error instanceof Error ? error.message : String(error)})`);
-      }
-    };
-
-    void loadBackendVersion();
-  }, []);
 
   const markChecklist = (id: ParseChecklistStepId, status: ParseChecklistStatus) => {
     setChecklistSteps((prev) => prev.map((item) => (item.id === id ? { ...item, status } : item)));
@@ -280,7 +211,6 @@ export function ExamsPage() {
     setParsedQuestionCount(null);
     setWizardError(null);
     setCurrentExamId(null);
-    setStepLogs([]);
     setStep('creating');
     setParseProgress(0);
     setFailedSummary(null);
@@ -289,7 +219,6 @@ export function ExamsPage() {
   };
 
   const resetWizardState = () => {
-    setModalName('');
     setModalFiles([]);
     setAllowLargeUpload(false);
     resetWizardProgress();
@@ -307,17 +236,12 @@ export function ExamsPage() {
     examId: number,
     files: File[],
     requestOptions: RequestInit,
-    logStep: (entry: StepLog) => void,
+    logStep: () => void,
   ) => {
     updateCurrentStep('uploading');
     markChecklist('uploading_key', 'active');
     const preview = await api.uploadBulkSubmissionsFile(examId, files, undefined, requestOptions);
-    logStep({
-      step: 'uploading',
-      endpointUrl: buildApiUrl(`exams/${examId}/submissions/bulk`),
-      status: 201,
-      responseSnippet: JSON.stringify(preview).slice(0, 500),
-    });
+    logStep();
     markChecklist('uploading_key', 'done');
     setParseProgress(38);
 
@@ -342,12 +266,7 @@ export function ExamsPage() {
       })),
       requestOptions,
     );
-    logStep({
-      step: 'parsing',
-      endpointUrl: buildApiUrl(`exams/${examId}/submissions/bulk/${preview.bulk_upload_id}/finalize`),
-      status: 200,
-      responseSnippet: JSON.stringify(finalized).slice(0, 500),
-    });
+    logStep();
     markChecklist('reading_questions', 'done');
     markChecklist('detecting_marks', 'done');
     markChecklist('drafting_rubric', 'done');
@@ -363,8 +282,8 @@ export function ExamsPage() {
   };
 
   const runCreateAndUpload = async () => {
-    if (!modalName.trim() || modalFiles.length === 0) {
-      showError('Exam name and at least one paper file are required.');
+    if (modalFiles.length === 0) {
+      showError('Add at least one paper file.');
       return;
     }
 
@@ -380,17 +299,17 @@ export function ExamsPage() {
     requestControllerRef.current = controller;
     const requestOptions = { signal: controller.signal };
 
-    const logStep = (entry: StepLog) => setStepLogs((prev) => [...prev, entry]);
+    const logStep = () => {};
 
     try {
       setIsRunning(true);
       updateCurrentStep('creating');
       markChecklist('creating_exam', 'active');
-      const exam = await api.createExam(modalName.trim(), requestOptions);
+      const exam = await api.createExam('', requestOptions);
       const activeExamId = exam.id;
       examId = activeExamId;
       setCurrentExamId(activeExamId);
-      logStep({ step: 'creating', endpointUrl: buildApiUrl('exams'), status: 200, responseSnippet: JSON.stringify(exam).slice(0, 500) });
+      logStep();
       markChecklist('creating_exam', 'done');
       setParseProgress(14);
 
@@ -486,7 +405,7 @@ export function ExamsPage() {
     const controller = new AbortController();
     requestControllerRef.current = controller;
     const requestOptions = { signal: controller.signal };
-    const logStep = (entry: StepLog) => setStepLogs((prev) => [...prev, entry]);
+    const logStep = () => {};
 
     try {
       setIsRunning(true);
@@ -541,70 +460,13 @@ export function ExamsPage() {
     }
   };
 
-  const onPingApi = async () => {
-    try {
-      setIsPingingApi(true);
-      const result = await pingApiHealth();
-      setPingResult(`status=${result.status} body=${result.body || '<empty>'}`);
-    } catch (error) {
-      setPingResult(`error=${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setIsPingingApi(false);
-    }
-  };
-
-  const runRawFetchProbe = async (method: 'GET' | 'POST', attemptedUrl: string, options: RequestInit = {}) => {
-    try {
-      setIsRunningRawProbe(true);
-      const response = await fetch(attemptedUrl, { method, ...options });
-      const body = await response.text();
-      setRawFetchProbeResult({
-        attemptedUrl,
-        responseStatus: response.status,
-        contentType: response.headers.get('content-type'),
-        bodySnippet: body.slice(0, RAW_FETCH_SNIPPET_LENGTH),
-        finalUrl: response.url,
-      });
-    } catch (error) {
-      setRawFetchProbeResult({
-        attemptedUrl,
-        errorName: error instanceof Error ? error.name : 'UnknownError',
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setIsRunningRawProbe(false);
-    }
-  };
-
-  const onRawHealthProbe = async () => {
-    const configuredBase = import.meta.env.VITE_API_BASE_URL?.trim() || '';
-    const url = `${configuredBase.replace(/\/api\/?$/, '')}/health`;
-    await runRawFetchProbe('GET', url);
-  };
-
-  const onRawGetExamsProbe = async () => {
-    const configuredBase = import.meta.env.VITE_API_BASE_URL?.trim() || '';
-    const url = `${configuredBase}/exams`;
-    await runRawFetchProbe('GET', url);
-  };
-
-  const onRawPostExamsProbe = async () => {
-    const configuredBase = import.meta.env.VITE_API_BASE_URL?.trim() || '';
-    const url = `${configuredBase}/exams`;
-    await runRawFetchProbe('POST', url, {
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: `Probe ${Date.now()}` }),
-    });
-  };
-
   return (
     <div className="page-stack">
       <section className="card card--hero stack">
         <div className="page-header">
           <div>
-            <p className="page-eyebrow">Teacher workspace</p>
             <h1 className="page-title">Home</h1>
-            <p className="page-subtitle">Set up an exam, upload marked papers, confirm the extracted totals, and export the class table. The interface should feel calm enough to use during real school admin, not like a debug console.</p>
+            <p className="page-subtitle">Upload papers, confirm totals, and export the class table.</p>
           </div>
         </div>
 
@@ -612,13 +474,8 @@ export function ExamsPage() {
           <div className="panel-title-row">
             <div>
               <h2 className="section-title">Start a new exam</h2>
-              <p className="subtle-text">Start with the exam shell. Bulk paper upload and totals confirmation happen inside the workspace.</p>
+              <p className="subtle-text">Upload graded papers to create a workspace.</p>
             </div>
-            <span className="status-pill status-ready">Primary action</span>
-          </div>
-          <div className="review-readonly-block surface-muted callout-card">
-            <strong>Minimal first step</strong>
-            <p className="subtle-text" style={{ marginTop: '.35rem' }}>Create the exam first. Then upload graded papers and confirm the totals table for export.</p>
           </div>
           <div className="actions-row" style={{ marginTop: 0 }}>
             <button type="button" className="btn btn-primary" onClick={() => setIsModalOpen(true)}>
@@ -631,22 +488,22 @@ export function ExamsPage() {
           <article className="metric-card">
             <p className="metric-label">Open workspaces</p>
             <p className="metric-value">{exams.length}</p>
-            <p className="metric-meta">Saved exams ready to reopen</p>
+            <p className="metric-meta">Saved workspaces.</p>
           </article>
           <article className="metric-card">
             <p className="metric-label">Needs attention</p>
             <p className="metric-value">{activeExamCount}</p>
-            <p className="metric-meta">Workspaces still moving toward export</p>
+            <p className="metric-meta">Still in progress.</p>
           </article>
           <article className="metric-card">
             <p className="metric-label">Recent</p>
             <p className="metric-value">{Math.min(sortedExams.length, 3)}</p>
-            <p className="metric-meta">Most recent work is surfaced first</p>
+            <p className="metric-meta">Latest workspaces.</p>
           </article>
           <article className="metric-card">
             <p className="metric-label">Latest activity</p>
             <p className="metric-value">{sortedExams.length > 0 ? formatExamDate(sortedExams[0].created_at) : '—'}</p>
-            <p className="metric-meta">Most recent workspace created</p>
+            <p className="metric-meta">Most recent workspace.</p>
           </article>
         </div>
       </section>
@@ -655,7 +512,7 @@ export function ExamsPage() {
         <div className="panel-title-row">
           <div>
             <h2 className="section-title">Test library</h2>
-            <p className="subtle-text">Search and reopen saved test workspaces.</p>
+            <p className="subtle-text">Search saved workspaces.</p>
           </div>
           <span className="status-pill status-neutral">{filteredExams.length} match{filteredExams.length === 1 ? '' : 'es'}</span>
         </div>
@@ -679,7 +536,7 @@ export function ExamsPage() {
         {!loading && filteredExams.length === 0 && (
           <div className="review-readonly-block">
             <strong>No matching exams</strong>
-            <p className="subtle-text" style={{ marginTop: '.35rem' }}>No saved exam matches that search yet. Start a new exam above to create one.</p>
+            <p className="subtle-text" style={{ marginTop: '.35rem' }}>Create a workspace to get started.</p>
           </div>
         )}
 
@@ -719,81 +576,10 @@ export function ExamsPage() {
         )}
       </section>
 
-      {showDevTools && (
-        <section className="card stack">
-          <div className="panel-title-row">
-            <div>
-              <h2 className="section-title">Diagnostics</h2>
-              <p className="subtle-text">Available when needed, visually out of the way when you are just trying to run the workflow.</p>
-            </div>
-            <div className="actions-row" style={{ marginTop: 0 }}>
-              <span className="status-pill status-neutral">Technical</span>
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => setDiagnosticsOpen((prev) => !prev)}
-                aria-expanded={diagnosticsOpen}
-                aria-controls="diagnostics-panel"
-              >
-                {diagnosticsOpen ? 'Hide API diagnostics' : 'API diagnostics'}
-              </button>
-            </div>
-          </div>
-          <div className="review-readonly-block surface-muted">
-            <div className="inline-stat-row">
-              <span className="status-pill status-neutral">API base: {maskApiBaseUrl(API_BASE_URL)}</span>
-              <span className="status-pill status-neutral">Backend: {backendVersion}</span>
-            </div>
-          </div>
-          {diagnosticsOpen && (
-            <div id="diagnostics-panel" className="stack" style={{ marginTop: '0.25rem' }}>
-              <p className="subtle-text">Configured API base: {maskApiBaseUrl(API_BASE_URL)}</p>
-              <button type="button" className="btn btn-secondary" onClick={onPingApi} disabled={isPingingApi}>
-                {isPingingApi ? 'Pinging...' : 'Ping API'}
-              </button>
-              {pingResult && <pre className="code-box">{pingResult}</pre>}
-
-              <div className="stack" style={{ marginTop: '0.75rem' }}>
-                <h3 style={{ marginBottom: 0 }}>Raw Fetch Probe</h3>
-                <button type="button" className="btn btn-secondary" onClick={onRawHealthProbe} disabled={isRunningRawProbe}>
-                  Raw GET /health (no headers)
-                </button>
-                <button type="button" className="btn btn-secondary" onClick={onRawGetExamsProbe} disabled={isRunningRawProbe}>
-                  Raw GET /api/exams (no headers)
-                </button>
-                <button type="button" className="btn btn-secondary" onClick={onRawPostExamsProbe} disabled={isRunningRawProbe}>
-                  Raw POST /api/exams (no headers)
-                </button>
-                {rawFetchProbeResult && (
-                  <pre className="code-box">{[
-                    `attempted URL: ${rawFetchProbeResult.attemptedUrl}`,
-                    `response.status: ${rawFetchProbeResult.responseStatus ?? 'n/a'}`,
-                    `response content-type: ${rawFetchProbeResult.contentType ?? 'n/a'}`,
-                    `final URL: ${rawFetchProbeResult.finalUrl ?? 'n/a'}`,
-                    `body (first ${RAW_FETCH_SNIPPET_LENGTH} chars): ${rawFetchProbeResult.bodySnippet ?? '<empty>'}`,
-                    rawFetchProbeResult.errorName ? `fetch error: ${rawFetchProbeResult.errorName} ${rawFetchProbeResult.errorMessage || ''}`.trim() : null,
-                  ].filter(Boolean).join('\n')}</pre>
-                )}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
-
       {isModalOpen && (
-        <Modal title="Create exam and intake papers" onClose={closeModal} initialFocusRef={examNameRef}>
-          <p className="subtle-text">Name the exam, upload one PDF or multiple paper photos, and let SuperMarks prepare the names-first confirmation queue for totals capture.</p>
+        <Modal title="Create exam" onClose={closeModal}>
+          <p className="subtle-text">Upload papers to start a workspace.</p>
           <form onSubmit={onCreateAndUpload} className="stack">
-            <label htmlFor="exam-name">Exam name</label>
-            <input
-              id="exam-name"
-              ref={examNameRef}
-              value={modalName}
-              onChange={(event) => setModalName(event.target.value)}
-              placeholder="e.g. Midterm 1"
-              required
-              disabled={isRunning}
-            />
             <div className="stack" style={{ gap: '.6rem' }}>
               <label>Paper files</label>
               <FileUploader
@@ -805,9 +591,6 @@ export function ExamsPage() {
                 multiple
                 singularLabel="paper photo"
               />
-              <p className="subtle-text" style={{ margin: 0 }}>
-                Upload one PDF or multiple PNG/JPG paper photos to start the queue.
-              </p>
               {modalFiles.length > 0 && (
                 <p className="subtle-text" style={{ margin: 0 }}>
                   {modalFiles.length} file{modalFiles.length === 1 ? '' : 's'} selected · {formatMb(totalFileBytes)}
@@ -826,12 +609,6 @@ export function ExamsPage() {
                 </label>
               )}
             </div>
-            <div className="review-readonly-block surface-muted">
-              <strong>Next</strong>
-              <p className="subtle-text" style={{ marginTop: '.35rem' }}>
-                SuperMarks will create the exam, detect student names from the uploaded papers, build the confirmation queue, then send you to the workspace where totals are captured and confirmed.
-              </p>
-            </div>
             {(isRunning || parseProgress > 0 || wizardError || step === 'done') && (
               <div className="stack" style={{ gap: '.65rem' }}>
                 <div className="metric-card">
@@ -843,7 +620,7 @@ export function ExamsPage() {
                   </div>
                   <progress max={100} value={parseProgress} style={{ width: '100%' }} />
                   <p className="metric-meta" style={{ marginTop: '.5rem' }}>
-                    {wizardError ? wizardError.summary : step === 'done' ? `Prepared ${parsedQuestionCount ?? 0} paper${(parsedQuestionCount ?? 0) === 1 ? '' : 's'} for name review and totals capture.` : `Current step: ${step.replace(/_/g, ' ')}`}
+                    {wizardError ? wizardError.summary : step === 'done' ? `Prepared ${parsedQuestionCount ?? 0} paper${(parsedQuestionCount ?? 0) === 1 ? '' : 's'}.` : `Working on ${step.replace(/_/g, ' ')}.`}
                   </p>
                 </div>
                 <div className="stack" style={{ gap: '.45rem' }}>
@@ -875,7 +652,7 @@ export function ExamsPage() {
                         navigate(`/exams/${examId}`);
                       }}
                     >
-                      Open confirmation queue
+                      Open workspace
                     </button>
                   </div>
                 )}
@@ -884,7 +661,7 @@ export function ExamsPage() {
 
             <div className="actions-row">
               <button type="submit" className="btn btn-primary" disabled={isRunning}>
-                {isRunning ? 'Preparing queue…' : 'Create exam and intake papers'}
+                {isRunning ? 'Preparing…' : 'Create exam'}
               </button>
               <button
                 type="button"
