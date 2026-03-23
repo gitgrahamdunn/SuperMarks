@@ -5,6 +5,7 @@ import type {
   ExamDetail,
   ExamMarkingDashboardResponse,
   ExamRead,
+  ExamWorkspaceBootstrapResponse,
   FrontPageTotals,
   FrontPageTotalsCandidate,
   GradeResultRead,
@@ -457,6 +458,7 @@ export const api = {
     ...options,
   }, EXAM_CREATE_TIMEOUT_MS),
   getExamDetail: (examId: number, options?: RequestInit) => request<ExamDetail>(`exams/${examId}`, options, EXAM_READ_TIMEOUT_MS),
+  getExamWorkspaceBootstrap: (examId: number, options?: RequestInit) => request<ExamWorkspaceBootstrapResponse>(`exams/${examId}/workspace-bootstrap`, options, EXAM_READ_TIMEOUT_MS),
   addQuestion: (examId: number, label: string, max_marks: number) => request<QuestionRead>(`exams/${examId}/questions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -651,7 +653,7 @@ export const api = {
     {},
     FRONT_PAGE_CANDIDATES_TIMEOUT_MS,
   ),
-  saveFrontPageTotals: (submissionId: number, payload: { student_name?: string; overall_marks_awarded: number; overall_max_marks?: number | null; objective_scores: Array<{ objective_code: string; marks_awarded: number; max_marks?: number | null }>; teacher_note: string; confirmed: boolean }) => request<FrontPageTotals>(`submissions/${submissionId}/front-page-totals`, {
+  saveFrontPageTotals: (submissionId: number, payload: { student_name?: string; first_name?: string; last_name?: string; overall_marks_awarded: number; overall_max_marks?: number | null; objective_scores: Array<{ objective_code: string; marks_awarded: number; max_marks?: number | null }>; teacher_note: string; confirmed: boolean }) => request<FrontPageTotals>(`submissions/${submissionId}/front-page-totals`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

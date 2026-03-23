@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { AutoGrowTextarea } from '../components/AutoGrowTextarea';
-import { formatStudentName } from '../lib/nameFormat';
+import { formatStudentName, formatStudentNameParts, splitStudentName } from '../lib/nameFormat';
 import { useToast } from '../components/ToastProvider';
 import type {
   FrontPageObjectiveScore,
@@ -185,7 +185,8 @@ export function SubmissionFrontPageTotalsPage() {
   const [isCandidateLoading, setIsCandidateLoading] = useState(true);
   const [candidateLoadSeconds, setCandidateLoadSeconds] = useState(0);
   const [allowManualReviewWithoutCandidates, setAllowManualReviewWithoutCandidates] = useState(false);
-  const [studentNameInput, setStudentNameInput] = useState('');
+  const [firstNameInput, setFirstNameInput] = useState('');
+  const [lastNameInput, setLastNameInput] = useState('');
   const [overallMarksAwarded, setOverallMarksAwarded] = useState('');
   const [overallMaxMarks, setOverallMaxMarks] = useState('');
   const [teacherNote, setTeacherNote] = useState('');
@@ -204,7 +205,8 @@ export function SubmissionFrontPageTotalsPage() {
         if (cachedSubmission) {
           const initialState = buildInitialFrontPageFormState(questions, cachedSubmission.front_page_totals, null, cachedSubmission.student_name);
           setSubmission(cachedSubmission);
-          setStudentNameInput(cachedSubmission.student_name);
+          setFirstNameInput(cachedSubmission.first_name || splitStudentName(cachedSubmission.student_name).firstName);
+          setLastNameInput(cachedSubmission.last_name || splitStudentName(cachedSubmission.student_name).lastName);
           setOverallMarksAwarded(initialState.overallMarksAwarded);
           setOverallMaxMarks(initialState.overallMaxMarks);
           setTeacherNote(initialState.teacherNote);
@@ -227,7 +229,8 @@ export function SubmissionFrontPageTotalsPage() {
         setSubmission(submissionData);
         setExamSubmissions(submissionRows);
         setQuestions(questionData);
-        setStudentNameInput(submissionData.student_name);
+        setFirstNameInput(submissionData.first_name || splitStudentName(submissionData.student_name).firstName);
+        setLastNameInput(submissionData.last_name || splitStudentName(submissionData.student_name).lastName);
         setOverallMarksAwarded(initialState.overallMarksAwarded);
         setOverallMaxMarks(initialState.overallMaxMarks);
         setTeacherNote(initialState.teacherNote);
@@ -410,7 +413,8 @@ export function SubmissionFrontPageTotalsPage() {
   const resetCorrectionForm = () => {
     if (!submission) return;
     const nextState = buildInitialFrontPageFormState(questions, savedTotals, candidateTotals, submission.student_name);
-    setStudentNameInput(submission.student_name);
+    setFirstNameInput(submission.first_name || splitStudentName(submission.student_name).firstName);
+    setLastNameInput(submission.last_name || splitStudentName(submission.student_name).lastName);
     setOverallMarksAwarded(nextState.overallMarksAwarded);
     setOverallMaxMarks(nextState.overallMaxMarks);
     setTeacherNote(nextState.teacherNote);
@@ -423,9 +427,11 @@ export function SubmissionFrontPageTotalsPage() {
   };
 
   const save = async (goNext: boolean) => {
-    const normalizedStudentName = studentNameInput.trim();
-    if (!normalizedStudentName) {
-      showError('Enter a student name.');
+    const normalizedFirstName = formatStudentName(firstNameInput).trim();
+    const normalizedLastName = formatStudentName(lastNameInput).trim();
+    const normalizedStudentName = formatStudentNameParts(normalizedFirstName, normalizedLastName);
+    if (!normalizedFirstName) {
+      showError('Enter a first name.');
       return;
     }
 
@@ -461,6 +467,8 @@ export function SubmissionFrontPageTotalsPage() {
       setSaving(true);
       await api.saveFrontPageTotals(submissionId, {
         student_name: normalizedStudentName,
+        first_name: normalizedFirstName,
+        last_name: normalizedLastName,
         overall_marks_awarded: overallAwarded,
         overall_max_marks: overallMax,
         objective_scores: cleanedScores,
@@ -477,7 +485,8 @@ export function SubmissionFrontPageTotalsPage() {
       frontPageSubmissionValueCache.set(submissionId, refreshedSubmission);
       setSubmission(refreshedSubmission);
       setExamSubmissions(refreshedExamSubmissions);
-      setStudentNameInput(refreshedSubmission.student_name);
+      setFirstNameInput(refreshedSubmission.first_name || splitStudentName(refreshedSubmission.student_name).firstName);
+      setLastNameInput(refreshedSubmission.last_name || splitStudentName(refreshedSubmission.student_name).lastName);
       setIsEditing(false);
 
       const refreshedNextFrontPageSubmission = nextFrontPageSubmission
@@ -533,7 +542,7 @@ export function SubmissionFrontPageTotalsPage() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isEditing, nextFrontPageSubmission, submission, teacherNote, studentNameInput, overallMarksAwarded, overallMaxMarks, objectiveScores]);
+  }, [isEditing, nextFrontPageSubmission, submission, teacherNote, firstNameInput, lastNameInput, overallMarksAwarded, overallMaxMarks, objectiveScores]);
 
   if (!submission) return <p>Loading front-page totals…</p>;
 
@@ -716,10 +725,16 @@ export function SubmissionFrontPageTotalsPage() {
                 </div>
               </div>
 
-              <label className="stack">
-                Student name
-                <input value={studentNameInput} onChange={(event) => setStudentNameInput(event.target.value)} />
-              </label>
+              <div className="review-field-grid review-field-grid--two-up">
+                <label className="stack">
+                  First name
+                  <input value={firstNameInput} onChange={(event) => setFirstNameInput(event.target.value)} />
+                </label>
+                <label className="stack">
+                  Last name
+                  <input value={lastNameInput} onChange={(event) => setLastNameInput(event.target.value)} />
+                </label>
+              </div>
 
               <div className="review-field-grid review-field-grid--two-up">
                 <label className="stack">

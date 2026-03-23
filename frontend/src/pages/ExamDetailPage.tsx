@@ -39,26 +39,14 @@ export function ExamDetailPage() {
   const loadDetail = async () => {
     setIsLoading(true);
     try {
-      const [examDetail, fetchedQuestions, uploadedKeyFiles, examSubmissions, latestParseJob, dashboard] = await Promise.all([
-        api.getExamDetail(examId),
-        api.listQuestions(examId),
-        api.listExamKeyFiles(examId),
-        api.listExamSubmissions(examId),
-        api.getExamKeyParseLatest(examId),
-        api.getExamMarkingDashboard(examId),
-      ]);
-      setDetail(examDetail);
-      setQuestions(fetchedQuestions);
-      setKeyFiles(uploadedKeyFiles);
-      setSubmissions(examSubmissions);
-      setMarkingDashboard(dashboard);
-      setLatestParse(latestParseJob.job);
-      if (latestParseJob.job) {
-        const status = await api.getExamKeyParseStatus(examId, latestParseJob.job.job_id);
-        setLatestParseStatus(status);
-      } else {
-        setLatestParseStatus(null);
-      }
+      const bootstrap = await api.getExamWorkspaceBootstrap(examId);
+      setDetail({ exam: bootstrap.exam, key_files: bootstrap.key_files, submissions: bootstrap.submissions, parse_jobs: [] });
+      setQuestions(bootstrap.questions);
+      setKeyFiles(bootstrap.key_files);
+      setSubmissions(bootstrap.submissions);
+      setMarkingDashboard(bootstrap.marking_dashboard);
+      setLatestParse(bootstrap.latest_parse.job);
+      setLatestParseStatus(bootstrap.latest_parse_status ?? null);
       setNotFound(false);
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
@@ -591,35 +579,6 @@ export function ExamDetailPage() {
             <h1 className="page-title">{detail.exam.name}</h1>
             <p className="page-subtitle">Confirm totals, then export.</p>
           </div>
-          <div className="page-toolbar">
-            {nextTotalsLink && (
-              <Link className="btn btn-primary" to={nextTotalsLink}>
-                Open test
-              </Link>
-            )}
-          </div>
-        </div>
-        <div className="metric-grid">
-          <article className="metric-card">
-            <p className="metric-label">Parsed papers</p>
-            <p className="metric-value">{submissions.length}</p>
-            <p className="metric-meta">Ready to review</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-label">Need confirmation</p>
-            <p className="metric-value">{frontPagePendingRows.length}</p>
-            <p className="metric-meta">Still waiting</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-label">Confirmed</p>
-            <p className="metric-value">{confirmedTotalsCount}</p>
-            <p className="metric-meta">Done</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-label">Flow</p>
-            <p className="metric-value">{markingDashboard ? `${markingDashboard.completion.completion_percent}%` : '—'}</p>
-            <p className="metric-meta">Complete</p>
-          </article>
         </div>
       </section>
 
@@ -647,6 +606,31 @@ export function ExamDetailPage() {
                 <p className="subtle-text">Resumes where you left off.</p>
               </>
             )}
+          </section>
+
+          <section className="card stack">
+            <div className="metric-grid">
+              <article className="metric-card">
+                <p className="metric-label">Parsed papers</p>
+                <p className="metric-value">{submissions.length}</p>
+                <p className="metric-meta">Ready to review</p>
+              </article>
+              <article className="metric-card">
+                <p className="metric-label">Need confirmation</p>
+                <p className="metric-value">{frontPagePendingRows.length}</p>
+                <p className="metric-meta">Still waiting</p>
+              </article>
+              <article className="metric-card">
+                <p className="metric-label">Confirmed</p>
+                <p className="metric-value">{confirmedTotalsCount}</p>
+                <p className="metric-meta">Done</p>
+              </article>
+              <article className="metric-card">
+                <p className="metric-label">Flow</p>
+                <p className="metric-value">{markingDashboard ? `${markingDashboard.completion.completion_percent}%` : '—'}</p>
+                <p className="metric-meta">Complete</p>
+              </article>
+            </div>
           </section>
 
           <section className="card stack">

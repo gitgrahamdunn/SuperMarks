@@ -7,6 +7,21 @@ export function formatStudentName(value: string | null | undefined): string {
     .join(' ');
 }
 
+export function splitStudentName(value: string | null | undefined): { firstName: string; lastName: string } {
+  const normalized = formatStudentName(value);
+  if (!normalized) return { firstName: '', lastName: '' };
+  const parts = normalized.split(' ').filter(Boolean);
+  if (parts.length === 1) return { firstName: parts[0], lastName: '' };
+  return {
+    firstName: parts.slice(0, -1).join(' '),
+    lastName: parts[parts.length - 1],
+  };
+}
+
+export function formatStudentNameParts(firstName: string | null | undefined, lastName: string | null | undefined): string {
+  return [formatStudentName(firstName), formatStudentName(lastName)].filter(Boolean).join(' ').trim();
+}
+
 export function compareStudentNamesByLastName(left: string, right: string): number {
   const leftParts = formatStudentName(left).split(' ').filter(Boolean);
   const rightParts = formatStudentName(right).split(' ').filter(Boolean);

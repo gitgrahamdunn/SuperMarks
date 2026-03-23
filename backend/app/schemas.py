@@ -87,6 +87,8 @@ class FrontPageTotalsRead(BaseModel):
 
 class FrontPageTotalsUpsert(BaseModel):
     student_name: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
     overall_marks_awarded: float = Field(ge=0)
     overall_max_marks: float | None = Field(default=None, ge=0)
     objective_scores: list[FrontPageObjectiveScore] = Field(default_factory=list)
@@ -98,6 +100,8 @@ class SubmissionRead(BaseModel):
     id: int
     exam_id: int
     student_name: str
+    first_name: str = ""
+    last_name: str = ""
     status: SubmissionStatus
     capture_mode: SubmissionCaptureMode
     front_page_totals: FrontPageTotalsRead | None = None
@@ -401,3 +405,13 @@ class ExamMarkingDashboardResponse(BaseModel):
     objectives: list[ExamObjectiveRead] = Field(default_factory=list)
     submissions: list[SubmissionDashboardRow] = Field(default_factory=list)
     completion: ExamCompletionSummary
+
+
+class ExamWorkspaceBootstrapResponse(BaseModel):
+    exam: ExamRead
+    questions: list[QuestionRead] = Field(default_factory=list)
+    key_files: list[StoredFileRead] = Field(default_factory=list)
+    submissions: list[SubmissionRead] = Field(default_factory=list)
+    marking_dashboard: ExamMarkingDashboardResponse
+    latest_parse: dict[str, Any]
+    latest_parse_status: dict[str, Any] | None = None

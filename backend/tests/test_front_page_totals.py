@@ -40,6 +40,8 @@ def test_create_submission_with_front_page_totals_mode(tmp_path) -> None:
         payload = response.json()
         assert payload['capture_mode'] == 'front_page_totals'
         assert payload['front_page_totals'] is None
+        assert payload['first_name'] == 'Avery'
+        assert payload['last_name'] == ''
 
 
 def test_front_page_totals_candidate_extraction_returns_structured_candidates(tmp_path, monkeypatch) -> None:
@@ -380,6 +382,40 @@ def test_front_page_totals_save_can_correct_student_name(tmp_path) -> None:
         submission = client.get(f'/api/submissions/{submission_id}')
         assert submission.status_code == 200
         assert submission.json()['student_name'] == 'Jordan Smith'
+        assert submission.json()['first_name'] == 'Jordan'
+        assert submission.json()['last_name'] == 'Smith'
+
+
+def test_front_page_totals_save_can_correct_first_and_last_name_separately(tmp_path) -> None:
+    setup_test_db(tmp_path)
+
+    with TestClient(app) as client:
+        exam_id = client.post('/api/exams', json={'name': 'Math 30'}).json()['id']
+        submission_id = client.post(
+            f'/api/exams/{exam_id}/submissions',
+            json={'student_name': 'JORDAN', 'capture_mode': 'front_page_totals'},
+        ).json()['id']
+
+        save = client.put(
+            f'/api/submissions/{submission_id}/front-page-totals',
+            json={
+                'first_name': 'jordan',
+                'last_name': 'smith',
+                'overall_marks_awarded': 42,
+                'overall_max_marks': 50,
+                'objective_scores': [],
+                'teacher_note': '',
+                'confirmed': True,
+            },
+        )
+
+        assert save.status_code == 200
+
+        submission = client.get(f'/api/submissions/{submission_id}')
+        assert submission.status_code == 200
+        assert submission.json()['student_name'] == 'Jordan Smith'
+        assert submission.json()['first_name'] == 'Jordan'
+        assert submission.json()['last_name'] == 'Smith'
 
 
 def test_mixed_mode_dashboard_and_summary_export_reflect_front_page_confirmation_state(tmp_path) -> None:

@@ -40,9 +40,10 @@ from app import db as db_state
 from app.db import get_session
 from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
 from app.reporting import front_page_totals_read
-from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_gradebook_xlsx_artifact, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, write_csv_export
-from app.name_utils import normalize_student_name
-from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
+from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_gradebook_xlsx_artifact, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, invalidate_exam_reporting_cache, write_csv_export
+from app.name_utils import compose_student_name, normalize_student_name, split_student_name, submission_display_name, submission_name_parts
+from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
+from app.routers.submissions import get_or_create_front_page_totals_candidates
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
 from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
@@ -484,6 +485,61 @@ def create_exam(payload: ExamCreate, session: Session = Depends(get_session)) ->
     return exam
 
 
+def _exam_read(exam: Exam) -> ExamRead:
+    return ExamRead(
+        id=exam.id,
+        name=exam.name,
+        created_at=exam.created_at,
+        teacher_style_profile_json=exam.teacher_style_profile_json,
+        status=exam.status,
+    )
+
+
+def _list_exam_key_files_read(exam_id: int, session: Session) -> list[StoredFileRead]:
+    key_files = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id).order_by(ExamKeyFile.id)).all()
+    return [
+        StoredFileRead(
+            id=row.id,
+            original_filename=row.original_filename,
+            stored_path=row.stored_path,
+            content_type=row.content_type,
+            size_bytes=row.size_bytes,
+            signed_url=_resolve_signed_url(row.stored_path),
+            blob_url=row.blob_url,
+        )
+        for row in key_files
+    ]
+
+
+def _list_exam_submissions_read(exam_id: int, session: Session) -> list[SubmissionRead]:
+    submissions = session.exec(
+        select(Submission)
+        .where(Submission.exam_id == exam_id)
+        .order_by(Submission.created_at.desc(), Submission.id.desc())
+    ).all()
+
+    output: list[SubmissionRead] = []
+    for sub in submissions:
+        files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == sub.id).order_by(SubmissionFile.id)).all()
+        first_name, last_name = submission_name_parts(sub.first_name, sub.last_name, sub.student_name)
+        output.append(
+            SubmissionRead(
+                id=sub.id,
+                exam_id=sub.exam_id,
+                student_name=submission_display_name(sub.first_name, sub.last_name, sub.student_name),
+                first_name=first_name,
+                last_name=last_name,
+                status=sub.status,
+                capture_mode=sub.capture_mode,
+                front_page_totals=front_page_totals_read(sub),
+                created_at=sub.created_at,
+                files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
+                pages=[],
+            )
+        )
+    return output
+
+
 @router.get("", response_model=list[ExamRead])
 def list_exams(session: Session = Depends(get_session)) -> list[Exam]:
     exams = session.exec(select(Exam).order_by(Exam.created_at.desc(), Exam.id.desc())).all()
@@ -496,48 +552,12 @@ def get_exam(exam_id: int, session: Session = Depends(get_session)) -> ExamDetai
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id).order_by(Submission.created_at.desc(), Submission.id.desc())).all()
     parse_jobs = session.exec(select(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id).order_by(ExamKeyParseJob.created_at.desc(), ExamKeyParseJob.id.desc())).all()
-    key_files = session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id).order_by(ExamKeyFile.id)).all()
-
-    submission_reads: list[SubmissionRead] = []
-    for sub in submissions:
-        files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == sub.id).order_by(SubmissionFile.id)).all()
-        submission_reads.append(
-            SubmissionRead(
-                id=sub.id,
-                exam_id=sub.exam_id,
-                student_name=normalize_student_name(sub.student_name),
-                status=sub.status,
-                capture_mode=sub.capture_mode,
-                front_page_totals=front_page_totals_read(sub),
-                created_at=sub.created_at,
-                files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
-                pages=[],
-            )
-        )
 
     return ExamDetail(
-        exam=ExamRead(
-            id=exam.id,
-            name=exam.name,
-            created_at=exam.created_at,
-            teacher_style_profile_json=exam.teacher_style_profile_json,
-            status=exam.status,
-        ),
-        key_files=[
-            StoredFileRead(
-                id=row.id,
-                original_filename=row.original_filename,
-                stored_path=row.stored_path,
-                content_type=row.content_type,
-                size_bytes=row.size_bytes,
-                signed_url=_resolve_signed_url(row.stored_path),
-                blob_url=row.blob_url,
-            )
-            for row in key_files
-        ],
-        submissions=submission_reads,
+        exam=_exam_read(exam),
+        key_files=_list_exam_key_files_read(exam_id, session),
+        submissions=_list_exam_submissions_read(exam_id, session),
         parse_jobs=[
             ExamParseJobRead(
                 id=job.id,
@@ -568,29 +588,34 @@ def list_exam_submissions(exam_id: int, session: Session = Depends(get_session))
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    submissions = session.exec(
-        select(Submission)
-        .where(Submission.exam_id == exam_id)
-        .order_by(Submission.created_at.desc(), Submission.id.desc())
-    ).all()
+    return _list_exam_submissions_read(exam_id, session)
 
-    output: list[SubmissionRead] = []
-    for sub in submissions:
-        files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == sub.id).order_by(SubmissionFile.id)).all()
-        output.append(
-            SubmissionRead(
-                id=sub.id,
-                exam_id=sub.exam_id,
-                student_name=normalize_student_name(sub.student_name),
-                status=sub.status,
-                capture_mode=sub.capture_mode,
-                front_page_totals=front_page_totals_read(sub),
-                created_at=sub.created_at,
-                files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
-                pages=[],
-            )
-        )
-    return output
+@router.get("/{exam_id}/workspace-bootstrap", response_model=ExamWorkspaceBootstrapResponse)
+def get_exam_workspace_bootstrap(exam_id: int, session: Session = Depends(get_session)) -> ExamWorkspaceBootstrapResponse:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    latest_parse = get_latest_parse_job(exam_id, session)
+    latest_parse_status = None
+    latest_job = latest_parse.get("job") if isinstance(latest_parse, dict) else None
+    if isinstance(latest_job, dict) and latest_job.get("job_id"):
+        latest_parse_status = get_answer_key_parse_status(exam_id=exam_id, job_id=int(latest_job["job_id"]), session=session)
+
+    return ExamWorkspaceBootstrapResponse(
+        exam=_exam_read(exam),
+        questions=list_questions(exam_id, session),
+        key_files=_list_exam_key_files_read(exam_id, session),
+        submissions=_list_exam_submissions_read(exam_id, session),
+        marking_dashboard=build_exam_marking_dashboard_response(exam_id, session) or ExamMarkingDashboardResponse(
+            exam_id=exam_id,
+            exam_name=exam.name,
+            total_possible=0,
+            completion={"total_submissions": 0, "ready_count": 0, "blocked_count": 0, "in_progress_count": 0, "complete_count": 0, "completion_percent": 0},
+        ),
+        latest_parse=latest_parse,
+        latest_parse_status=latest_parse_status,
+    )
 
 
 def _write_csv_export(buffer: StringIO, export_spec: CsvExportSpec[CsvExportRow]) -> None:
@@ -717,9 +742,18 @@ async def create_submission(
     if not student_name:
         raise HTTPException(status_code=400, detail="student_name is required")
 
-    submission = Submission(exam_id=exam_id, student_name=student_name, status=SubmissionStatus.UPLOADED, capture_mode=capture_mode)
+    first_name, last_name = split_student_name(student_name)
+    submission = Submission(
+        exam_id=exam_id,
+        student_name=compose_student_name(first_name, last_name),
+        first_name=first_name,
+        last_name=last_name,
+        status=SubmissionStatus.UPLOADED,
+        capture_mode=capture_mode,
+    )
     session.add(submission)
     session.commit()
+    invalidate_exam_reporting_cache(exam_id)
     session.refresh(submission)
 
     created_files: list[SubmissionFileRead] = []
@@ -756,10 +790,13 @@ async def create_submission(
             created_files.append(SubmissionFileRead(id=row.id, file_kind=row.file_kind, original_filename=row.original_filename, stored_path=row.stored_path))
         session.commit()
 
+    submission_first_name, submission_last_name = submission_name_parts(submission.first_name, submission.last_name, submission.student_name)
     return SubmissionRead(
         id=submission.id,
         exam_id=submission.exam_id,
-        student_name=normalize_student_name(submission.student_name),
+        student_name=submission_display_name(submission.first_name, submission.last_name, submission.student_name),
+        first_name=submission_first_name,
+        last_name=submission_last_name,
         status=submission.status,
         capture_mode=submission.capture_mode,
         front_page_totals=front_page_totals_read(submission),
@@ -1045,9 +1082,12 @@ def finalize_bulk_submission_preview(
         warnings.append("Candidate ranges do not cover all pages.")
 
     for candidate in payload.candidates:
+        candidate_first_name, candidate_last_name = split_student_name(candidate.student_name)
         submission = Submission(
             exam_id=exam_id,
-            student_name=normalize_student_name(candidate.student_name),
+            student_name=compose_student_name(candidate_first_name, candidate_last_name),
+            first_name=candidate_first_name,
+            last_name=candidate_last_name,
             status=SubmissionStatus.UPLOADED,
             capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
         )
@@ -1111,12 +1151,14 @@ def finalize_bulk_submission_preview(
             session.add(sp)
             session.flush()
             page_reads.append(SubmissionPageRead(id=sp.id, page_number=idx, image_path=relative_to_data(Path(src.image_path)), width=src.width, height=src.height))
-
+        created_first_name, created_last_name = submission_name_parts(submission.first_name, submission.last_name, submission.student_name)
         created.append(
             SubmissionRead(
                 id=submission.id,
                 exam_id=submission.exam_id,
-                student_name=normalize_student_name(submission.student_name),
+                student_name=submission_display_name(submission.first_name, submission.last_name, submission.student_name),
+                first_name=created_first_name,
+                last_name=created_last_name,
                 status=submission.status,
                 capture_mode=submission.capture_mode,
                 front_page_totals=front_page_totals_read(submission),
@@ -1126,7 +1168,16 @@ def finalize_bulk_submission_preview(
             )
         )
 
+        if submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS:
+            try:
+                get_or_create_front_page_totals_candidates(submission.id, session)
+            except HTTPException:
+                logger.warning("front-page candidate precompute skipped for submission %s", submission.id)
+            except Exception:
+                logger.exception("front-page candidate precompute failed for submission %s", submission.id)
+
     session.commit()
+    invalidate_exam_reporting_cache(exam_id)
     return BulkUploadFinalizeResponse(submissions=created, warnings=warnings)
 
 
@@ -1290,6 +1341,7 @@ def create_question(exam_id: int, payload: QuestionCreate, session: Session = De
     )
     session.add(question)
     session.commit()
+    invalidate_exam_reporting_cache(exam_id)
     session.refresh(question)
 
     return QuestionRead(
@@ -1358,6 +1410,7 @@ def update_question(
 
     session.add(question)
     session.commit()
+    invalidate_exam_reporting_cache(exam_id)
     session.refresh(question)
 
     regions = session.exec(select(QuestionRegion).where(QuestionRegion.question_id == question.id)).all()
@@ -2198,6 +2251,7 @@ def retry_answer_key_parse_page(
         page_number=page_number,
         parser=parser,
     )
+    invalidate_exam_reporting_cache(exam_id)
     job_state = _recompute_parse_job_state(exam_id, job.id)
     refreshed_questions = list_questions(exam_id, session)
     refreshed_page = get_answer_key_parse_status(exam_id=exam_id, job_id=job.id, session=session)
@@ -2236,6 +2290,7 @@ def finish_answer_key_parse(exam_id: int, job_id: int | None = None, request_id:
     _get_exam_or_404(exam_id, session)
     job = _get_job_for_exam_or_error(exam_id, resolved_job_id, session)
     job_state = _recompute_parse_job_state(exam_id, job.id)
+    invalidate_exam_reporting_cache(exam_id)
     questions = list_questions(exam_id, session)
     return {
         "job_id": job.id,

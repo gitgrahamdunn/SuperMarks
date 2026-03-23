@@ -50,6 +50,8 @@ class Submission(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     exam_id: int = Field(foreign_key="exam.id", index=True)
     student_name: str
+    first_name: str = ""
+    last_name: str = ""
     status: SubmissionStatus = Field(default=SubmissionStatus.UPLOADED)
     capture_mode: SubmissionCaptureMode = Field(default=SubmissionCaptureMode.QUESTION_LEVEL)
     front_page_totals_json: Optional[str] = None

@@ -38,7 +38,8 @@ from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
 from app.pipeline.transcribe import get_ocr_provider
 from app.ai.openai_vision import OpenAIRequestError, get_front_page_totals_extractor
 from app.reporting import accumulate_objective_totals, front_page_objective_totals, front_page_totals_read, objective_totals_read
-from app.name_utils import normalize_student_name
+from app.name_utils import compose_student_name, normalize_student_name, submission_display_name, submission_name_parts
+from app.reporting_service import invalidate_exam_reporting_cache
 from app.schemas import (
     BlobRegisterRequest,
     BlobRegisterResponse,
@@ -87,10 +88,13 @@ def _front_page_candidate_lock(submission_id: int) -> threading.Lock:
         return created
 
 def _submission_read(submission: Submission, files: list[SubmissionFile], pages: list[SubmissionPage]) -> SubmissionRead:
+    first_name, last_name = submission_name_parts(submission.first_name, submission.last_name, submission.student_name)
     return SubmissionRead(
         id=submission.id,
         exam_id=submission.exam_id,
-        student_name=normalize_student_name(submission.student_name),
+        student_name=submission_display_name(submission.first_name, submission.last_name, submission.student_name),
+        first_name=first_name,
+        last_name=last_name,
         status=submission.status,
         capture_mode=submission.capture_mode,
         front_page_totals=front_page_totals_read(submission),
@@ -751,8 +755,7 @@ def _front_page_candidate_cache_read(submission: Submission) -> FrontPageTotalsC
         return None
 
 
-@router.get("/{submission_id}/front-page-totals-candidates", response_model=FrontPageTotalsCandidateRead)
-def get_front_page_totals_candidates(submission_id: int, session: Session = Depends(get_session)) -> FrontPageTotalsCandidateRead:
+def get_or_create_front_page_totals_candidates(submission_id: int, session: Session) -> FrontPageTotalsCandidateRead:
     submission = session.get(Submission, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -831,6 +834,11 @@ def get_front_page_totals_candidates(submission_id: int, session: Session = Depe
         return candidate_payload
 
 
+@router.get("/{submission_id}/front-page-totals-candidates", response_model=FrontPageTotalsCandidateRead)
+def get_front_page_totals_candidates(submission_id: int, session: Session = Depends(get_session)) -> FrontPageTotalsCandidateRead:
+    return get_or_create_front_page_totals_candidates(submission_id, session)
+
+
 @router.put("/{submission_id}/front-page-totals", response_model=FrontPageTotalsRead)
 def upsert_front_page_totals(
     submission_id: int,
@@ -841,10 +849,17 @@ def upsert_front_page_totals(
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    if payload.student_name is not None:
-        normalized_student_name = normalize_student_name(payload.student_name)
+    if payload.first_name is not None or payload.last_name is not None or payload.student_name is not None:
+        if payload.first_name is not None or payload.last_name is not None:
+            first_name, last_name = submission_name_parts(payload.first_name, payload.last_name, None)
+            normalized_student_name = compose_student_name(first_name, last_name)
+        else:
+            first_name, last_name = submission_name_parts(None, None, payload.student_name)
+            normalized_student_name = compose_student_name(first_name, last_name)
         if not normalized_student_name:
             raise HTTPException(status_code=400, detail="Student name cannot be blank")
+        submission.first_name = first_name
+        submission.last_name = last_name
         submission.student_name = normalized_student_name
 
     cleaned_scores: list[dict[str, float | str | None]] = []
@@ -870,6 +885,7 @@ def upsert_front_page_totals(
     submission.status = SubmissionStatus.GRADED if payload.confirmed else SubmissionStatus.UPLOADED
     session.add(submission)
     session.commit()
+    invalidate_exam_reporting_cache(submission.exam_id)
     session.refresh(submission)
     return front_page_totals_read(submission)
 
@@ -925,6 +941,7 @@ def upsert_manual_grade(
     submission.status = SubmissionStatus.GRADED
     session.add(submission)
     session.commit()
+    invalidate_exam_reporting_cache(submission.exam_id)
     session.refresh(grade)
 
     return GradeResultRead(

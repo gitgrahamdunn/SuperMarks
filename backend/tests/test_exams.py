@@ -687,10 +687,24 @@ def test_bulk_upload_preview_and_finalize_creates_submissions(tmp_path, monkeypa
         final_payload = finalize.json()
         assert len(final_payload["submissions"]) == 2
         assert all(item["capture_mode"] == "front_page_totals" for item in final_payload["submissions"])
+        assert all(item["front_page_totals"] is None for item in final_payload["submissions"])
 
         detail = client.get(f"/api/exams/{exam_id}")
         assert detail.status_code == 200
         assert len(detail.json()["submissions"]) == 2
+
+        bootstrap = client.get(f"/api/exams/{exam_id}/workspace-bootstrap")
+        assert bootstrap.status_code == 200
+        bootstrap_payload = bootstrap.json()
+        assert bootstrap_payload["exam"]["id"] == exam_id
+        assert len(bootstrap_payload["submissions"]) == 2
+        assert bootstrap_payload["marking_dashboard"]["exam_id"] == exam_id
+        assert "latest_parse" in bootstrap_payload
+
+    with Session(db.engine) as session:
+        submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id).order_by(Submission.id)).all()
+        assert len(submissions) == 2
+        assert all((submission.front_page_candidates_json or "").strip() for submission in submissions)
 
 
 def test_bulk_upload_preview_accepts_single_image(tmp_path, monkeypatch) -> None:
@@ -1688,7 +1702,7 @@ def test_exam_export_csv_includes_question_rows_and_total_score(tmp_path) -> Non
         assert "Ada,question_level,in_progress,no,2,1,2,1/2 marked,3.0,10.0,30.0,OB1 3.0/4.0 | OB2 0.0/6.0 | OB3 0.0/6.0,3,No submission pages have been built yet.,Q1,Resume marking at Q1.,3.0,4.0,0.0,6.0,0.0,6.0,3.0,4.0,OB1,,6.0,OB2; OB3" in body
 
 
-def test_exam_export_xlsx_contains_only_test_name_name_and_grade(tmp_path) -> None:
+def test_exam_export_xlsx_includes_dynamic_outcome_columns(tmp_path) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
 
@@ -1714,6 +1728,7 @@ def test_exam_export_xlsx_contains_only_test_name_name_and_grade(tmp_path) -> No
         assert "test_name" in sheet_xml
         assert "name" in sheet_xml
         assert "grade" in sheet_xml
+        assert "outcome_OB1" in sheet_xml
         assert "Midterm 1" in sheet_xml
         assert "Ada" in sheet_xml
         assert "15/20" in sheet_xml
@@ -1721,6 +1736,57 @@ def test_exam_export_xlsx_contains_only_test_name_name_and_grade(tmp_path) -> No
         assert "capture_mode" not in sheet_xml
         assert "workflow_status" not in sheet_xml
         assert "objective_summary" not in sheet_xml
+
+
+def test_exam_export_xlsx_infers_outcome_columns_from_parsed_front_page_candidates(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam_id = client.post("/api/exams", json={"name": "Midterm 2"}).json()["id"]
+        submission_id = client.post(
+            f"/api/exams/{exam_id}/submissions",
+            json={"student_name": "Ada", "capture_mode": "front_page_totals"},
+        ).json()["id"]
+
+        with Session(db.engine) as session:
+            submission = session.get(Submission, submission_id)
+            assert submission is not None
+            submission.front_page_candidates_json = json.dumps({
+                "student_name": {"value_text": "Ada", "confidence": 0.95, "evidence": []},
+                "overall_marks_awarded": {"value_text": "18", "confidence": 0.95, "evidence": []},
+                "overall_max_marks": {"value_text": "20", "confidence": 0.95, "evidence": []},
+                "objective_scores": [
+                    {
+                        "objective_code": {"value_text": "OB1", "confidence": 0.9, "evidence": []},
+                        "marks_awarded": {"value_text": "8", "confidence": 0.9, "evidence": []},
+                        "max_marks": {"value_text": "10", "confidence": 0.9, "evidence": []},
+                    },
+                    {
+                        "objective_code": {"value_text": "OB2", "confidence": 0.9, "evidence": []},
+                        "marks_awarded": {"value_text": "10", "confidence": 0.9, "evidence": []},
+                        "max_marks": {"value_text": "10", "confidence": 0.9, "evidence": []},
+                    },
+                ],
+                "warnings": [],
+                "source": "stub-front-page",
+            })
+            session.add(submission)
+            session.commit()
+
+        export = client.get(f"/api/exams/{exam_id}/export.xlsx")
+        assert export.status_code == 200
+
+        archive = zipfile.ZipFile(BytesIO(export.content))
+        sheet_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+
+        assert "outcome_OB1" in sheet_xml
+        assert "outcome_OB2" in sheet_xml
+        assert "8/10" in sheet_xml
+        assert "10/10" in sheet_xml
 
 
 def test_exam_export_objectives_summary_csv_rolls_up_objective_posture(tmp_path) -> None:

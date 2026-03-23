@@ -4,6 +4,7 @@ import csv
 from collections import defaultdict
 import json
 import re
+import threading
 import zipfile
 from dataclasses import dataclass
 from html import escape
@@ -18,6 +19,10 @@ from app.models import AnswerCrop, Exam, GradeResult, Question, QuestionRegion, 
 from app.name_utils import normalize_student_name, student_name_sort_key
 from app.reporting import accumulate_objective_totals, build_exam_objective_report, front_page_objective_totals, front_page_totals_read, objective_summary_text, objective_totals_read, question_objective_codes
 from app.schemas import ExamCompletionSummary, ExamMarkingDashboardResponse, SubmissionDashboardRow
+
+
+_EXAM_REPORTING_CONTEXT_CACHE: dict[int, "ExamReportingContext"] = {}
+_EXAM_REPORTING_CONTEXT_CACHE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -621,6 +626,11 @@ def build_submission_reporting_projection(
 
 
 def load_exam_reporting_context(exam_id: int, session: Session) -> ExamReportingContext | None:
+    with _EXAM_REPORTING_CONTEXT_CACHE_LOCK:
+        cached = _EXAM_REPORTING_CONTEXT_CACHE.get(exam_id)
+    if cached is not None:
+        return cached
+
     exam = session.get(Exam, exam_id)
     if not exam:
         return None
@@ -637,7 +647,7 @@ def load_exam_reporting_context(exam_id: int, session: Session) -> ExamReporting
         build_submission_reporting_projection(submission, row, questions=questions, snapshot=snapshot)
         for submission, row in zip(submissions, dashboard_rows, strict=False)
     ]
-    return ExamReportingContext(
+    context = ExamReportingContext(
         exam=exam,
         questions=questions,
         submissions=submissions,
@@ -645,6 +655,14 @@ def load_exam_reporting_context(exam_id: int, session: Session) -> ExamReporting
         submission_projections=submission_projections,
         snapshot=snapshot,
     )
+    with _EXAM_REPORTING_CONTEXT_CACHE_LOCK:
+        _EXAM_REPORTING_CONTEXT_CACHE[exam_id] = context
+    return context
+
+
+def invalidate_exam_reporting_cache(exam_id: int) -> None:
+    with _EXAM_REPORTING_CONTEXT_CACHE_LOCK:
+        _EXAM_REPORTING_CONTEXT_CACHE.pop(exam_id, None)
 
 
 def build_submission_dashboard_row(
@@ -1060,17 +1078,101 @@ def _xlsx_inline_string_cell(cell_ref: str, value: Any) -> str:
     return f'<c r="{cell_ref}" t="inlineStr"><is><t>{text}</t></is></c>'
 
 
+def _candidate_objective_values_by_code(submission: Submission) -> dict[str, MarksExportObjectiveValue]:
+    payload_text = (submission.front_page_candidates_json or "").strip()
+    if not payload_text:
+        return {}
+    try:
+        payload = json.loads(payload_text)
+    except Exception:
+        return {}
+
+    raw_scores = payload.get("objective_scores")
+    if not isinstance(raw_scores, list):
+        return {}
+
+    values_by_code: dict[str, MarksExportObjectiveValue] = {}
+    for item in raw_scores:
+        if not isinstance(item, dict):
+            continue
+        raw_code = item.get("objective_code")
+        code_text = ""
+        if isinstance(raw_code, dict):
+            code_text = str(raw_code.get("value_text") or "").strip()
+        elif raw_code is not None:
+            code_text = str(raw_code).strip()
+        if not code_text:
+            continue
+
+        raw_awarded = item.get("marks_awarded")
+        raw_max = item.get("max_marks")
+        awarded_text = str(raw_awarded.get("value_text") or "").strip() if isinstance(raw_awarded, dict) else str(raw_awarded or "").strip()
+        max_text = str(raw_max.get("value_text") or "").strip() if isinstance(raw_max, dict) else str(raw_max or "").strip()
+        try:
+            awarded_value = round(float(awarded_text), 2)
+        except Exception:
+            continue
+        try:
+            max_value = round(float(max_text), 2) if max_text else 0.0
+        except Exception:
+            max_value = 0.0
+
+        values_by_code[code_text] = MarksExportObjectiveValue(
+            objective_code=code_text,
+            marks_awarded=awarded_value,
+            max_marks=max_value,
+        )
+    return values_by_code
+
+
+def _gradebook_outcome_codes(context: ExamReportingContext) -> list[str]:
+    confirmed_codes = {
+        objective_code
+        for projection in context.submission_projections
+        for objective_code in projection.marks_export_payload.objective_values_by_code
+    }
+    if confirmed_codes:
+        return sorted(confirmed_codes)
+
+    candidate_codes = {
+        objective_code
+        for submission in context.submissions
+        for objective_code in _candidate_objective_values_by_code(submission)
+    }
+    if candidate_codes:
+        return sorted(candidate_codes)
+
+    question_codes = {
+        code
+        for question in context.questions
+        for code in question_objective_codes(question)
+    }
+    return sorted(question_codes)
+
+
 def build_exam_gradebook_xlsx_bytes(context: ExamReportingContext) -> bytes:
-    headers = ["test_name", "name", "grade"]
+    outcome_codes = _gradebook_outcome_codes(context)
+    headers = ["test_name", "name", "grade", *[f"outcome_{code}" for code in outcome_codes]]
     rows: list[list[str]] = [headers]
     for projection in sorted(context.submission_projections, key=lambda item: student_name_sort_key(item.export_row.student)):
         export_row = projection.export_row
         total_awarded = round(float(export_row.total_awarded), 2)
         total_possible = round(float(export_row.total_possible), 2)
+        objective_values_by_code = dict(projection.marks_export_payload.objective_values_by_code)
+        if not objective_values_by_code and projection.submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS:
+            objective_values_by_code = _candidate_objective_values_by_code(projection.submission)
         rows.append([
             context.exam.name,
             normalize_student_name(export_row.student),
             f"{total_awarded:g}/{total_possible:g}",
+            *[
+                (
+                    f"{objective_values_by_code[code].marks_awarded:g}/{objective_values_by_code[code].max_marks:g}"
+                    if code in objective_values_by_code
+                    else ""
+                )
+                for code in outcome_codes
+            ],
         ])
 
     sheet_rows: list[str] = []

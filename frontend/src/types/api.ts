@@ -106,6 +106,8 @@ export interface SubmissionRead {
   id: number;
   exam_id: number;
   student_name: string;
+  first_name: string;
+  last_name: string;
   status: 'UPLOADED' | 'PAGES_READY' | 'CROPS_READY' | 'TRANSCRIBED' | 'GRADED' | string;
   capture_mode: SubmissionCaptureMode;
   front_page_totals?: FrontPageTotals | null;
@@ -429,4 +431,14 @@ export interface ExamMarkingDashboardResponse {
   objectives: ExamObjectiveRead[];
   submissions: SubmissionDashboardRow[];
   completion: ExamCompletionSummary;
+}
+
+export interface ExamWorkspaceBootstrapResponse {
+  exam: ExamRead;
+  questions: QuestionRead[];
+  key_files: StoredFileRead[];
+  submissions: SubmissionRead[];
+  marking_dashboard: ExamMarkingDashboardResponse;
+  latest_parse: ParseLatestResponse;
+  latest_parse_status?: ParseStatusResponse | null;
 }
