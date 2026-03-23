@@ -122,6 +122,10 @@ export function ExamDetailPage() {
       : `/submissions/${submissionId}/mark`;
     return `${base}?examId=${examId}${captureMode !== 'front_page_totals' && questionId ? `&questionId=${questionId}` : ''}&returnTo=${encodeURIComponent(`/exams/${examId}`)}&returnLabel=${encodeURIComponent('Back to exam queue')}`;
   };
+  const frontPageRouteStateFor = (submissionId: number) => ({
+    submission: submissions.find((submission) => submission.id === submissionId) ?? null,
+    examSubmissions: submissions,
+  });
   const buildSubmissionResultsLink = (submissionId: number) => `/submissions/${submissionId}/results?examId=${examId}`;
 
   const examNextAction = useMemo(() => {
@@ -575,7 +579,6 @@ export function ExamDetailPage() {
         <div className="page-header">
           <div>
             <p className="page-eyebrow">Exam workspace</p>
-            <p style={{ margin: 0 }}><Link to="/">← Back to Home</Link></p>
             <h1 className="page-title">{detail.exam.name}</h1>
             <p className="page-subtitle">Confirm totals, then export.</p>
           </div>
@@ -591,7 +594,11 @@ export function ExamDetailPage() {
                 <p className="subtle-text">Open the next paper.</p>
               </div>
               {nextTotalsLink && (
-                <Link className="btn btn-primary" to={nextTotalsLink}>
+                <Link
+                  className="btn btn-primary"
+                  to={nextTotalsLink}
+                  state={nextTotalsSubmission ? frontPageRouteStateFor(nextTotalsSubmission.id) : undefined}
+                >
                   Open test
                 </Link>
               )}
@@ -619,16 +626,6 @@ export function ExamDetailPage() {
                 <p className="metric-label">Need confirmation</p>
                 <p className="metric-value">{frontPagePendingRows.length}</p>
                 <p className="metric-meta">Still waiting</p>
-              </article>
-              <article className="metric-card">
-                <p className="metric-label">Confirmed</p>
-                <p className="metric-value">{confirmedTotalsCount}</p>
-                <p className="metric-meta">Done</p>
-              </article>
-              <article className="metric-card">
-                <p className="metric-label">Flow</p>
-                <p className="metric-value">{markingDashboard ? `${markingDashboard.completion.completion_percent}%` : '—'}</p>
-                <p className="metric-meta">Complete</p>
               </article>
             </div>
           </section>

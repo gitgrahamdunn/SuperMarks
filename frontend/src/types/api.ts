@@ -4,6 +4,21 @@ export interface ExamRead {
   created_at: string;
   teacher_style_profile_json: string | null;
   status?: string;
+  intake_job?: ExamIntakeJobRead | null;
+}
+
+export interface ExamIntakeJobRead {
+  id: number;
+  exam_id: number;
+  bulk_upload_id?: number | null;
+  status: string;
+  stage: string;
+  page_count: number;
+  pages_processed: number;
+  submissions_created: number;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Region {

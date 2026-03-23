@@ -105,10 +105,24 @@ const formatExamDateTime = (value: string) => {
   });
 };
 
-const normalizeExamStatus = (status?: string | null) => {
-  const normalized = status?.trim().toLowerCase();
+const normalizeExamStatus = (exam: ExamRead) => {
+  const intakeStatus = exam.intake_job?.status?.trim().toLowerCase();
+  if (intakeStatus === 'queued' || intakeStatus === 'running') {
+    return { label: 'Preparing', tone: 'status-in-progress' };
+  }
+  if (intakeStatus === 'failed') {
+    return { label: 'Failed', tone: 'status-blocked' };
+  }
+
+  const normalized = exam.status?.trim().toLowerCase();
   if (!normalized) {
     return { label: 'Active workspace', tone: 'status-ready' };
+  }
+  if (normalized === 'draft') {
+    return { label: 'Preparing', tone: 'status-in-progress' };
+  }
+  if (normalized === 'ready' || normalized.includes('confirm')) {
+    return { label: 'Confirmed', tone: 'status-complete' };
   }
   if (normalized.includes('complete') || normalized.includes('done')) {
     return { label: 'Complete', tone: 'status-complete' };
@@ -119,7 +133,7 @@ const normalizeExamStatus = (status?: string | null) => {
   if (normalized.includes('block') || normalized.includes('flag')) {
     return { label: 'Needs review', tone: 'status-blocked' };
   }
-  return { label: status || 'Active workspace', tone: 'status-neutral' };
+  return { label: exam.status || 'Active workspace', tone: 'status-neutral' };
 };
 
 
@@ -157,7 +171,11 @@ export function ExamsPage() {
     () => sortedExams.filter((exam) => exam.name.toLowerCase().includes(searchTerm.toLowerCase().trim())),
     [sortedExams, searchTerm],
   );
-  const activeExamCount = exams.filter((exam) => !normalizeExamStatus(exam.status).label.toLowerCase().includes('complete')).length;
+  const activeExamCount = exams.filter((exam) => !normalizeExamStatus(exam).label.toLowerCase().includes('complete')).length;
+  const hasRunningIntake = exams.some((exam) => {
+    const jobStatus = exam.intake_job?.status?.trim().toLowerCase();
+    return jobStatus === 'queued' || jobStatus === 'running';
+  });
 
   const loadExams = async () => {
     try {
@@ -173,6 +191,14 @@ export function ExamsPage() {
   useEffect(() => {
     void loadExams();
   }, []);
+
+  useEffect(() => {
+    if (!hasRunningIntake) return;
+    const id = window.setInterval(() => {
+      void loadExams();
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [hasRunningIntake]);
 
   const handleDeleteExam = async (exam: ExamRead) => {
     const confirmed = window.confirm(`Delete "${exam.name}" and all of its submissions, parsing jobs, and results? This cannot be undone.`);
@@ -223,13 +249,17 @@ export function ExamsPage() {
     setAllowLargeUpload(false);
     resetWizardProgress();
   };
+  const dismissModal = () => {
+    setIsModalOpen(false);
+    resetWizardState();
+    openWizardButtonRef.current?.focus();
+  };
+
   const closeModal = () => {
     if (isRunning) {
       requestControllerRef.current?.abort();
     }
-    setIsModalOpen(false);
-    resetWizardState();
-    openWizardButtonRef.current?.focus();
+    dismissModal();
   };
 
   const ingestWizardTestBundle = async (
@@ -309,16 +339,22 @@ export function ExamsPage() {
       const activeExamId = exam.id;
       examId = activeExamId;
       setCurrentExamId(activeExamId);
+      setExams((prev) => [exam, ...prev.filter((item) => item.id !== exam.id)]);
       logStep();
       markChecklist('creating_exam', 'done');
       setParseProgress(14);
-
-      await ingestWizardTestBundle(activeExamId, modalFiles, requestOptions, logStep);
-
+      updateCurrentStep('uploading');
+      markChecklist('uploading_key', 'active');
+      const intakeJob = await api.startExamIntakeJob(activeExamId, modalFiles, requestOptions);
+      setExams((prev) => prev.map((item) => (item.id === activeExamId ? { ...item, intake_job: intakeJob, status: 'DRAFT' } : item)));
+      markChecklist('uploading_key', 'done');
+      setParseProgress(100);
+      updateCurrentStep('done');
+      showSuccess('Workspace created. Papers are preparing in Home.');
       await loadExams();
-      showSuccess('The confirmation queue is ready.');
-      closeModal();
-      navigate(`/exams/${activeExamId}`);
+      requestControllerRef.current = null;
+      dismissModal();
+      return;
     } catch (err) {
       const stepName = currentStepRef.current;
       const stepEndpoint = endpointForStep(stepName, examId);
@@ -391,10 +427,10 @@ export function ExamsPage() {
   const onRetryFailedStep = async () => {
     if (!wizardError) return;
 
-    if (wizardError.step === 'creating') {
-      await runCreateAndUpload();
-      return;
-    }
+      if (wizardError.step === 'creating' || wizardError.step === 'uploading') {
+        await runCreateAndUpload();
+        return;
+      }
 
     const activeExamId = currentExamId;
     if (!activeExamId) {
@@ -543,8 +579,11 @@ export function ExamsPage() {
         {!loading && filteredExams.length > 0 && (
           <div className="workspace-card-grid">
             {filteredExams.map((exam) => {
-              const status = normalizeExamStatus(exam.status);
+              const status = normalizeExamStatus(exam);
               const isDeleting = deletingExamId === exam.id;
+              const isPreparing = status.label === 'Preparing';
+              const isFailed = status.label === 'Failed';
+              const canOpenWorkspace = !isPreparing && !isFailed;
               return (
                 <article key={exam.id} className="workspace-card">
                   <div className="workspace-card-header">
@@ -558,8 +597,47 @@ export function ExamsPage() {
                     <span>Created {formatExamDate(exam.created_at)}</span>
                     <span>Exam ID {exam.id}</span>
                   </div>
+                  {isPreparing && (
+                    <div className="library-card-progress" aria-label="Preparing test">
+                      <div className="library-card-progress-bar" aria-hidden="true">
+                        <span />
+                      </div>
+                    </div>
+                  )}
+                  {isPreparing && exam.intake_job && (
+                    <p className="subtle-text" style={{ margin: 0 }}>
+                      {exam.intake_job.pages_processed}/{exam.intake_job.page_count} pages ready
+                    </p>
+                  )}
+                  {isFailed && exam.intake_job?.error_message && (
+                    <p className="warning-text" style={{ margin: 0 }}>{exam.intake_job.error_message}</p>
+                  )}
                   <div className="actions-row" style={{ marginTop: 0 }}>
-                    <Link className="btn btn-secondary btn-sm" to={`/exams/${exam.id}`}>Open workspace</Link>
+                    {canOpenWorkspace ? (
+                      <Link className="btn btn-secondary btn-sm" to={`/exams/${exam.id}`}>Open workspace</Link>
+                    ) : (
+                      <button type="button" className="btn btn-secondary btn-sm" disabled>
+                        {isPreparing ? 'Preparing…' : 'Unavailable'}
+                      </button>
+                    )}
+                    {isFailed && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={async () => {
+                          try {
+                            const job = await api.retryExamIntakeJob(exam.id);
+                            setExams((prev) => prev.map((item) => (item.id === exam.id ? { ...item, intake_job: job, status: 'DRAFT' } : item)));
+                            showSuccess(`Retry started for "${exam.name}"`);
+                          } catch (error) {
+                            showError(error instanceof Error ? error.message : 'Failed to retry intake');
+                          }
+                        }}
+                        disabled={isDeleting}
+                      >
+                        Retry
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn-danger btn-sm"

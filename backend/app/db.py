@@ -107,6 +107,13 @@ def create_db_and_tables() -> None:
     _ensure_column("submission", "front_page_totals_json", "front_page_totals_json TEXT")
     _ensure_column("submission", "front_page_candidates_json", "front_page_candidates_json TEXT")
     _ensure_column("submission", "front_page_reviewed_at", "front_page_reviewed_at VARCHAR")
+    _ensure_column("exam", "front_page_template_json", "front_page_template_json TEXT")
+    _ensure_column("examintakejob", "attempt_count", "attempt_count INTEGER DEFAULT 0")
+    _ensure_column("examintakejob", "runner_id", "runner_id VARCHAR")
+    _ensure_column("examintakejob", "lease_expires_at", "lease_expires_at VARCHAR")
+    _ensure_column("examintakejob", "started_at", "started_at VARCHAR")
+    _ensure_column("examintakejob", "finished_at", "finished_at VARCHAR")
+    _ensure_column("examintakejob", "metrics_json", "metrics_json TEXT")
 
 
 

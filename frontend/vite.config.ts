@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const buildMarker = String(Date.now());
+
 function resolveAllowedHosts(): true | string[] {
   const configuredHosts = (process.env.VITE_ALLOWED_HOSTS || '')
     .split(',')
@@ -19,7 +21,18 @@ function resolveAllowedHosts(): true | string[] {
 }
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: 'supermarks-build-marker',
+      transformIndexHtml(html) {
+        return html.replace(
+          '</head>',
+          `    <meta name="supermarks-build" content="${buildMarker}" />\n  </head>`,
+        );
+      },
+    },
+  ],
   server: {
     allowedHosts: resolveAllowedHosts(),
     proxy: {
@@ -42,6 +55,6 @@ export default defineConfig({
     },
   },
   define: {
-    __APP_BUILD_TS__: JSON.stringify(Date.now()),
+    __APP_BUILD_TS__: JSON.stringify(Number(buildMarker)),
   },
 });

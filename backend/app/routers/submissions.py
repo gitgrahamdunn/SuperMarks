@@ -21,6 +21,7 @@ from app.blob_store import BlobUploadError, upload_bytes
 from app.models import (
     AnswerCrop,
     Exam,
+    ExamStatus,
     GradeResult,
     Question,
     QuestionRegion,
@@ -36,7 +37,12 @@ from app.pipeline.crops import crop_regions_and_stitch
 from app.pipeline.grade import get_grader
 from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
 from app.pipeline.transcribe import get_ocr_provider
-from app.ai.openai_vision import OpenAIRequestError, get_front_page_totals_extractor
+from app.ai.openai_vision import (
+    OpenAIRequestError,
+    _front_page_mini_model,
+    _front_page_nano_model,
+    get_front_page_totals_extractor,
+)
 from app.reporting import accumulate_objective_totals, front_page_objective_totals, front_page_totals_read, objective_totals_read
 from app.name_utils import compose_student_name, normalize_student_name, submission_display_name, submission_name_parts
 from app.reporting_service import invalidate_exam_reporting_cache
@@ -72,6 +78,9 @@ _ALLOWED_SUBMISSION_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 _VERCEL_SERVER_UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024
 _FRONT_PAGE_CANDIDATE_LOCKS: dict[int, threading.Lock] = {}
 _FRONT_PAGE_CANDIDATE_LOCKS_GUARD = threading.Lock()
+_FRONT_PAGE_TEMPLATE_SEED_LIMIT = 5
+_FRONT_PAGE_TEMPLATE_MIN_STABLE_SAMPLES = 3
+_FRONT_PAGE_TEMPLATE_STABLE_THRESHOLD = 0.9
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -86,6 +95,100 @@ def _front_page_candidate_lock(submission_id: int) -> threading.Lock:
         created = threading.Lock()
         _FRONT_PAGE_CANDIDATE_LOCKS[submission_id] = created
         return created
+
+
+def _front_page_template_cache_read(exam: Exam) -> dict[str, object] | None:
+    raw_payload = (exam.front_page_template_json or "").strip()
+    if not raw_payload:
+        return None
+    try:
+        parsed = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        logger.warning("invalid cached front-page template payload for exam %s", exam.id)
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_outcome_code(value: str) -> str:
+    collapsed = re.sub(r"\s+", "", value or "").upper()
+    return re.sub(r"[^A-Z0-9]+", "", collapsed)
+
+
+def _candidate_structure_signature(candidate: FrontPageTotalsCandidateRead) -> tuple[str, ...]:
+    labels: list[str] = []
+    for item in candidate.objective_scores:
+        label = _normalize_outcome_code(item.objective_code.value_text)
+        if label:
+            labels.append(label)
+    return tuple(labels)
+
+
+def _candidate_supports_template(candidate: FrontPageTotalsCandidateRead) -> bool:
+    if candidate.source == "extractor_unavailable":
+        return False
+    if candidate.objective_scores:
+        return True
+    return bool(candidate.overall_marks_awarded or candidate.overall_max_marks)
+
+
+def _build_template_from_candidates(
+    seed_rows: list[tuple[Submission, FrontPageTotalsCandidateRead]],
+    *,
+    seed_limit: int,
+) -> dict[str, object] | None:
+    usable_rows = [(submission, candidate) for submission, candidate in seed_rows if _candidate_supports_template(candidate)]
+    if not usable_rows:
+        return None
+
+    grouped: dict[tuple[str, ...], list[tuple[Submission, FrontPageTotalsCandidateRead]]] = {}
+    for submission, candidate in usable_rows:
+        grouped.setdefault(_candidate_structure_signature(candidate), []).append((submission, candidate))
+
+    dominant_signature, dominant_rows = max(grouped.items(), key=lambda item: (len(item[1]), len(item[0])))
+    dominant_count = len(dominant_rows)
+    sample_count = len(usable_rows)
+    match_ratio = dominant_count / sample_count if sample_count else 0.0
+    stable = sample_count >= _FRONT_PAGE_TEMPLATE_MIN_STABLE_SAMPLES and match_ratio >= _FRONT_PAGE_TEMPLATE_STABLE_THRESHOLD
+
+    overall_total_votes = sum(1 for _, candidate in dominant_rows if candidate.overall_marks_awarded is not None)
+    overall_max_votes = sum(1 for _, candidate in dominant_rows if candidate.overall_max_marks is not None)
+    dominant_submission_ids = [submission.id for submission, _ in dominant_rows if submission.id is not None]
+
+    return {
+        "stable": stable,
+        "seed_pages_processed": len(seed_rows),
+        "seed_limit": seed_limit,
+        "sample_count": sample_count,
+        "matched_pages": dominant_count,
+        "match_ratio": match_ratio,
+        "outcome_codes": list(dominant_signature),
+        "outcome_count": len(dominant_signature),
+        "expects_overall_total": overall_total_votes >= max(1, round(dominant_count / 2)),
+        "expects_overall_max": overall_max_votes >= max(1, round(dominant_count / 2)),
+        "source_submission_ids": dominant_submission_ids,
+    }
+
+
+def _sync_exam_front_page_status(exam_id: int, session: Session) -> None:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        return
+
+    front_page_submissions = session.exec(
+        select(Submission).where(
+            Submission.exam_id == exam_id,
+            Submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+        )
+    ).all()
+    if not front_page_submissions:
+        return
+
+    all_confirmed = all(
+        bool(front_page_totals_read(item) and front_page_totals_read(item).confirmed)
+        for item in front_page_submissions
+    )
+    exam.status = ExamStatus.READY if all_confirmed else ExamStatus.REVIEWING
+    session.add(exam)
 
 def _submission_read(submission: Submission, files: list[SubmissionFile], pages: list[SubmissionPage]) -> SubmissionRead:
     first_name, last_name = submission_name_parts(submission.first_name, submission.last_name, submission.student_name)
@@ -755,16 +858,15 @@ def _front_page_candidate_cache_read(submission: Submission) -> FrontPageTotalsC
         return None
 
 
-def get_or_create_front_page_totals_candidates(submission_id: int, session: Session) -> FrontPageTotalsCandidateRead:
-    submission = session.get(Submission, submission_id)
-    if not submission:
-        raise HTTPException(status_code=404, detail="Submission not found")
-
-    cached_payload = _front_page_candidate_cache_read(submission)
-    if cached_payload is not None:
-        return cached_payload
-
-    extraction_lock = _front_page_candidate_lock(submission_id)
+def _extract_front_page_candidates(
+    submission: Submission,
+    *,
+    session: Session,
+    model_override: str | None = None,
+    template: dict[str, object] | None = None,
+    phase: str,
+) -> FrontPageTotalsCandidateRead:
+    extraction_lock = _front_page_candidate_lock(submission.id or 0)
     with extraction_lock:
         session.refresh(submission)
         cached_payload = _front_page_candidate_cache_read(submission)
@@ -772,7 +874,7 @@ def get_or_create_front_page_totals_candidates(submission_id: int, session: Sess
             return cached_payload
 
         page = session.exec(
-            select(SubmissionPage).where(SubmissionPage.submission_id == submission_id).order_by(SubmissionPage.page_number)
+            select(SubmissionPage).where(SubmissionPage.submission_id == submission.id).order_by(SubmissionPage.page_number)
         ).first()
         if not page:
             raise HTTPException(status_code=400, detail="Build submission pages first")
@@ -783,16 +885,24 @@ def get_or_create_front_page_totals_candidates(submission_id: int, session: Sess
 
         extractor = get_front_page_totals_extractor()
         try:
-            result = extractor.extract(image_path=image_path, request_id=f"submission-{submission_id}-front-page")
+            try:
+                result = extractor.extract(
+                    image_path=image_path,
+                    request_id=f"submission-{submission.id}-front-page",
+                    model_override=model_override,
+                    template=template,
+                )
+            except TypeError:
+                result = extractor.extract(image_path=image_path, request_id=f"submission-{submission.id}-front-page")
         except OpenAIRequestError as exc:
-            logger.warning("front-page totals extractor failed for submission %s: %s", submission_id, exc)
+            logger.warning("front-page totals extractor failed for submission %s: %s", submission.id, exc)
             return FrontPageTotalsCandidateRead(
                 objective_scores=[],
                 warnings=["Extractor unavailable for this paper right now. You can still confirm totals manually."],
                 source="extractor_unavailable",
             )
-        except Exception as exc:  # pragma: no cover
-            logger.exception("unexpected front-page totals extractor failure for submission %s", submission_id)
+        except Exception:  # pragma: no cover
+            logger.exception("unexpected front-page totals extractor failure for submission %s", submission.id)
             return FrontPageTotalsCandidateRead(
                 objective_scores=[],
                 warnings=["Extractor failed for this paper. You can still confirm totals manually."],
@@ -820,18 +930,107 @@ def get_or_create_front_page_totals_candidates(submission_id: int, session: Sess
                 )
 
         warnings = result.payload.get("warnings")
+        source_model = result.model or model_override or ""
         candidate_payload = FrontPageTotalsCandidateRead(
             student_name=_candidate_value(result.payload.get("student_name"), page_width=page.width, page_height=page.height),
             overall_marks_awarded=_candidate_value(result.payload.get("overall_marks_awarded"), page_width=page.width, page_height=page.height),
             overall_max_marks=_candidate_value(result.payload.get("overall_max_marks"), page_width=page.width, page_height=page.height),
             objective_scores=objective_scores,
             warnings=[str(item) for item in warnings] if isinstance(warnings, list) else [],
-            source=result.model,
+            source=f"{source_model}:{phase}" if source_model else phase,
         )
         submission.front_page_candidates_json = candidate_payload.model_dump_json()
         session.add(submission)
         session.commit()
         return candidate_payload
+
+
+def _ensure_exam_front_page_template(exam_id: int, session: Session) -> tuple[dict[str, object] | None, list[int]]:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    front_page_submissions = session.exec(
+        select(Submission).where(
+            Submission.exam_id == exam_id,
+            Submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+        ).order_by(Submission.id)
+    ).all()
+    seed_ids = [submission.id for submission in front_page_submissions[:_FRONT_PAGE_TEMPLATE_SEED_LIMIT] if submission.id is not None]
+    if not seed_ids:
+        return _front_page_template_cache_read(exam), []
+
+    template_payload = _front_page_template_cache_read(exam)
+    seed_rows: list[tuple[Submission, FrontPageTotalsCandidateRead]] = []
+    changed = False
+    seed_limit = min(_FRONT_PAGE_TEMPLATE_SEED_LIMIT, len(front_page_submissions))
+
+    for submission in front_page_submissions[:seed_limit]:
+        cached_payload = _front_page_candidate_cache_read(submission)
+        if cached_payload is None:
+            cached_payload = _extract_front_page_candidates(
+                submission,
+                session=session,
+                model_override=_front_page_mini_model(),
+                template=None,
+                phase="seed",
+            )
+        seed_rows.append((submission, cached_payload))
+        candidate_template = _build_template_from_candidates(seed_rows, seed_limit=seed_limit)
+        if candidate_template is not None:
+            template_payload = candidate_template
+            changed = True
+            if candidate_template.get("stable"):
+                break
+
+    if changed and template_payload is not None:
+        exam.front_page_template_json = json.dumps(template_payload)
+        session.add(exam)
+        session.commit()
+    return template_payload, seed_ids
+
+
+def get_or_create_front_page_totals_candidates(submission_id: int, session: Session) -> FrontPageTotalsCandidateRead:
+    submission = session.get(Submission, submission_id)
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    cached_payload = _front_page_candidate_cache_read(submission)
+    if cached_payload is not None:
+        return cached_payload
+
+    template_payload, seed_ids = _ensure_exam_front_page_template(submission.exam_id, session)
+    session.refresh(submission)
+    cached_payload = _front_page_candidate_cache_read(submission)
+    if cached_payload is not None:
+        return cached_payload
+
+    is_seed_submission = submission.id in seed_ids
+    template_ready_for_nano = bool(
+        template_payload
+        and (
+            bool(template_payload.get("stable"))
+            or int(template_payload.get("seed_pages_processed") or 0) >= min(
+                int(template_payload.get("seed_limit") or _FRONT_PAGE_TEMPLATE_SEED_LIMIT),
+                max(len(seed_ids), 1),
+            )
+        )
+    )
+    if is_seed_submission or not template_ready_for_nano:
+        return _extract_front_page_candidates(
+            submission,
+            session=session,
+            model_override=_front_page_mini_model(),
+            template=None,
+            phase="seed",
+        )
+    return _extract_front_page_candidates(
+        submission,
+        session=session,
+        model_override=_front_page_nano_model(),
+        template=template_payload,
+        phase="template",
+    )
 
 
 @router.get("/{submission_id}/front-page-totals-candidates", response_model=FrontPageTotalsCandidateRead)
@@ -884,6 +1083,7 @@ def upsert_front_page_totals(
     submission.front_page_reviewed_at = utcnow() if payload.confirmed else None
     submission.status = SubmissionStatus.GRADED if payload.confirmed else SubmissionStatus.UPLOADED
     session.add(submission)
+    _sync_exam_front_page_status(submission.exam_id, session)
     session.commit()
     invalidate_exam_reporting_cache(submission.exam_id)
     session.refresh(submission)

@@ -42,6 +42,7 @@ class SafeCORSMiddleware:
     def _append_cors_headers(headers: list[tuple[bytes, bytes]], allow_origin: str | None) -> list[tuple[bytes, bytes]]:
         if allow_origin:
             headers.append((b"access-control-allow-origin", allow_origin.encode("utf-8")))
+            headers.append((b"access-control-allow-credentials", b"true"))
         headers.append((b"vary", b"Origin"))
         headers.append((b"access-control-allow-methods", _ALLOWED_METHODS))
         headers.append((b"access-control-allow-headers", _ALLOWED_HEADERS))

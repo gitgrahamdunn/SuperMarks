@@ -108,6 +108,24 @@ Only after trust and review flow are strong:
 - Do not confuse parsing/AI sophistication with actual user value.
 - The first version must already be useful when the teacher is still the one making the grading decision.
 
+## Working rule for future changes
+
+Before implementing any non-trivial fix or feature, restate the relevant product-direction rule first and use it to choose the solution.
+
+That product check should answer:
+
+- what workflow the teacher is actually trying to complete
+- what the fastest low-friction behavior is for that workflow
+- what the system should already have prepared before the teacher reaches the next step
+- whether the change keeps the product teacher-first instead of making the workflow more technical or more autonomous than intended
+
+For the current front-page totals lane, the default assumptions are:
+
+- multiple uploaded image files are separate student papers unless the teacher explicitly uploads a multi-page PDF
+- once a test leaves `Preparing`, the review lane should already have the parsed values needed to open immediately
+- the teacher should not wait inside a blocking modal or wizard while background preparation continues
+- the UI should stay mobile-first, obvious, and minimal
+
 ## Success criteria
 
 A good early version of SuperMarks should make a teacher say:

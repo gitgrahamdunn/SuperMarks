@@ -20,6 +20,7 @@ class ExamRead(BaseModel):
     created_at: datetime
     teacher_style_profile_json: str | None
     status: ExamStatus
+    intake_job: "ExamIntakeJobRead | None" = None
 
 
 class SubmissionFileRead(BaseModel):
@@ -315,6 +316,21 @@ class BulkUploadFinalizeRequest(BaseModel):
 class BulkUploadFinalizeResponse(BaseModel):
     submissions: list[SubmissionRead]
     warnings: list[str] = Field(default_factory=list)
+
+
+class ExamIntakeJobRead(BaseModel):
+    id: int
+    exam_id: int
+    bulk_upload_id: int | None = None
+    status: str
+    stage: str
+    page_count: int
+    pages_processed: int
+    submissions_created: int
+    metrics: dict[str, float | int | str] | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class ObjectiveTotalRead(BaseModel):

@@ -38,6 +38,7 @@ def test_preflight_options_exams_allows_cors(client_app, path: str) -> None:
     assert response.headers["access-control-allow-methods"] == "GET,POST,PUT,PATCH,DELETE,OPTIONS"
     assert response.headers["access-control-allow-headers"] == "Content-Type, X-API-Key, Authorization"
     assert response.headers["access-control-expose-headers"] == "Content-Type"
+    assert response.headers["access-control-allow-credentials"] == "true"
 
 
 @pytest.mark.parametrize("client_app,path", [(app, "/api/exams"), (api_app, "/api/exams")])

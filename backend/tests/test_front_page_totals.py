@@ -13,7 +13,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from app import db
 from app.ai.openai_vision import FrontPageTotalsExtractResult
 from app.main import app
-from app.models import Submission, SubmissionPage
+from app.models import Exam, Submission, SubmissionPage
 from app.settings import settings
 
 
@@ -66,7 +66,7 @@ def test_front_page_totals_candidate_extraction_returns_structured_candidates(tm
         response = client.get(f'/api/submissions/{submission_id}/front-page-totals-candidates')
         assert response.status_code == 200
         payload = response.json()
-        assert payload['source'] == 'mock-front-page-totals'
+        assert payload['source'] == 'gpt-5-mini:seed'
         assert payload['student_name']['value_text'] == 'Jordan Lee'
         assert payload['overall_marks_awarded']['value_text'] == '42'
         assert payload['overall_max_marks']['value_text'] == '50'
@@ -303,6 +303,81 @@ def test_front_page_totals_candidates_do_not_double_parse_under_concurrent_reque
     assert responses[0] == responses[1]
 
 
+def test_front_page_totals_seed_with_mini_then_switch_to_template_nano(tmp_path, monkeypatch) -> None:
+    setup_test_db(tmp_path)
+    monkeypatch.delenv('SUPERMARKS_FRONT_PAGE_MODEL', raising=False)
+    monkeypatch.delenv('SUPERMARKS_FRONT_PAGE_PROVIDER', raising=False)
+    monkeypatch.delenv('OPENAI_MOCK', raising=False)
+
+    calls: list[dict[str, object]] = []
+
+    class StubExtractor:
+        def extract(self, image_path, request_id, *, model_override=None, template=None):
+            calls.append(
+                {
+                    'request_id': request_id,
+                    'image_path': str(image_path),
+                    'model_override': model_override,
+                    'template': template,
+                }
+            )
+            payload = {
+                'student_name': {'value_text': 'Jordan Lee', 'confidence': 0.93, 'evidence': []},
+                'overall_marks_awarded': {'value_text': '42', 'confidence': 0.95, 'evidence': []},
+                'overall_max_marks': {'value_text': '50', 'confidence': 0.95, 'evidence': []},
+                'objective_scores': [
+                    {
+                        'objective_code': {'value_text': 'OB1', 'confidence': 0.9, 'evidence': []},
+                        'marks_awarded': {'value_text': '18', 'confidence': 0.9, 'evidence': []},
+                        'max_marks': {'value_text': '20', 'confidence': 0.9, 'evidence': []},
+                    },
+                    {
+                        'objective_code': {'value_text': 'OB2', 'confidence': 0.9, 'evidence': []},
+                        'marks_awarded': {'value_text': '24', 'confidence': 0.9, 'evidence': []},
+                        'max_marks': {'value_text': '30', 'confidence': 0.9, 'evidence': []},
+                    },
+                ],
+                'warnings': [],
+            }
+            return FrontPageTotalsExtractResult(payload=payload, model=model_override or 'stub-front-page')
+
+    monkeypatch.setattr('app.routers.submissions.get_front_page_totals_extractor', lambda: StubExtractor())
+
+    with TestClient(app) as client:
+        exam_id = client.post('/api/exams', json={'name': 'Math 30'}).json()['id']
+        submission_ids: list[int] = []
+        for idx in range(6):
+            submission_id = client.post(
+                f'/api/exams/{exam_id}/submissions',
+                json={'student_name': f'Student {idx + 1}', 'capture_mode': 'front_page_totals'},
+            ).json()['id']
+            submission_ids.append(submission_id)
+
+            image_path = tmp_path / f'front-page-{idx + 1}.png'
+            Image.new('RGB', (1200, 1600), color='white').save(image_path)
+            with Session(db.engine) as session:
+                session.add(SubmissionPage(submission_id=submission_id, page_number=1, image_path=str(image_path), width=1200, height=1600))
+                session.commit()
+
+        response = client.get(f'/api/submissions/{submission_ids[-1]}/front-page-totals-candidates')
+        assert response.status_code == 200
+        assert response.json()['source'] == 'gpt-5-nano:template'
+
+    assert len(calls) == 4
+    assert [call['model_override'] for call in calls[:3]] == ['gpt-5-mini', 'gpt-5-mini', 'gpt-5-mini']
+    assert calls[3]['model_override'] == 'gpt-5-nano'
+    assert calls[3]['template'] is not None
+    assert calls[3]['template']['stable'] is True
+    assert calls[3]['template']['outcome_codes'] == ['OB1', 'OB2']
+
+    with Session(db.engine) as session:
+        exam = session.get(Exam, exam_id)
+        assert exam is not None
+        template_payload = exam.front_page_template_json
+        assert template_payload is not None
+        assert '"outcome_codes": ["OB1", "OB2"]' in template_payload
+
+
 def test_front_page_totals_drive_results_and_dashboard(tmp_path) -> None:
     setup_test_db(tmp_path)
 
@@ -416,6 +491,53 @@ def test_front_page_totals_save_can_correct_first_and_last_name_separately(tmp_p
         assert submission.json()['student_name'] == 'Jordan Smith'
         assert submission.json()['first_name'] == 'Jordan'
         assert submission.json()['last_name'] == 'Smith'
+
+
+def test_exam_status_becomes_ready_when_front_page_queue_is_fully_confirmed(tmp_path) -> None:
+    setup_test_db(tmp_path)
+
+    with TestClient(app) as client:
+        exam_id = client.post('/api/exams', json={'name': 'Math 30'}).json()['id']
+        first_submission_id = client.post(
+            f'/api/exams/{exam_id}/submissions',
+            json={'student_name': 'Jordan', 'capture_mode': 'front_page_totals'},
+        ).json()['id']
+        second_submission_id = client.post(
+            f'/api/exams/{exam_id}/submissions',
+            json={'student_name': 'Avery', 'capture_mode': 'front_page_totals'},
+        ).json()['id']
+
+        first_save = client.put(
+            f'/api/submissions/{first_submission_id}/front-page-totals',
+            json={
+                'overall_marks_awarded': 42,
+                'overall_max_marks': 50,
+                'objective_scores': [],
+                'teacher_note': '',
+                'confirmed': True,
+            },
+        )
+        assert first_save.status_code == 200
+
+        exam_after_first = client.get(f'/api/exams/{exam_id}')
+        assert exam_after_first.status_code == 200
+        assert exam_after_first.json()['exam']['status'] == 'REVIEWING'
+
+        second_save = client.put(
+            f'/api/submissions/{second_submission_id}/front-page-totals',
+            json={
+                'overall_marks_awarded': 38,
+                'overall_max_marks': 50,
+                'objective_scores': [],
+                'teacher_note': '',
+                'confirmed': True,
+            },
+        )
+        assert second_save.status_code == 200
+
+        exam_after_second = client.get(f'/api/exams/{exam_id}')
+        assert exam_after_second.status_code == 200
+        assert exam_after_second.json()['exam']['status'] == 'READY'
 
 
 def test_mixed_mode_dashboard_and_summary_export_reflect_front_page_confirmation_state(tmp_path) -> None:

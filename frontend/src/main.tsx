@@ -9,6 +9,43 @@ import { logEvent } from './logs/clientLogStore';
 import './styles.css';
 
 const apiConfigError = getApiConfigError();
+const BUILD_MARKER = String(__APP_BUILD_TS__);
+const BUILD_RELOAD_STORAGE_KEY = 'supermarks-build-reload';
+
+async function fetchLatestBuildMarker(): Promise<string | null> {
+  try {
+    const response = await fetch('/', {
+      cache: 'no-store',
+      headers: {
+        Accept: 'text/html',
+      },
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const html = await response.text();
+    const match = html.match(/<meta\s+name=["']supermarks-build["']\s+content=["']([^"']+)["']/i);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function reloadIfBuildIsStale(): Promise<void> {
+  const latestBuildMarker = await fetchLatestBuildMarker();
+  if (!latestBuildMarker || latestBuildMarker === BUILD_MARKER) {
+    sessionStorage.removeItem(BUILD_RELOAD_STORAGE_KEY);
+    return;
+  }
+
+  const previousReloadMarker = sessionStorage.getItem(BUILD_RELOAD_STORAGE_KEY);
+  if (previousReloadMarker === latestBuildMarker) {
+    return;
+  }
+
+  sessionStorage.setItem(BUILD_RELOAD_STORAGE_KEY, latestBuildMarker);
+  window.location.reload();
+}
 
 window.addEventListener('error', (event) => {
   logEvent({
@@ -32,6 +69,13 @@ window.addEventListener('unhandledrejection', (event) => {
 
 console.log('[SuperMarks] API_BASE=', import.meta.env.VITE_API_BASE_URL || '<missing>');
 console.log('[SuperMarks] HAS_API_KEY=', Boolean(import.meta.env.VITE_BACKEND_API_KEY));
+void reloadIfBuildIsStale();
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    void reloadIfBuildIsStale();
+  }
+});
 
 if (!apiConfigError) {
   void checkBackendApiContract().then((result) => {

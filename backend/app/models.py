@@ -38,7 +38,28 @@ class Exam(SQLModel, table=True):
     name: str
     created_at: datetime = Field(default_factory=utcnow)
     teacher_style_profile_json: Optional[str] = None
+    front_page_template_json: Optional[str] = None
     status: ExamStatus = Field(default=ExamStatus.DRAFT)
+
+
+class ExamIntakeJob(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    exam_id: int = Field(foreign_key="exam.id", index=True)
+    bulk_upload_id: Optional[int] = Field(default=None, foreign_key="exambulkuploadfile.id", index=True)
+    status: str = "queued"
+    stage: str = "queued"
+    page_count: int = 0
+    pages_processed: int = 0
+    submissions_created: int = 0
+    attempt_count: int = 0
+    runner_id: Optional[str] = None
+    lease_expires_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    metrics_json: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class SubmissionCaptureMode(str, Enum):

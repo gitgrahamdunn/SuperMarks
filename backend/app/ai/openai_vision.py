@@ -286,6 +286,29 @@ def _front_page_model() -> str:
     return "gpt-5-nano"
 
 
+def _front_page_mini_model() -> str:
+    configured = os.getenv("SUPERMARKS_FRONT_PAGE_MODEL", "").strip()
+    if configured:
+        return configured
+    return (
+        os.getenv("SUPERMARKS_KEY_PARSE_MINI_MODEL", "").strip()
+        or "gpt-5-mini"
+    )
+
+
+def _front_page_nano_model() -> str:
+    configured = os.getenv("SUPERMARKS_FRONT_PAGE_MODEL", "").strip()
+    if configured:
+        return configured
+    if _front_page_provider_name() == "doubleword":
+        return (
+            os.getenv("SUPERMARKS_KEY_PARSE_NANO_MODEL", "").strip()
+            or os.getenv("SUPERMARKS_KEY_PARSE_MINI_MODEL", "").strip()
+            or "gpt-5-mini"
+        )
+    return "gpt-5-nano"
+
+
 @dataclass
 class ParseResult:
     payload: dict[str, object]
@@ -818,7 +841,14 @@ class FrontPageTotalsExtractResult:
 
 
 class FrontPageTotalsExtractor(Protocol):
-    def extract(self, image_path: Path, request_id: str) -> FrontPageTotalsExtractResult:
+    def extract(
+        self,
+        image_path: Path,
+        request_id: str,
+        *,
+        model_override: str | None = None,
+        template: dict[str, object] | None = None,
+    ) -> FrontPageTotalsExtractResult:
         """Extract front-page totals candidates from a single rendered page image."""
 
 
@@ -962,6 +992,57 @@ def build_front_page_totals_response_schema() -> dict[str, Any]:
     return schema
 
 
+def _build_front_page_totals_prompt(template: dict[str, object] | None = None) -> str:
+    if template:
+        outcome_codes = [str(item).strip() for item in template.get("outcome_codes", []) if str(item).strip()]
+        expects_overall_total = bool(template.get("expects_overall_total"))
+        expects_overall_max = bool(template.get("expects_overall_max"))
+        stable = bool(template.get("stable"))
+        outcome_hint = ", ".join(outcome_codes) if outcome_codes else "no outcome rows"
+        stability_hint = "stable" if stable else "best-known"
+        overall_hint_parts: list[str] = []
+        if expects_overall_total:
+            overall_hint_parts.append("overall awarded total")
+        if expects_overall_max:
+            overall_hint_parts.append("overall possible total")
+        overall_hint = ", ".join(overall_hint_parts) if overall_hint_parts else "no overall total fields"
+        return (
+            "You are extracting only the teacher-visible front-page score summary from a single student exam paper page. "
+            "This exam already has a known front-page summary template. Use the printed labels, printed table layout, and printed score columns to match the page against that template before reading values. "
+            f"The {stability_hint} expected outcome rows are: {outcome_hint}. "
+            f"The expected overall summary fields are: {overall_hint}. "
+            "Your job is to find the scores for that known structure, not to rediscover a new structure unless the page clearly shows a conflicting summary table. "
+            "Once a summary row is identified, the score values in that row may be typed or handwritten. Accept handwritten scores only when they are clearly written inside the summary row or score cell. "
+            "Ignore handwritten numbers elsewhere on the page, including question work, annotations, rubric notes, worked solutions, answer-key content, and per-question marks unless they are clearly repeated inside the front-page summary table. "
+            "Return each expected outcome row in page order when visible. If one expected row is partially unclear, still return the row and set the unclear field to null rather than dropping it. "
+            "If the page clearly shows an extra or conflicting summary row not in the known template, include it and add a warning describing the mismatch. "
+            "When a total is shown as a ratio like 42/50, return 42 as overall_marks_awarded and 50 as overall_max_marks. "
+            "When an objective row is shown as a ratio like OB1 18/20, return objective_code='OB1', marks_awarded='18', and max_marks='20'. "
+            "Do not invent missing rows. Do not infer hidden totals. Do not sum values yourself unless the page explicitly shows the summary you are returning. "
+            "If a field is not clearly visible, return null for that field or an empty list for objective_scores. "
+            "For each returned value, copy the exact visible text into value_text, set a 0..1 confidence, and include short evidence quotes with normalized box coordinates when possible. "
+            "If there is ambiguity between multiple candidate totals, choose the one most clearly presented as the final overall summary and add a warning describing the ambiguity. "
+            "Return strict JSON only."
+        )
+
+    return (
+        "You are extracting only the teacher-visible front-page score summary from a single student exam paper page. "
+        "This is for a fast teacher confirmation workflow. If a student name is visible, return it exactly; do not redact or suppress it. "
+        "Your first priority is to find every visible objective/category/outcome score row shown in a front-page summary area or score table. Do not stop after finding the overall total. "
+        "Look across the full page for summary information that a teacher would copy from the front page: student name, overall awarded total, overall possible total, and all visible objective/category/outcome totals. "
+        "Use printed labels, printed table layout, and printed score columns to identify the summary table or grouped score area. Strongly prefer labels such as Name, Student, Total, Final, Score, Marks, Result, Outcome, Objective, Category, Strand, LO, or OB, but short labels like 1, 2, 3, 4, K, T, C, A, LO1, or OB1 can also be valid row labels when they appear in the printed summary structure. "
+        "Once a summary row is identified, the score values in that row may be typed or handwritten. Accept handwritten scores only when they are clearly written inside the summary row or score cell. Ignore handwritten numbers elsewhere on the page, including question work, annotations, rubric notes, worked solutions, answer-key content, and per-question marks unless they are clearly repeated inside the front-page summary table. "
+        "If a visible summary table contains multiple rows, return all visible rows in page order. Do not omit a row just because the label is short, generic, or partially unclear. If an outcome row is visible but one field is unclear, still return the row and set the unclear field to null rather than dropping the row. "
+        "When a total is shown as a ratio like 42/50, return 42 as overall_marks_awarded and 50 as overall_max_marks. "
+        "When an objective row is shown as a ratio like OB1 18/20, return objective_code='OB1', marks_awarded='18', and max_marks='20'. "
+        "Do not invent missing rows. Do not infer hidden totals. Do not sum values yourself unless the page explicitly shows the summary you are returning. "
+        "If a field is not clearly visible, return null for that field or an empty list for objective_scores. "
+        "For each returned value, copy the exact visible text into value_text, set a 0..1 confidence, and include short evidence quotes with normalized box coordinates when possible. "
+        "If there is ambiguity between multiple candidate totals, choose the one most clearly presented as the final overall summary and add a warning describing the ambiguity. "
+        "Return strict JSON only."
+    )
+
+
 class OpenAIFrontPageTotalsExtractor:
     def __init__(self, timeout_seconds: float = 60.0) -> None:
         api_key = _front_page_provider_api_key()
@@ -974,24 +1055,18 @@ class OpenAIFrontPageTotalsExtractor:
             client_kwargs["base_url"] = base_url
         self._client = OpenAI(**client_kwargs)
 
-    def extract(self, image_path: Path, request_id: str) -> FrontPageTotalsExtractResult:
+    def extract(
+        self,
+        image_path: Path,
+        request_id: str,
+        *,
+        model_override: str | None = None,
+        template: dict[str, object] | None = None,
+    ) -> FrontPageTotalsExtractResult:
         normalized = normalize_key_page_image(image_path)
         schema = build_front_page_totals_response_schema()
-        model = _front_page_model()
-        prompt = (
-            "You are extracting only the teacher-visible front-page score summary from a single student exam paper page. "
-            "This is for a fast teacher confirmation workflow. If a student name is visible, return it exactly; do not redact or suppress it. "
-            "Look only for summary information that a teacher would copy from the front page: student name, overall awarded total, overall possible total, and objective/category/outcome totals shown in a summary area or score table. "
-            "Strongly prefer values near labels such as Name, Student, Total, Final, Score, Marks, Result, Outcome, Objective, Category, Strand, LO, or OB. "
-            "If the page contains detailed questions, written answers, rubric text, worked solutions, or answer-key content, ignore those. Do not pull numbers from question bodies or per-question marks unless they are clearly repeated in a front-page summary table. "
-            "When a total is shown as a ratio like 42/50, return 42 as overall_marks_awarded and 50 as overall_max_marks. "
-            "When an objective row is shown as a ratio like OB1 18/20, return objective_code='OB1', marks_awarded='18', and max_marks='20'. "
-            "Do not invent missing rows. Do not infer hidden totals. Do not sum values yourself unless the page explicitly shows the summary you are returning. "
-            "If a field is not clearly visible, return null for that field or an empty list for objective_scores. "
-            "For each returned value, copy the exact visible text into value_text, set a 0..1 confidence, and include short evidence quotes with normalized box coordinates when possible. "
-            "If there is ambiguity between multiple candidate totals, choose the one most clearly presented as the final overall summary and add a warning describing the ambiguity. "
-            "Return strict JSON only."
-        )
+        model = model_override or _front_page_model()
+        prompt = _build_front_page_totals_prompt(template)
         request_builder = (
             build_front_page_extract_chat_request
             if _front_page_provider_name() == "doubleword"
@@ -1037,8 +1112,15 @@ class OpenAIFrontPageTotalsExtractor:
 
 
 class MockFrontPageTotalsExtractor:
-    def extract(self, image_path: Path, request_id: str) -> FrontPageTotalsExtractResult:
-        _ = (image_path, request_id)
+    def extract(
+        self,
+        image_path: Path,
+        request_id: str,
+        *,
+        model_override: str | None = None,
+        template: dict[str, object] | None = None,
+    ) -> FrontPageTotalsExtractResult:
+        _ = (image_path, request_id, template)
         return FrontPageTotalsExtractResult(
             payload={
                 "student_name": {
@@ -1065,7 +1147,7 @@ class MockFrontPageTotalsExtractor:
                 ],
                 "warnings": [],
             },
-            model="mock-front-page-totals",
+            model=model_override or "mock-front-page-totals",
         )
 
 

@@ -3,6 +3,7 @@ import type {
   BulkFinalizeResponse,
   BulkUploadPreview,
   ExamDetail,
+  ExamIntakeJobRead,
   ExamMarkingDashboardResponse,
   ExamRead,
   ExamWorkspaceBootstrapResponse,
@@ -34,7 +35,8 @@ const EXAM_READ_TIMEOUT_MS = 15_000;
 const EXAM_CREATE_TIMEOUT_MS = 20_000;
 const KEY_UPLOAD_TIMEOUT_MS = 0;
 const KEY_PARSE_TIMEOUT_MS = 120_000;
-const BUILD_PAGES_TIMEOUT_MS = 60_000;
+const BUILD_PAGES_TIMEOUT_MS = 120_000;
+const BULK_FINALIZE_TIMEOUT_MS = 120_000;
 const FRONT_PAGE_CANDIDATES_TIMEOUT_MS = 60_000;
 
 function validateApiBaseUrl(baseUrl: string): string | null {
@@ -140,6 +142,7 @@ function buildRequestOptions(options: RequestInit = {}): RequestInit {
 
   return {
     ...options,
+    credentials: options.credentials ?? 'include',
     headers,
   };
 }
@@ -453,6 +456,20 @@ export const api = {
     body: JSON.stringify({ name }),
     ...options,
   }, EXAM_CREATE_TIMEOUT_MS),
+  startExamIntakeJob: async (examId: number, files: File[], options?: RequestInit) => {
+    const formData = new FormData();
+    files.forEach((file) => formData.append('files', file));
+    return request<ExamIntakeJobRead>(`exams/${examId}/intake-jobs/start`, {
+      method: 'POST',
+      body: formData,
+      ...options,
+    }, BUILD_PAGES_TIMEOUT_MS);
+  },
+  getLatestExamIntakeJob: (examId: number, options?: RequestInit) => request<ExamIntakeJobRead | null>(`exams/${examId}/intake-jobs/latest`, options, EXAM_READ_TIMEOUT_MS),
+  retryExamIntakeJob: (examId: number, options?: RequestInit) => request<ExamIntakeJobRead>(`exams/${examId}/intake-jobs/retry`, {
+    method: 'POST',
+    ...options,
+  }, EXAM_CREATE_TIMEOUT_MS),
   deleteExam: (examId: number, options?: RequestInit) => request(`exams/${examId}`, {
     method: 'DELETE',
     ...options,
@@ -517,7 +534,7 @@ export const api = {
       body: JSON.stringify({ candidates }),
       ...options,
     },
-    EXAM_CREATE_TIMEOUT_MS,
+    BULK_FINALIZE_TIMEOUT_MS,
   ),
   getBulkUploadPageUrl: (examId: number, bulkUploadId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/submissions/bulk/${bulkUploadId}/page/${pageNumber}`),
   getExamQuestionsForReview: async (examId: number) => {

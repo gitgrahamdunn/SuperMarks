@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ import shutil
 import threading
 import time
 import uuid
+from datetime import timedelta
 from difflib import SequenceMatcher
 from io import StringIO
 from pathlib import Path
@@ -38,12 +40,11 @@ from app.ai.openai_vision import (
 )
 from app import db as db_state
 from app.db import get_session
-from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
+from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
 from app.reporting import front_page_totals_read
 from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_gradebook_xlsx_artifact, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, invalidate_exam_reporting_cache, write_csv_export
 from app.name_utils import compose_student_name, normalize_student_name, split_student_name, submission_display_name, submission_name_parts
-from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
-from app.routers.submissions import get_or_create_front_page_totals_candidates
+from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamIntakeJobRead, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.storage import ensure_dir, reset_dir, relative_to_data
 from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
@@ -56,6 +57,8 @@ _exam_question_locks: dict[int, threading.Lock] = {}
 _exam_question_locks_guard = threading.Lock()
 _parse_job_runner_locks: dict[int, threading.Lock] = {}
 _parse_job_runner_guard = threading.Lock()
+_exam_intake_runner_locks: dict[int, threading.Lock] = {}
+_exam_intake_runner_guard = threading.Lock()
 
 
 def _get_exam_question_lock(exam_id: int) -> threading.Lock:
@@ -74,6 +77,526 @@ def _get_parse_job_runner_lock(job_id: int) -> threading.Lock:
             lock = threading.Lock()
             _parse_job_runner_locks[job_id] = lock
         return lock
+
+
+def _get_exam_intake_runner_lock(exam_id: int) -> threading.Lock:
+    with _exam_intake_runner_guard:
+        lock = _exam_intake_runner_locks.get(exam_id)
+        if lock is None:
+            lock = threading.Lock()
+            _exam_intake_runner_locks[exam_id] = lock
+        return lock
+
+
+def _exam_intake_job_read(job: ExamIntakeJob | None) -> ExamIntakeJobRead | None:
+    if not job or job.id is None:
+        return None
+    metrics: dict[str, object] | None = None
+    raw_metrics = (job.metrics_json or "").strip()
+    if raw_metrics:
+        try:
+            parsed_metrics = json.loads(raw_metrics)
+            if isinstance(parsed_metrics, dict):
+                metrics = parsed_metrics
+        except json.JSONDecodeError:
+            logger.warning("invalid intake metrics payload for job %s", job.id)
+    return ExamIntakeJobRead(
+        id=job.id,
+        exam_id=job.exam_id,
+        bulk_upload_id=job.bulk_upload_id,
+        status=job.status,
+        stage=job.stage,
+        page_count=job.page_count,
+        pages_processed=job.pages_processed,
+        submissions_created=job.submissions_created,
+        metrics=metrics,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )
+
+
+def _latest_exam_intake_job(exam_id: int, session: Session) -> ExamIntakeJob | None:
+    return session.exec(
+        select(ExamIntakeJob).where(ExamIntakeJob.exam_id == exam_id).order_by(ExamIntakeJob.created_at.desc(), ExamIntakeJob.id.desc())
+    ).first()
+
+
+def _latest_exam_intake_jobs_by_exam_id(exam_ids: list[int], session: Session) -> dict[int, ExamIntakeJob]:
+    if not exam_ids:
+        return {}
+    jobs = session.exec(
+        select(ExamIntakeJob)
+        .where(ExamIntakeJob.exam_id.in_(exam_ids))
+        .order_by(ExamIntakeJob.exam_id.asc(), ExamIntakeJob.created_at.desc(), ExamIntakeJob.id.desc())
+    ).all()
+    latest_by_exam_id: dict[int, ExamIntakeJob] = {}
+    for job in jobs:
+        latest_by_exam_id.setdefault(job.exam_id, job)
+    return latest_by_exam_id
+
+
+def _exam_intake_lease_deadline():
+    return utcnow() + timedelta(minutes=5)
+
+
+def _coerce_utc(value):
+    if value is None:
+        return None
+    if getattr(value, "tzinfo", None) is None:
+        return value.replace(tzinfo=utcnow().tzinfo)
+    return value
+
+
+def _claim_exam_intake_job(job_id: int, runner_id: str, session: Session) -> bool:
+    job = session.get(ExamIntakeJob, job_id)
+    if not job:
+        return False
+    if job.status == "complete":
+        return False
+    now = utcnow()
+    lease_expires_at = _coerce_utc(job.lease_expires_at)
+    if job.status == "running" and job.runner_id and job.runner_id != runner_id and lease_expires_at and lease_expires_at > now:
+        return False
+    job.status = "running"
+    job.runner_id = runner_id
+    job.attempt_count = int(job.attempt_count or 0) + 1
+    job.started_at = job.started_at or now
+    job.updated_at = now
+    job.lease_expires_at = _exam_intake_lease_deadline()
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return True
+
+
+def _resume_pending_exam_intake_jobs() -> None:
+    with Session(db_state.engine) as session:
+        now = utcnow()
+        jobs = session.exec(
+            select(ExamIntakeJob)
+            .where(ExamIntakeJob.status.in_(["queued", "running"]))
+            .order_by(ExamIntakeJob.created_at.asc(), ExamIntakeJob.id.asc())
+        ).all()
+        resumable_ids = [
+            job.id for job in jobs
+            if job.id is not None and (
+                job.status == "queued"
+                or job.lease_expires_at is None
+                or _coerce_utc(job.lease_expires_at) <= now
+            )
+        ]
+    for job_id in resumable_ids:
+        thread = threading.Thread(target=_run_exam_intake_job_background_by_job_id, args=(job_id,), daemon=True)
+        thread.start()
+
+
+def _warm_front_page_candidates_background(exam_id: int, submission_ids: list[int]) -> list[int]:
+    from app.routers.submissions import get_or_create_front_page_totals_candidates
+
+    failed_submission_ids: list[int] = []
+
+    def warm_one(submission_id: int) -> None:
+        with Session(db_state.engine) as session:
+            try:
+                get_or_create_front_page_totals_candidates(submission_id, session)
+            except Exception:
+                logger.exception("background front-page candidate warm failed for exam %s submission %s", exam_id, submission_id)
+                failed_submission_ids.append(submission_id)
+
+    worker_count = max(1, min(4, len(submission_ids)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(warm_one, submission_id) for submission_id in submission_ids]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
+
+    return failed_submission_ids
+
+
+def _front_page_review_readiness_failures(submission_ids: list[int], session: Session) -> list[str]:
+    if not submission_ids:
+        return ["No submissions were created."]
+
+    submissions = session.exec(
+        select(Submission)
+        .where(Submission.id.in_(submission_ids))
+        .order_by(Submission.id.asc())
+    ).all()
+    if len(submissions) != len(submission_ids):
+        return ["One or more submissions could not be loaded after intake."]
+
+    pages = session.exec(
+        select(SubmissionPage).where(SubmissionPage.submission_id.in_(submission_ids))
+    ).all()
+    pages_by_submission_id: dict[int, list[SubmissionPage]] = {}
+    for page in pages:
+        pages_by_submission_id.setdefault(page.submission_id, []).append(page)
+
+    failures: list[str] = []
+    for submission in submissions:
+        if not pages_by_submission_id.get(submission.id or 0):
+            failures.append(f"Submission {submission.id} has no built pages.")
+        if submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS and not (submission.front_page_candidates_json or "").strip():
+            failures.append(f"Submission {submission.id} has no front-page candidate payload.")
+    return failures
+
+
+def _mark_exam_review_ready_if_possible(exam_id: int, submission_ids: list[int], *, failed_submission_ids: list[int] | None = None) -> None:
+    failed_submission_ids = failed_submission_ids or []
+    with Session(db_state.engine) as session:
+        exam = session.get(Exam, exam_id)
+        if not exam:
+            return
+        readiness_failures = _front_page_review_readiness_failures(submission_ids, session)
+        if failed_submission_ids:
+            readiness_failures.extend(
+                f"Front-page warm failed for submission {submission_id}."
+                for submission_id in sorted(set(failed_submission_ids))
+            )
+        if readiness_failures:
+            if exam.status != ExamStatus.READY:
+                exam.status = ExamStatus.FAILED
+                session.add(exam)
+                session.commit()
+            raise RuntimeError("; ".join(readiness_failures))
+        if exam.status != ExamStatus.READY:
+            exam.status = ExamStatus.REVIEWING
+            session.add(exam)
+            session.commit()
+
+
+def _warm_and_promote_front_page_review_background(exam_id: int, submission_ids: list[int]) -> None:
+    try:
+        failed_submission_ids = _warm_front_page_candidates_background(exam_id, submission_ids)
+        _mark_exam_review_ready_if_possible(exam_id, submission_ids, failed_submission_ids=failed_submission_ids)
+    except Exception:
+        logger.exception("front-page warm/promote failed for exam %s", exam_id)
+
+
+def _run_exam_intake_job_background_by_job_id(job_id: int) -> None:
+    with Session(db_state.engine) as session:
+        job = session.get(ExamIntakeJob, job_id)
+        if not job:
+            return
+        exam_id = job.exam_id
+    _run_exam_intake_job_background(exam_id, job_id)
+
+
+def _detect_bulk_pages(
+    *,
+    exam: Exam,
+    bulk: ExamBulkUploadFile,
+    rendered_paths: list[Path],
+    session: Session,
+    job: ExamIntakeJob | None = None,
+) -> list[BulkNameDetectionResult]:
+    session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id))
+    detections: list[BulkNameDetectionResult] = []
+    detector = get_bulk_name_detector()
+    detected_exam_title = ""
+    for idx, page_path in enumerate(rendered_paths, start=1):
+        with Image.open(page_path) as image:
+            w, h = image.width, image.height
+        detection: BulkNameDetectionResult | None = None
+        try:
+            detection = detector.detect(page_path, idx, model=_front_page_model(), request_id=uuid.uuid4().hex)
+            if detection.student_name is None or detection.confidence < 0.5:
+                detection = detector.detect(page_path, idx, model=_front_page_model(), request_id=uuid.uuid4().hex)
+        except OpenAIRequestError:
+            detection = BulkNameDetectionResult(page_number=idx, student_name=None, exam_name=None, confidence=0.0, evidence=None)
+        normalized_detected_exam_title = _normalize_exam_title(detection.exam_name)
+        if normalized_detected_exam_title and not _looks_like_same_name(normalized_detected_exam_title, detection.student_name):
+            detected_exam_title = normalized_detected_exam_title
+        session.add(
+            BulkUploadPage(
+                bulk_upload_id=bulk.id,
+                page_number=idx,
+                image_path=str(page_path),
+                width=w,
+                height=h,
+                detected_student_name=detection.student_name,
+                detection_confidence=detection.confidence,
+                detection_evidence_json=json.dumps(detection.evidence or {}),
+            )
+        )
+        detections.append(detection)
+        if job:
+            job.pages_processed = idx
+            job.updated_at = utcnow()
+            session.add(job)
+            session.commit()
+        else:
+            session.flush()
+
+    if detected_exam_title:
+        exam.name = detected_exam_title
+        session.add(exam)
+    if not job:
+        session.commit()
+    return detections
+
+
+def _build_bulk_preview_from_detections(
+    *,
+    upload_files: list[UploadFile] | None = None,
+    bulk: ExamBulkUploadFile,
+    detections: list[BulkNameDetectionResult],
+    roster: str | None,
+) -> tuple[list[BulkUploadCandidate], list[str]]:
+    roster_list: list[str] = []
+    if roster:
+        try:
+            maybe_json = json.loads(roster)
+            if isinstance(maybe_json, list):
+                roster_list = [str(item).strip() for item in maybe_json if str(item).strip()]
+        except json.JSONDecodeError:
+            roster_list = [line.strip() for line in roster.splitlines() if line.strip()]
+
+    if not bulk.stored_path and (
+        (upload_files is not None and len(upload_files) > 1)
+        or (upload_files is None and "uploaded images" in (bulk.original_filename or "").lower())
+    ):
+        return _segment_individual_image_candidates(detections)
+    return _segment_bulk_candidates(detections, roster=roster_list, min_pages_per_student=1)
+
+
+def _finalize_bulk_candidates(
+    *,
+    exam: Exam,
+    bulk: ExamBulkUploadFile,
+    candidates: list[BulkUploadCandidate],
+    session: Session,
+) -> list[SubmissionRead]:
+    pages = session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)).all()
+    if not pages:
+        raise HTTPException(status_code=400, detail="No rendered pages available")
+    page_map = {p.page_number: p for p in pages}
+    max_page = pages[-1].page_number
+    used_pages: set[int] = set()
+    created: list[SubmissionRead] = []
+
+    for candidate in candidates:
+        if candidate.page_start < 1 or candidate.page_end > max_page or candidate.page_end < candidate.page_start:
+            raise HTTPException(status_code=400, detail=f"Invalid page range for {candidate.student_name}")
+        for page_num in range(candidate.page_start, candidate.page_end + 1):
+            if page_num in used_pages:
+                raise HTTPException(status_code=400, detail=f"Overlapping page range at page {page_num}")
+            used_pages.add(page_num)
+
+    for candidate in candidates:
+        candidate_first_name, candidate_last_name = split_student_name(candidate.student_name)
+        submission = Submission(
+            exam_id=exam.id or 0,
+            student_name=compose_student_name(candidate_first_name, candidate_last_name),
+            first_name=candidate_first_name,
+            last_name=candidate_last_name,
+            status=SubmissionStatus.UPLOADED,
+            capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+        )
+        session.add(submission)
+        session.flush()
+
+        page_reads = []
+        submission_files: list[SubmissionFileRead] = []
+        if bulk.stored_path:
+            bulk_extension = Path(bulk.original_filename or "").suffix.lower()
+            file_kind = "pdf" if bulk_extension == ".pdf" else "image"
+            content_type = "application/pdf" if file_kind == "pdf" else "image/jpeg"
+            file_row = SubmissionFile(
+                submission_id=submission.id,
+                file_kind=file_kind,
+                original_filename=bulk.original_filename,
+                stored_path=bulk.stored_path,
+                content_type=content_type,
+                size_bytes=0,
+            )
+            session.add(file_row)
+            session.flush()
+            submission_files.append(
+                SubmissionFileRead(
+                    id=file_row.id,
+                    file_kind=file_row.file_kind,
+                    original_filename=file_row.original_filename,
+                    stored_path=file_row.stored_path,
+                    blob_url=file_row.blob_url,
+                    content_type=file_row.content_type,
+                    size_bytes=file_row.size_bytes,
+                )
+            )
+
+        for idx, page_num in enumerate(range(candidate.page_start, candidate.page_end + 1), start=1):
+            src = page_map[page_num]
+            if not bulk.stored_path:
+                src_path = Path(src.image_path)
+                file_row = SubmissionFile(
+                    submission_id=submission.id,
+                    file_kind="image",
+                    original_filename=src_path.name,
+                    stored_path=str(src_path),
+                    content_type="image/png",
+                    size_bytes=src_path.stat().st_size if src_path.exists() else 0,
+                )
+                session.add(file_row)
+                session.flush()
+                submission_files.append(
+                    SubmissionFileRead(
+                        id=file_row.id,
+                        file_kind=file_row.file_kind,
+                        original_filename=file_row.original_filename,
+                        stored_path=file_row.stored_path,
+                        blob_url=file_row.blob_url,
+                        content_type=file_row.content_type,
+                        size_bytes=file_row.size_bytes,
+                    )
+                )
+            sp = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=src.image_path, width=src.width, height=src.height)
+            session.add(sp)
+            session.flush()
+            page_reads.append(SubmissionPageRead(id=sp.id, page_number=idx, image_path=relative_to_data(Path(src.image_path)), width=src.width, height=src.height))
+        created_first_name, created_last_name = submission_name_parts(submission.first_name, submission.last_name, submission.student_name)
+        created.append(
+            SubmissionRead(
+                id=submission.id,
+                exam_id=submission.exam_id,
+                student_name=submission_display_name(submission.first_name, submission.last_name, submission.student_name),
+                first_name=created_first_name,
+                last_name=created_last_name,
+                status=submission.status,
+                capture_mode=submission.capture_mode,
+                front_page_totals=front_page_totals_read(submission),
+                created_at=submission.created_at,
+                files=submission_files,
+                pages=page_reads,
+            )
+        )
+    return created
+
+
+def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
+    lock = _get_exam_intake_runner_lock(exam_id)
+    if not lock.acquire(blocking=False):
+        return
+    overall_started = time.perf_counter()
+    stage_started = overall_started
+    intake_metrics: dict[str, object] = {}
+    runner_id = uuid.uuid4().hex
+    try:
+        with Session(db_state.engine) as session:
+            if not _claim_exam_intake_job(job_id, runner_id, session):
+                return
+            job = session.get(ExamIntakeJob, job_id)
+            exam = session.get(Exam, exam_id)
+            if not job or not exam:
+                return
+            bulk = session.get(ExamBulkUploadFile, job.bulk_upload_id) if job.bulk_upload_id else None
+            if not bulk:
+                job.status = "failed"
+                job.stage = "missing_bulk"
+                job.error_message = "Bulk upload payload is missing."
+                job.updated_at = utcnow()
+                intake_metrics["failed_stage"] = "missing_bulk"
+                intake_metrics["total_ms"] = round((time.perf_counter() - overall_started) * 1000, 1)
+                job.metrics_json = json.dumps(intake_metrics)
+                job.runner_id = runner_id
+                job.lease_expires_at = None
+                job.finished_at = utcnow()
+                session.add(job)
+                session.commit()
+                return
+            job.status = "running"
+            job.stage = "detecting_names"
+            job.updated_at = utcnow()
+            job.runner_id = runner_id
+            job.lease_expires_at = _exam_intake_lease_deadline()
+            job.metrics_json = json.dumps(intake_metrics)
+            session.add(job)
+            session.commit()
+
+            rendered_paths = [Path(row.image_path) for row in session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)).all()]
+            intake_metrics["page_count"] = len(rendered_paths)
+            detections = _detect_bulk_pages(exam=exam, bulk=bulk, rendered_paths=rendered_paths, session=session, job=job)
+            intake_metrics["detecting_names_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            job.stage = "creating_submissions"
+            job.updated_at = utcnow()
+            job.lease_expires_at = _exam_intake_lease_deadline()
+            stage_started = time.perf_counter()
+            job.metrics_json = json.dumps(intake_metrics)
+            session.add(job)
+            session.commit()
+
+            candidates, _warnings = _build_bulk_preview_from_detections(upload_files=None, bulk=bulk, detections=detections, roster=None)
+            created = _finalize_bulk_candidates(exam=exam, bulk=bulk, candidates=candidates, session=session)
+            intake_metrics["creating_submissions_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            intake_metrics["candidate_count"] = len(candidates)
+            job.submissions_created = len(created)
+            job.stage = "warming_review"
+            job.updated_at = utcnow()
+            job.lease_expires_at = _exam_intake_lease_deadline()
+            stage_started = time.perf_counter()
+            job.metrics_json = json.dumps(intake_metrics)
+            session.add(job)
+            exam.status = ExamStatus.DRAFT
+            session.add(exam)
+            session.commit()
+
+        created_submission_ids = [item.id for item in created]
+        failed_submission_ids: list[int] = []
+        if created_submission_ids:
+            failed_submission_ids = _warm_front_page_candidates_background(exam_id, created_submission_ids)
+        intake_metrics["warming_review_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        intake_metrics["total_ms"] = round((time.perf_counter() - overall_started) * 1000, 1)
+
+        with Session(db_state.engine) as session:
+            job = session.get(ExamIntakeJob, job_id)
+            exam = session.get(Exam, exam_id)
+            readiness_failures = _front_page_review_readiness_failures(created_submission_ids, session)
+            if failed_submission_ids:
+                readiness_failures.extend(
+                    f"Front-page warm failed for submission {submission_id}."
+                    for submission_id in sorted(set(failed_submission_ids))
+                )
+            if job:
+                job.status = "failed" if readiness_failures else "complete"
+                job.stage = "review_not_ready" if readiness_failures else "complete"
+                job.pages_processed = job.page_count
+                job.updated_at = utcnow()
+                job.runner_id = runner_id
+                job.lease_expires_at = None
+                job.finished_at = utcnow()
+                if readiness_failures:
+                    intake_metrics["failed_stage"] = "review_not_ready"
+                job.metrics_json = json.dumps(intake_metrics)
+                job.error_message = "; ".join(readiness_failures) if readiness_failures else None
+                session.add(job)
+            if exam and exam.status != ExamStatus.READY:
+                exam.status = ExamStatus.FAILED if readiness_failures else ExamStatus.REVIEWING
+                session.add(exam)
+            session.commit()
+            invalidate_exam_reporting_cache(exam_id)
+        logger.info("exam intake finished exam=%s job=%s metrics=%s", exam_id, job_id, intake_metrics)
+    except Exception as exc:
+        logger.exception("exam intake job failed for exam %s job %s", exam_id, job_id)
+        intake_metrics["failed_stage"] = intake_metrics.get("failed_stage") or "exception"
+        intake_metrics["total_ms"] = round((time.perf_counter() - overall_started) * 1000, 1)
+        with Session(db_state.engine) as session:
+            job = session.get(ExamIntakeJob, job_id)
+            exam = session.get(Exam, exam_id)
+            if job:
+                job.status = "failed"
+                job.error_message = str(exc)
+                job.updated_at = utcnow()
+                job.runner_id = runner_id
+                job.lease_expires_at = None
+                job.finished_at = utcnow()
+                job.metrics_json = json.dumps(intake_metrics)
+                session.add(job)
+            if exam and exam.status != ExamStatus.READY:
+                exam.status = ExamStatus.FAILED
+                session.add(exam)
+            session.commit()
+        logger.error("exam intake failed exam=%s job=%s metrics=%s", exam_id, job_id, intake_metrics)
+    finally:
+        lock.release()
 
 
 class KeyPageBuildError(RuntimeError):
@@ -231,55 +754,62 @@ def _remove_tree(path: Path) -> None:
 
 
 def _delete_exam_resources(exam_id: int, session: Session) -> None:
-    exam = session.get(Exam, exam_id)
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
+    intake_lock = _get_exam_intake_runner_lock(exam_id)
+    intake_lock.acquire()
+    try:
+        exam = session.get(Exam, exam_id)
+        if not exam:
+            raise HTTPException(status_code=404, detail="Exam not found")
 
-    submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id)).all()
-    questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
-    parse_jobs = session.exec(select(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id)).all()
-    bulk_uploads = session.exec(select(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id)).all()
+        submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id)).all()
+        questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
+        parse_jobs = session.exec(select(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id)).all()
+        bulk_uploads = session.exec(select(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id)).all()
 
-    for submission in submissions:
-        session.exec(delete(SubmissionPage).where(SubmissionPage.submission_id == submission.id))
-        session.exec(delete(SubmissionFile).where(SubmissionFile.submission_id == submission.id))
-        session.exec(delete(AnswerCrop).where(AnswerCrop.submission_id == submission.id))
-        session.exec(delete(Transcription).where(Transcription.submission_id == submission.id))
-        session.exec(delete(GradeResult).where(GradeResult.submission_id == submission.id))
+        for submission in submissions:
+            session.exec(delete(SubmissionPage).where(SubmissionPage.submission_id == submission.id))
+            session.exec(delete(SubmissionFile).where(SubmissionFile.submission_id == submission.id))
+            session.exec(delete(AnswerCrop).where(AnswerCrop.submission_id == submission.id))
+            session.exec(delete(Transcription).where(Transcription.submission_id == submission.id))
+            session.exec(delete(GradeResult).where(GradeResult.submission_id == submission.id))
 
-    for question in questions:
-        session.exec(delete(QuestionRegion).where(QuestionRegion.question_id == question.id))
-        session.exec(delete(QuestionParseEvidence).where(QuestionParseEvidence.question_id == question.id))
-        session.exec(delete(AnswerCrop).where(AnswerCrop.question_id == question.id))
-        session.exec(delete(Transcription).where(Transcription.question_id == question.id))
-        session.exec(delete(GradeResult).where(GradeResult.question_id == question.id))
+        for question in questions:
+            session.exec(delete(QuestionRegion).where(QuestionRegion.question_id == question.id))
+            session.exec(delete(QuestionParseEvidence).where(QuestionParseEvidence.question_id == question.id))
+            session.exec(delete(AnswerCrop).where(AnswerCrop.question_id == question.id))
+            session.exec(delete(Transcription).where(Transcription.question_id == question.id))
+            session.exec(delete(GradeResult).where(GradeResult.question_id == question.id))
 
-    for job in parse_jobs:
-        session.exec(delete(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id))
+        for job in parse_jobs:
+            session.exec(delete(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id))
 
-    for bulk_upload in bulk_uploads:
-        session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload.id))
+        for bulk_upload in bulk_uploads:
+            session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload.id))
 
-    session.exec(delete(Submission).where(Submission.exam_id == exam_id))
-    session.exec(delete(Question).where(Question.exam_id == exam_id))
-    session.exec(delete(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id))
-    session.exec(delete(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id))
-    session.exec(delete(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id))
-    session.exec(delete(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id))
-    session.delete(exam)
-    session.commit()
+        session.exec(delete(Submission).where(Submission.exam_id == exam_id))
+        session.exec(delete(Question).where(Question.exam_id == exam_id))
+        session.exec(delete(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id))
+        session.exec(delete(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id))
+        session.exec(delete(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id))
+        session.exec(delete(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id))
+        session.exec(delete(ExamIntakeJob).where(ExamIntakeJob.exam_id == exam_id))
+        session.delete(exam)
+        session.commit()
 
-    _exam_question_locks.pop(exam_id, None)
-    for job in parse_jobs:
-        _parse_job_runner_locks.pop(job.id or 0, None)
+        _exam_question_locks.pop(exam_id, None)
+        for job in parse_jobs:
+            _parse_job_runner_locks.pop(job.id or 0, None)
+        _exam_intake_runner_locks.pop(exam_id, None)
 
-    _remove_tree(settings.data_path / "exams" / str(exam_id))
-    _remove_tree(settings.data_path / "pages" / str(exam_id))
-    _remove_tree(settings.data_path / "crops" / str(exam_id))
-    _remove_tree(settings.data_path / "uploads" / str(exam_id))
-    _remove_tree(settings.data_path / "cache" / "keys" / str(exam_id))
-    _remove_tree(settings.data_path / "cache" / "key-pages" / str(exam_id))
-    _remove_tree(settings.data_path / "objects" / "exams" / str(exam_id))
+        _remove_tree(settings.data_path / "exams" / str(exam_id))
+        _remove_tree(settings.data_path / "pages" / str(exam_id))
+        _remove_tree(settings.data_path / "crops" / str(exam_id))
+        _remove_tree(settings.data_path / "uploads" / str(exam_id))
+        _remove_tree(settings.data_path / "cache" / "keys" / str(exam_id))
+        _remove_tree(settings.data_path / "cache" / "key-pages" / str(exam_id))
+        _remove_tree(settings.data_path / "objects" / "exams" / str(exam_id))
+    finally:
+        intake_lock.release()
 
 
 def build_key_pages_for_exam(exam_id: int, session: Session) -> list[Path]:
@@ -485,13 +1015,132 @@ def create_exam(payload: ExamCreate, session: Session = Depends(get_session)) ->
     return exam
 
 
-def _exam_read(exam: Exam) -> ExamRead:
+@router.post("/{exam_id}/intake-jobs/start", response_model=ExamIntakeJobRead, status_code=status.HTTP_202_ACCEPTED)
+def start_exam_intake_job(
+    exam_id: int,
+    files: list[UploadFile] | None = File(default=None),
+    file: UploadFile | None = File(default=None),
+    session: Session = Depends(get_session),
+) -> ExamIntakeJobRead:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    latest_job = _latest_exam_intake_job(exam_id, session)
+    if latest_job and latest_job.status in {"queued", "running"}:
+        return _exam_intake_job_read(latest_job)
+
+    upload_files = list(files or [])
+    if file is not None:
+        upload_files.append(file)
+    if not upload_files:
+        raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
+
+    bulk = ExamBulkUploadFile(exam_id=exam_id, original_filename="bulk-upload", stored_path="")
+    session.add(bulk)
+    session.commit()
+    session.refresh(bulk)
+
+    render_started = time.perf_counter()
+    output_dir = reset_dir(_bulk_pages_dir(exam_id, bulk.id))
+    rendered_paths, filename, stored_path = _render_bulk_upload_files(upload_files, output_dir)
+    render_upload_ms = round((time.perf_counter() - render_started) * 1000, 1)
+    bulk.original_filename = filename
+    bulk.stored_path = stored_path
+    session.add(bulk)
+    session.commit()
+    session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id))
+    for idx, page_path in enumerate(rendered_paths, start=1):
+        with Image.open(page_path) as image:
+            w, h = image.width, image.height
+        session.add(
+            BulkUploadPage(
+                bulk_upload_id=bulk.id,
+                page_number=idx,
+                image_path=str(page_path),
+                width=w,
+                height=h,
+                detected_student_name=None,
+                detection_confidence=0.0,
+                detection_evidence_json="{}",
+            )
+        )
+    exam.status = ExamStatus.DRAFT
+    session.add(exam)
+    session.commit()
+
+    job = ExamIntakeJob(
+        exam_id=exam_id,
+        bulk_upload_id=bulk.id,
+        status="queued",
+        stage="queued",
+        page_count=len(rendered_paths),
+        pages_processed=0,
+        submissions_created=0,
+        metrics_json=json.dumps({"render_upload_ms": render_upload_ms, "page_count": len(rendered_paths)}),
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+
+    thread = threading.Thread(target=_run_exam_intake_job_background, args=(exam_id, job.id or 0), daemon=True)
+    thread.start()
+    return _exam_intake_job_read(job)
+
+
+@router.get("/{exam_id}/intake-jobs/latest", response_model=ExamIntakeJobRead | None)
+def get_latest_exam_intake_job(exam_id: int, session: Session = Depends(get_session)) -> ExamIntakeJobRead | None:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    return _exam_intake_job_read(_latest_exam_intake_job(exam_id, session))
+
+
+@router.post("/{exam_id}/intake-jobs/retry", response_model=ExamIntakeJobRead, status_code=status.HTTP_202_ACCEPTED)
+def retry_exam_intake_job(exam_id: int, session: Session = Depends(get_session)) -> ExamIntakeJobRead:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    latest_job = _latest_exam_intake_job(exam_id, session)
+    if not latest_job or not latest_job.bulk_upload_id:
+        raise HTTPException(status_code=400, detail="No intake job available to retry")
+    if latest_job.status in {"queued", "running"}:
+        return _exam_intake_job_read(latest_job)
+
+    bulk = session.get(ExamBulkUploadFile, latest_job.bulk_upload_id)
+    if not bulk:
+        raise HTTPException(status_code=400, detail="Bulk upload payload is missing")
+
+    retry_job = ExamIntakeJob(
+        exam_id=exam_id,
+        bulk_upload_id=bulk.id,
+        status="queued",
+        stage="queued",
+        page_count=latest_job.page_count,
+        pages_processed=0,
+        submissions_created=0,
+    )
+    exam.status = ExamStatus.DRAFT
+    session.add(exam)
+    session.add(retry_job)
+    session.commit()
+    session.refresh(retry_job)
+    thread = threading.Thread(target=_run_exam_intake_job_background, args=(exam_id, retry_job.id or 0), daemon=True)
+    thread.start()
+    return _exam_intake_job_read(retry_job)
+
+
+def _exam_read(exam: Exam, latest_intake_job: ExamIntakeJob | None = None) -> ExamRead:
+    if latest_intake_job is None and exam.id:
+        with Session(db_state.engine) as session:
+            latest_intake_job = _latest_exam_intake_job(exam.id or 0, session)
     return ExamRead(
         id=exam.id,
         name=exam.name,
         created_at=exam.created_at,
         teacher_style_profile_json=exam.teacher_style_profile_json,
         status=exam.status,
+        intake_job=_exam_intake_job_read(latest_intake_job),
     )
 
 
@@ -517,10 +1166,33 @@ def _list_exam_submissions_read(exam_id: int, session: Session) -> list[Submissi
         .where(Submission.exam_id == exam_id)
         .order_by(Submission.created_at.desc(), Submission.id.desc())
     ).all()
+    if not submissions:
+        return []
+
+    submission_ids = [submission.id for submission in submissions if submission.id is not None]
+    files = session.exec(
+        select(SubmissionFile)
+        .where(SubmissionFile.submission_id.in_(submission_ids))
+        .order_by(SubmissionFile.submission_id.asc(), SubmissionFile.id.asc())
+    ).all()
+    pages = session.exec(
+        select(SubmissionPage)
+        .where(SubmissionPage.submission_id.in_(submission_ids))
+        .order_by(SubmissionPage.submission_id.asc(), SubmissionPage.page_number.asc())
+    ).all()
+
+    files_by_submission_id: dict[int, list[SubmissionFile]] = {}
+    for file_row in files:
+        files_by_submission_id.setdefault(file_row.submission_id, []).append(file_row)
+
+    pages_by_submission_id: dict[int, list[SubmissionPage]] = {}
+    for page_row in pages:
+        pages_by_submission_id.setdefault(page_row.submission_id, []).append(page_row)
 
     output: list[SubmissionRead] = []
     for sub in submissions:
-        files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == sub.id).order_by(SubmissionFile.id)).all()
+        submission_files = files_by_submission_id.get(sub.id or 0, [])
+        submission_pages = pages_by_submission_id.get(sub.id or 0, [])
         first_name, last_name = submission_name_parts(sub.first_name, sub.last_name, sub.student_name)
         output.append(
             SubmissionRead(
@@ -533,8 +1205,8 @@ def _list_exam_submissions_read(exam_id: int, session: Session) -> list[Submissi
                 capture_mode=sub.capture_mode,
                 front_page_totals=front_page_totals_read(sub),
                 created_at=sub.created_at,
-                files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in files],
-                pages=[],
+                files=[SubmissionFileRead(id=f.id, file_kind=f.file_kind, original_filename=f.original_filename, stored_path=f.stored_path, blob_url=f.blob_url, content_type=f.content_type, size_bytes=f.size_bytes) for f in submission_files],
+                pages=[SubmissionPageRead(id=p.id, page_number=p.page_number, image_path=relative_to_data(Path(p.image_path)), width=p.width, height=p.height) for p in submission_pages],
             )
         )
     return output
@@ -543,7 +1215,8 @@ def _list_exam_submissions_read(exam_id: int, session: Session) -> list[Submissi
 @router.get("", response_model=list[ExamRead])
 def list_exams(session: Session = Depends(get_session)) -> list[Exam]:
     exams = session.exec(select(Exam).order_by(Exam.created_at.desc(), Exam.id.desc())).all()
-    return list(exams)
+    latest_jobs = _latest_exam_intake_jobs_by_exam_id([exam.id for exam in exams if exam.id is not None], session)
+    return [_exam_read(exam, latest_jobs.get(exam.id or 0)) for exam in exams]
 
 
 @router.get("/{exam_id}", response_model=ExamDetail)
@@ -875,6 +1548,15 @@ def _segment_bulk_candidates(
     last_evidence: NameEvidence | None = None
     missing_run = 0
 
+    def evidence_near_header(det: BulkNameDetectionResult) -> bool:
+        evidence = det.evidence or {}
+        try:
+            y = float(evidence.get("y", 0.0))
+            h = float(evidence.get("h", 0.0))
+        except (TypeError, ValueError):
+            return True
+        return (y + h) <= 0.35
+
     def finalize(end_page: int, needs_review: bool = False) -> None:
         nonlocal candidates, current_start, confidences, last_evidence
         if end_page < current_start:
@@ -911,6 +1593,10 @@ def _segment_bulk_candidates(
                 missing_run = 0
                 continue
             if proposed_name != current_name:
+                if det.confidence < 0.8 or not evidence_near_header(det):
+                    confidences.append(max(confidences[-1] if confidences else det.confidence, det.confidence, 0.4))
+                    missing_run = 0
+                    continue
                 finalize(det.page_number - 1)
                 current_name = proposed_name
                 current_start = det.page_number
@@ -928,6 +1614,35 @@ def _segment_bulk_candidates(
                 confidences.append(max(confidences[-1] if confidences else 0.4, 0.4))
 
     finalize(detections[-1].page_number, needs_review=missing_run > max_carry_forward_pages)
+    return candidates, warnings
+
+
+def _segment_individual_image_candidates(detections: list[BulkNameDetectionResult]) -> tuple[list[BulkUploadCandidate], list[str]]:
+    candidates: list[BulkUploadCandidate] = []
+    warnings: list[str] = []
+    for detection in detections:
+        proposed_name = normalize_student_name((detection.student_name or "").strip() or "Unknown Student")
+        evidence = detection.evidence or {}
+        name_evidence = None
+        if evidence:
+            name_evidence = NameEvidence(
+                page_number=detection.page_number,
+                x=float(evidence.get("x", 0.0)),
+                y=float(evidence.get("y", 0.0)),
+                w=float(evidence.get("w", 0.0)),
+                h=float(evidence.get("h", 0.0)),
+            )
+        candidates.append(
+            BulkUploadCandidate(
+                candidate_id=uuid.uuid4().hex,
+                student_name=proposed_name,
+                confidence=round(float(detection.confidence or 0.0), 3),
+                page_start=detection.page_number,
+                page_end=detection.page_number,
+                needs_review=proposed_name == "Unknown Student",
+                name_evidence=name_evidence,
+            )
+        )
     return candidates, warnings
 
 
@@ -996,7 +1711,8 @@ def create_bulk_submission_preview(
 
     if detected_exam_title:
         exam.name = detected_exam_title
-        session.add(exam)
+    exam.status = ExamStatus.REVIEWING
+    session.add(exam)
 
     session.commit()
 
@@ -1009,7 +1725,10 @@ def create_bulk_submission_preview(
         except json.JSONDecodeError:
             roster_list = [line.strip() for line in roster.splitlines() if line.strip()]
 
-    candidates, warnings = _segment_bulk_candidates(detections, roster=roster_list, min_pages_per_student=max(min_pages_per_student, 1))
+    if not stored_path and len(upload_files) > 1:
+        candidates, warnings = _segment_individual_image_candidates(detections)
+    else:
+        candidates, warnings = _segment_bulk_candidates(detections, roster=roster_list, min_pages_per_student=max(min_pages_per_student, 1))
     return BulkUploadPreviewResponse(
         bulk_upload_id=bulk.id,
         page_count=len(rendered_paths),
@@ -1026,7 +1745,10 @@ def get_bulk_submission_preview(exam_id: int, bulk_upload_id: int, session: Sess
 
     pages = session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload_id).order_by(BulkUploadPage.page_number)).all()
     detections = [BulkNameDetectionResult(page_number=p.page_number, student_name=p.detected_student_name, exam_name=None, confidence=p.detection_confidence, evidence=json.loads(p.detection_evidence_json or "{}")) for p in pages]
-    candidates, warnings = _segment_bulk_candidates(detections, roster=[], min_pages_per_student=1)
+    if not bulk.stored_path and len(pages) > 1:
+        candidates, warnings = _segment_individual_image_candidates(detections)
+    else:
+        candidates, warnings = _segment_bulk_candidates(detections, roster=[], min_pages_per_student=1)
     return BulkUploadPreviewResponse(bulk_upload_id=bulk_upload_id, page_count=len(pages), candidates=candidates, warnings=warnings)
 
 
@@ -1055,6 +1777,10 @@ def finalize_bulk_submission_preview(
     payload: BulkUploadFinalizeRequest,
     session: Session = Depends(get_session),
 ) -> BulkUploadFinalizeResponse:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
     bulk = session.get(ExamBulkUploadFile, bulk_upload_id)
     if not bulk or bulk.exam_id != exam_id:
         raise HTTPException(status_code=404, detail="Bulk upload not found")
@@ -1068,6 +1794,7 @@ def finalize_bulk_submission_preview(
     used_pages: set[int] = set()
     warnings: list[str] = []
     created: list[SubmissionRead] = []
+    created_submission_ids: list[int] = []
 
     for candidate in payload.candidates:
         if candidate.page_start < 1 or candidate.page_end > max_page or candidate.page_end < candidate.page_start:
@@ -1152,6 +1879,7 @@ def finalize_bulk_submission_preview(
             session.flush()
             page_reads.append(SubmissionPageRead(id=sp.id, page_number=idx, image_path=relative_to_data(Path(src.image_path)), width=src.width, height=src.height))
         created_first_name, created_last_name = submission_name_parts(submission.first_name, submission.last_name, submission.student_name)
+        created_submission_ids.append(submission.id)
         created.append(
             SubmissionRead(
                 id=submission.id,
@@ -1168,16 +1896,17 @@ def finalize_bulk_submission_preview(
             )
         )
 
-        if submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS:
-            try:
-                get_or_create_front_page_totals_candidates(submission.id, session)
-            except HTTPException:
-                logger.warning("front-page candidate precompute skipped for submission %s", submission.id)
-            except Exception:
-                logger.exception("front-page candidate precompute failed for submission %s", submission.id)
-
+    exam.status = ExamStatus.DRAFT
+    session.add(exam)
     session.commit()
     invalidate_exam_reporting_cache(exam_id)
+    if created_submission_ids:
+        thread = threading.Thread(
+            target=_warm_and_promote_front_page_review_background,
+            args=(exam_id, created_submission_ids),
+            daemon=True,
+        )
+        thread.start()
     return BulkUploadFinalizeResponse(submissions=created, warnings=warnings)
 
 

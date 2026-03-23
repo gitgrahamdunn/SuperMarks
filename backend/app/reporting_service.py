@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 import json
 import re
 import threading
@@ -21,8 +21,9 @@ from app.reporting import accumulate_objective_totals, build_exam_objective_repo
 from app.schemas import ExamCompletionSummary, ExamMarkingDashboardResponse, SubmissionDashboardRow
 
 
-_EXAM_REPORTING_CONTEXT_CACHE: dict[int, "ExamReportingContext"] = {}
+_EXAM_REPORTING_CONTEXT_CACHE: "OrderedDict[int, ExamReportingContext]" = OrderedDict()
 _EXAM_REPORTING_CONTEXT_CACHE_LOCK = threading.Lock()
+_EXAM_REPORTING_CONTEXT_CACHE_MAX = 32
 
 
 @dataclass
@@ -629,6 +630,11 @@ def load_exam_reporting_context(exam_id: int, session: Session) -> ExamReporting
     with _EXAM_REPORTING_CONTEXT_CACHE_LOCK:
         cached = _EXAM_REPORTING_CONTEXT_CACHE.get(exam_id)
     if cached is not None:
+        with _EXAM_REPORTING_CONTEXT_CACHE_LOCK:
+            cached_again = _EXAM_REPORTING_CONTEXT_CACHE.pop(exam_id, None)
+            if cached_again is not None:
+                _EXAM_REPORTING_CONTEXT_CACHE[exam_id] = cached_again
+                return cached_again
         return cached
 
     exam = session.get(Exam, exam_id)
@@ -657,6 +663,8 @@ def load_exam_reporting_context(exam_id: int, session: Session) -> ExamReporting
     )
     with _EXAM_REPORTING_CONTEXT_CACHE_LOCK:
         _EXAM_REPORTING_CONTEXT_CACHE[exam_id] = context
+        while len(_EXAM_REPORTING_CONTEXT_CACHE) > _EXAM_REPORTING_CONTEXT_CACHE_MAX:
+            _EXAM_REPORTING_CONTEXT_CACHE.popitem(last=False)
     return context
 
 

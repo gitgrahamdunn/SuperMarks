@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { AutoGrowTextarea } from '../components/AutoGrowTextarea';
 import { formatStudentName, formatStudentNameParts, splitStudentName } from '../lib/nameFormat';
@@ -15,9 +15,29 @@ const frontPageCandidateValueCache = new Map<number, FrontPageTotalsCandidate>()
 const frontPageCandidatePromiseCache = new Map<number, Promise<FrontPageTotalsCandidate>>();
 const frontPageSubmissionValueCache = new Map<number, SubmissionRead>();
 const frontPageSubmissionPromiseCache = new Map<number, Promise<SubmissionRead>>();
+const FRONT_PAGE_CACHE_MAX = 24;
+const FRONT_PAGE_PREFETCH_WINDOW = 3;
+
+type FrontPageRouteState = {
+  submission?: SubmissionRead | null;
+  examSubmissions?: SubmissionRead[] | null;
+  candidateTotals?: FrontPageTotalsCandidate | null;
+};
 
 function getCachedFrontPageCandidates(submissionId: number): FrontPageTotalsCandidate | null {
   return frontPageCandidateValueCache.get(submissionId) ?? null;
+}
+
+function rememberCacheEntry<T>(cache: Map<number, T>, key: number, value: T): void {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+  cache.set(key, value);
+  while (cache.size > FRONT_PAGE_CACHE_MAX) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey == null) break;
+    cache.delete(oldestKey);
+  }
 }
 
 async function loadFrontPageCandidatesCached(submissionId: number): Promise<FrontPageTotalsCandidate> {
@@ -29,7 +49,7 @@ async function loadFrontPageCandidatesCached(submissionId: number): Promise<Fron
 
   const request = api.getFrontPageTotalsCandidates(submissionId)
     .then((payload) => {
-      frontPageCandidateValueCache.set(submissionId, payload);
+      rememberCacheEntry(frontPageCandidateValueCache, submissionId, payload);
       frontPageCandidatePromiseCache.delete(submissionId);
       return payload;
     })
@@ -55,7 +75,7 @@ async function loadFrontPageSubmissionCached(submissionId: number): Promise<Subm
 
   const request = api.getSubmission(submissionId)
     .then((payload) => {
-      frontPageSubmissionValueCache.set(submissionId, payload);
+      rememberCacheEntry(frontPageSubmissionValueCache, submissionId, payload);
       frontPageSubmissionPromiseCache.delete(submissionId);
       return payload;
     })
@@ -171,16 +191,18 @@ export function SubmissionFrontPageTotalsPage() {
   const params = useParams();
   const submissionId = Number(params.submissionId);
   const navigate = useNavigate();
+  const location = useLocation();
+  const routeState = (location.state as FrontPageRouteState | null) ?? null;
   const [searchParams] = useSearchParams();
   const examId = Number(searchParams.get('examId'));
   const returnTo = searchParams.get('returnTo')?.trim() || `/exams/${examId}`;
   const returnLabel = searchParams.get('returnLabel')?.trim() || 'Back to Exam queue';
   const { showError, showSuccess } = useToast();
 
-  const [submission, setSubmission] = useState<SubmissionRead | null>(null);
-  const [examSubmissions, setExamSubmissions] = useState<SubmissionRead[]>([]);
+  const [submission, setSubmission] = useState<SubmissionRead | null>(routeState?.submission ?? null);
+  const [examSubmissions, setExamSubmissions] = useState<SubmissionRead[]>(routeState?.examSubmissions ?? []);
   const [questions, setQuestions] = useState<QuestionRead[]>([]);
-  const [candidateTotals, setCandidateTotals] = useState<FrontPageTotalsCandidate | null>(null);
+  const [candidateTotals, setCandidateTotals] = useState<FrontPageTotalsCandidate | null>(routeState?.candidateTotals ?? null);
   const [candidateError, setCandidateError] = useState<string | null>(null);
   const [isCandidateLoading, setIsCandidateLoading] = useState(true);
   const [candidateLoadSeconds, setCandidateLoadSeconds] = useState(0);
@@ -195,14 +217,32 @@ export function SubmissionFrontPageTotalsPage() {
   const [saving, setSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
 
+  const getOrderedFrontPageSubmissions = (rows: SubmissionRead[]) =>
+    rows
+      .filter((candidate) => candidate.capture_mode === 'front_page_totals')
+      .sort((a, b) => a.id - b.id);
+
+  const findNextFrontPageSubmission = (rows: SubmissionRead[], currentId: number) => {
+    const ordered = getOrderedFrontPageSubmissions(rows);
+    const currentIndex = ordered.findIndex((row) => row.id === currentId);
+    if (currentIndex >= 0) {
+      for (let index = currentIndex + 1; index < ordered.length; index += 1) {
+        if (!ordered[index].front_page_totals?.confirmed) return ordered[index];
+      }
+    }
+    return ordered.find((candidate) => !candidate.front_page_totals?.confirmed && candidate.id !== currentId) ?? null;
+  };
+
   useEffect(() => {
     if (!submissionId || !examId) return;
     let cancelled = false;
 
     const loadWorkspace = async () => {
       try {
-        const cachedSubmission = getCachedFrontPageSubmission(submissionId);
+        const initialRouteSubmission = routeState?.submission && routeState.submission.pages.length > 0 ? routeState.submission : null;
+        const cachedSubmission = initialRouteSubmission ?? getCachedFrontPageSubmission(submissionId);
         if (cachedSubmission) {
+          rememberCacheEntry(frontPageSubmissionValueCache, submissionId, cachedSubmission);
           const initialState = buildInitialFrontPageFormState(questions, cachedSubmission.front_page_totals, null, cachedSubmission.student_name);
           setSubmission(cachedSubmission);
           setFirstNameInput(cachedSubmission.first_name || splitStudentName(cachedSubmission.student_name).firstName);
@@ -219,13 +259,14 @@ export function SubmissionFrontPageTotalsPage() {
         }
 
         const [submissionData, questionData, submissionRows] = await Promise.all([
-          loadFrontPageSubmissionCached(submissionId),
+          initialRouteSubmission ? Promise.resolve(initialRouteSubmission) : loadFrontPageSubmissionCached(submissionId),
           api.listQuestions(examId),
-          api.listExamSubmissions(examId),
+          routeState?.examSubmissions ? Promise.resolve(routeState.examSubmissions) : api.listExamSubmissions(examId),
         ]);
         if (cancelled) return;
 
         const initialState = buildInitialFrontPageFormState(questionData, submissionData.front_page_totals, null, submissionData.student_name);
+        rememberCacheEntry(frontPageSubmissionValueCache, submissionId, submissionData);
         setSubmission(submissionData);
         setExamSubmissions(submissionRows);
         setQuestions(questionData);
@@ -235,7 +276,7 @@ export function SubmissionFrontPageTotalsPage() {
         setOverallMaxMarks(initialState.overallMaxMarks);
         setTeacherNote(initialState.teacherNote);
         setObjectiveScores(initialState.objectiveScores);
-        setCandidateTotals(null);
+        setCandidateTotals(routeState?.candidateTotals ?? null);
         setCandidateError(null);
         setSelectedPageNumber((current) => (
           submissionData.pages.some((page) => page.page_number === current)
@@ -252,7 +293,7 @@ export function SubmissionFrontPageTotalsPage() {
     return () => {
       cancelled = true;
     };
-  }, [examId, showError, submissionId]);
+  }, [examId, routeState, showError, submissionId]);
 
   useEffect(() => {
     if (!submission) return;
@@ -269,8 +310,9 @@ export function SubmissionFrontPageTotalsPage() {
       }
 
       try {
-        const cachedCandidate = getCachedFrontPageCandidates(submissionId);
+        const cachedCandidate = routeState?.candidateTotals ?? getCachedFrontPageCandidates(submissionId);
         if (cachedCandidate) {
+          rememberCacheEntry(frontPageCandidateValueCache, submissionId, cachedCandidate);
           setCandidateTotals(cachedCandidate);
           setCandidateError(null);
           setIsCandidateLoading(false);
@@ -289,7 +331,7 @@ export function SubmissionFrontPageTotalsPage() {
         setIsCandidateLoading(true);
         setCandidateLoadSeconds(0);
         setCandidateError(null);
-        setCandidateTotals(null);
+        setCandidateTotals(routeState?.candidateTotals ?? null);
         setAllowManualReviewWithoutCandidates(false);
         const candidateData = await loadFrontPageCandidatesCached(submissionId);
         if (cancelled) return;
@@ -350,7 +392,9 @@ export function SubmissionFrontPageTotalsPage() {
     let cancelled = false;
 
     const warmQueue = async () => {
-      const warmTargets = pendingFrontPageSubmissionIds.filter((candidateId) => !getCachedFrontPageCandidates(candidateId));
+      const warmTargets = pendingFrontPageSubmissionIds
+        .filter((candidateId) => !getCachedFrontPageCandidates(candidateId))
+        .slice(0, FRONT_PAGE_PREFETCH_WINDOW);
       if (warmTargets.length === 0 || cancelled) return;
       await Promise.allSettled(warmTargets.map((candidateId) => loadFrontPageCandidatesCached(candidateId)));
     };
@@ -361,18 +405,10 @@ export function SubmissionFrontPageTotalsPage() {
     };
   }, [frontPageSubmissions, submissionId]);
 
-  const nextFrontPageSubmission = useMemo(() => {
-    if (!submission) return null;
-    const currentIndex = frontPageSubmissions.findIndex((row) => row.id === submission.id);
-    if (currentIndex < 0) return null;
-
-    for (let index = currentIndex + 1; index < frontPageSubmissions.length; index += 1) {
-      const candidate = frontPageSubmissions[index];
-      if (!candidate.front_page_totals?.confirmed) return candidate;
-    }
-
-    return frontPageSubmissions.find((candidate) => !candidate.front_page_totals?.confirmed && candidate.id !== submission.id) ?? null;
-  }, [frontPageSubmissions, submission]);
+  const nextFrontPageSubmission = useMemo(
+    () => (submission ? findNextFrontPageSubmission(frontPageSubmissions, submission.id) : null),
+    [frontPageSubmissions, submission],
+  );
 
   const queueRemainingCount = useMemo(
     () => frontPageSubmissions.filter((candidate) => !candidate.front_page_totals?.confirmed).length,
@@ -482,28 +518,33 @@ export function SubmissionFrontPageTotalsPage() {
         loadFrontPageSubmissionCached(submissionId),
         api.listExamSubmissions(examId),
       ]);
-      frontPageSubmissionValueCache.set(submissionId, refreshedSubmission);
+      rememberCacheEntry(frontPageSubmissionValueCache, submissionId, refreshedSubmission);
       setSubmission(refreshedSubmission);
       setExamSubmissions(refreshedExamSubmissions);
       setFirstNameInput(refreshedSubmission.first_name || splitStudentName(refreshedSubmission.student_name).firstName);
       setLastNameInput(refreshedSubmission.last_name || splitStudentName(refreshedSubmission.student_name).lastName);
       setIsEditing(false);
 
-      const refreshedNextFrontPageSubmission = nextFrontPageSubmission
-        ? refreshedExamSubmissions.find((candidate) => (
-          candidate.id === nextFrontPageSubmission.id
-          && candidate.capture_mode === 'front_page_totals'
-          && !candidate.front_page_totals?.confirmed
-        )) ?? null
-        : null;
+      const refreshedNextFrontPageSubmission = findNextFrontPageSubmission(refreshedExamSubmissions, submissionId);
 
       if (goNext && refreshedNextFrontPageSubmission) {
-        await Promise.allSettled([
+        const [nextSubmissionResult, nextCandidateResult] = await Promise.allSettled([
           loadFrontPageSubmissionCached(refreshedNextFrontPageSubmission.id),
           loadFrontPageCandidatesCached(refreshedNextFrontPageSubmission.id),
         ]);
+        const nextSubmissionState = nextSubmissionResult.status === 'fulfilled' ? nextSubmissionResult.value : refreshedNextFrontPageSubmission;
+        const nextCandidateState = nextCandidateResult.status === 'fulfilled' ? nextCandidateResult.value : getCachedFrontPageCandidates(refreshedNextFrontPageSubmission.id);
         showSuccess(`Confirmed ${formatStudentName(refreshedSubmission.student_name)}. Next up: ${formatStudentName(refreshedNextFrontPageSubmission.student_name)}.`);
-        navigate(`/submissions/${refreshedNextFrontPageSubmission.id}/front-page-totals?examId=${examId}&returnTo=${encodeURIComponent(returnTo)}&returnLabel=${encodeURIComponent(returnLabel)}`);
+        navigate(
+          `/submissions/${refreshedNextFrontPageSubmission.id}/front-page-totals?examId=${examId}&returnTo=${encodeURIComponent(returnTo)}&returnLabel=${encodeURIComponent(returnLabel)}`,
+          {
+            state: {
+              submission: nextSubmissionState,
+              examSubmissions: refreshedExamSubmissions,
+              candidateTotals: nextCandidateState ?? null,
+            } satisfies FrontPageRouteState,
+          },
+        );
         return;
       }
 
@@ -625,14 +666,6 @@ export function SubmissionFrontPageTotalsPage() {
         <section className="card stack">
           <div className="front-page-swipe-header">
             <p style={{ margin: 0 }}><Link to={returnTo}>← {returnLabel}</Link></p>
-            <div className="page-toolbar">
-              <span className={`status-pill ${savedTotals?.confirmed ? 'status-complete' : 'status-in-progress'}`}>
-                {savedTotals?.confirmed ? 'Confirmed' : 'Waiting'}
-              </span>
-              <span className="status-pill status-neutral">
-                {submission.pages.length > 0 ? `${submission.pages.length} page${submission.pages.length === 1 ? '' : 's'}` : 'No pages yet'}
-              </span>
-            </div>
           </div>
 
           {submission.pages.length > 1 && (
@@ -698,16 +731,20 @@ export function SubmissionFrontPageTotalsPage() {
               className="btn btn-primary front-page-swipe-pass"
               onClick={() => void save(true)}
               disabled={saving || (!isEditing && !hasPassableInterpretation)}
+              aria-label="Accept parsed read"
+              title="Accept parsed read"
             >
-              {saving ? 'Saving…' : 'Pass'}
+              {saving ? '…' : '✓'}
             </button>
             <button
               type="button"
               className="btn btn-secondary front-page-swipe-fail"
               onClick={() => setIsEditing((current) => !current)}
               disabled={saving}
+              aria-label={isEditing ? 'Hide correction panel' : 'Correct parsed read'}
+              title={isEditing ? 'Hide correction panel' : 'Correct parsed read'}
             >
-              {isEditing ? 'Hide correction' : 'Fail'}
+              {isEditing ? '−' : '✕'}
             </button>
           </div>
 

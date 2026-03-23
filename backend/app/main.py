@@ -7,11 +7,12 @@ from uuid import uuid4
 
 from fastapi import Depends
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from sqlmodel import Session
 
-from app.auth import require_api_key
+from app.auth import SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, build_api_session_cookie_value, require_api_key
 from app import db
 from app.ai.openai_vision import (
     _front_page_provider_api_key,
@@ -20,6 +21,7 @@ from app.ai.openai_vision import (
 )
 from app.db import create_db_and_tables, get_database_backend_name, get_redacted_database_url
 from app.routers.exams import public_router as public_exams_router
+from app.routers.exams import _resume_pending_exam_intake_jobs
 from app.routers.exams import router as exams_router
 from app.routers.questions import router as questions_router
 from app.routers.submissions import router as submissions_router
@@ -45,6 +47,24 @@ def resolve_app_version() -> str:
 
 app.add_middleware(SafeCORSMiddleware)
 
+
+@app.middleware("http")
+async def seed_api_session_cookie(request: Request, call_next):
+    response = await call_next(request)
+    expected_api_key = os.getenv("BACKEND_API_KEY", "").strip()
+    presented_api_key = request.headers.get("x-api-key", "").strip()
+    if expected_api_key and presented_api_key == expected_api_key:
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=build_api_session_cookie_value(expected_api_key),
+            max_age=SESSION_MAX_AGE_SECONDS,
+            httponly=True,
+            samesite="lax",
+            secure=request.url.scheme == "https",
+            path="/",
+        )
+    return response
+
 app.include_router(public_exams_router, prefix="/api")
 app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(questions_router, prefix="/api", dependencies=[Depends(require_api_key)])
@@ -62,6 +82,7 @@ def on_startup() -> None:
         get_redacted_database_url(),
     )
     create_db_and_tables()
+    _resume_pending_exam_intake_jobs()
 
 
 @app.get("/", tags=["meta"])

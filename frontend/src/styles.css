@@ -90,7 +90,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   justify-content: space-between;
   align-items: center;
   gap: .75rem;
-  margin-bottom: 1rem;
+  margin-bottom: .55rem;
   padding: .75rem 1rem;
   border: 1px solid var(--border-soft);
   border-radius: .75rem;
@@ -157,7 +157,7 @@ body.theme-dark .textarea-large {
   color: var(--text);
 }
 
-.btn { cursor: pointer; border: 1px solid transparent; border-radius: 999px; font-weight: 700; transition: transform .14s ease, box-shadow .14s ease, background-color .14s ease, border-color .14s ease; }
+.btn { cursor: pointer; border: 1px solid transparent; border-radius: 999px; font-weight: 700; transition: transform .14s ease, box-shadow .14s ease, background-color .14s ease, border-color .14s ease; display: inline-flex; align-items: center; justify-content: center; text-align: center; text-decoration: none; }
 .btn:hover:not(:disabled) { transform: translateY(-1px); }
 .btn:disabled { opacity: .6; cursor: not-allowed; }
 .btn-primary { background: var(--primary); color: var(--primary-contrast); box-shadow: 0 10px 24px rgba(31, 106, 83, 0.18); }
@@ -800,7 +800,8 @@ body {
   padding: 1.5rem;
   box-shadow: var(--shadow-md);
 }
-.page-stack { display: flex; flex-direction: column; gap: 1rem; }
+.page-stack { display: flex; flex-direction: column; gap: .45rem; }
+.page-stack > .card { margin-bottom: 0; }
 .page-header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; margin-bottom: .5rem; }
 .page-eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: .78rem; font-weight: 800; color: var(--primary); margin: 0 0 .35rem; }
 .page-title { margin: 0; font-size: clamp(2rem, 3.4vw, 3.2rem); line-height: .98; letter-spacing: -.04em; font-family: var(--font-display); font-weight: 700; }
@@ -1167,11 +1168,43 @@ body {
   align-items: baseline;
   flex-wrap: wrap;
 }
+.library-card-progress {
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+}
+.library-card-progress-bar {
+  width: 100%;
+  height: .42rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--progress-bg), var(--surface) 18%);
+  border: 1px solid color-mix(in srgb, var(--progress-border), transparent 20%);
+}
+.library-card-progress-bar span {
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), color-mix(in srgb, var(--success), white 8%));
+  animation: library-progress-slide 1.15s ease-in-out infinite;
+}
+.library-card-progress-bar span::after {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+}
 .command-lane-next-step {
   padding: .8rem;
   display: flex;
   flex-direction: column;
   gap: .7rem;
+}
+@keyframes library-progress-slide {
+  0% { transform: translateX(-90%); }
+  100% { transform: translateX(230%); }
 }
 @media (max-width: 900px) {
   .workflow-grid, .result-card-grid, .command-center-grid { grid-template-columns: 1fr; }

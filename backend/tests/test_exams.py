@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import zipfile
+from datetime import timedelta
 
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -19,10 +20,10 @@ from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from app import db
-from app.ai.openai_vision import OpenAIAnswerKeyParser, ParseResult
+from app.ai.openai_vision import BulkNameDetectionResult, OpenAIAnswerKeyParser, ParseResult
 from app.main import app
 from app.routers import exams as exams_router
-from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription
+from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
 from app.settings import settings
 
 def _tiny_png_bytes() -> bytes:
@@ -69,6 +70,151 @@ def test_list_exams_returns_created_exams(tmp_path) -> None:
         assert second.json()["id"] in ids
 
 
+def test_list_exams_includes_latest_intake_job_state(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Queued Intake Exam")
+        session.add(exam)
+        session.flush()
+        session.add(ExamIntakeJob(exam_id=exam.id, status="failed", stage="failed", page_count=3, pages_processed=1, submissions_created=0, error_message="old"))
+        session.add(ExamIntakeJob(
+            exam_id=exam.id,
+            status="running",
+            stage="detecting_names",
+            page_count=3,
+            pages_processed=2,
+            submissions_created=0,
+            metrics_json=json.dumps({"render_upload_ms": 11.2}),
+        ))
+        session.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/exams")
+
+    assert response.status_code == 200
+    payload = response.json()
+    exam_row = next(item for item in payload if item["name"] == "Queued Intake Exam")
+    assert exam_row["intake_job"]["status"] == "running"
+    assert exam_row["intake_job"]["stage"] == "detecting_names"
+    assert exam_row["intake_job"]["pages_processed"] == 2
+    assert exam_row["intake_job"]["metrics"]["render_upload_ms"] == 11.2
+
+
+def test_mark_exam_review_ready_requires_pages_and_candidate_payloads(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Review Ready Exam")
+        session.add(exam)
+        session.flush()
+
+        ready_submission = Submission(
+            exam_id=exam.id,
+            student_name="Jordan",
+            capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+            front_page_candidates_json=json.dumps({"source": "cached", "objective_scores": [], "warnings": []}),
+        )
+        missing_candidate_submission = Submission(
+            exam_id=exam.id,
+            student_name="Avery",
+            capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+        )
+        session.add(ready_submission)
+        session.add(missing_candidate_submission)
+        session.flush()
+
+        session.add(SubmissionPage(submission_id=ready_submission.id, page_number=1, image_path=str(tmp_path / "ready.png"), width=100, height=100))
+        session.add(SubmissionPage(submission_id=missing_candidate_submission.id, page_number=1, image_path=str(tmp_path / "missing.png"), width=100, height=100))
+        session.commit()
+
+        failures = exams_router._front_page_review_readiness_failures([ready_submission.id, missing_candidate_submission.id], session)
+
+    assert failures == [f"Submission {missing_candidate_submission.id} has no front-page candidate payload."]
+
+
+def test_claim_exam_intake_job_respects_active_lease_and_allows_stale_reclaim(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Lease Exam")
+        session.add(exam)
+        session.flush()
+        job = ExamIntakeJob(exam_id=exam.id, status="queued", stage="queued", page_count=3)
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        job_id = job.id
+
+    with Session(db.engine) as session:
+        assert exams_router._claim_exam_intake_job(job_id, "runner-a", session) is True
+        claimed = session.get(ExamIntakeJob, job_id)
+        assert claimed.runner_id == "runner-a"
+        assert claimed.attempt_count == 1
+        assert claimed.lease_expires_at is not None
+
+    with Session(db.engine) as session:
+        assert exams_router._claim_exam_intake_job(job_id, "runner-b", session) is False
+
+    with Session(db.engine) as session:
+        stale = session.get(ExamIntakeJob, job_id)
+        stale.lease_expires_at = utcnow() - timedelta(minutes=1)
+        session.add(stale)
+        session.commit()
+
+    with Session(db.engine) as session:
+        assert exams_router._claim_exam_intake_job(job_id, "runner-b", session) is True
+        reclaimed = session.get(ExamIntakeJob, job_id)
+        assert reclaimed.runner_id == "runner-b"
+        assert reclaimed.attempt_count == 2
+
+
+def test_segment_bulk_candidates_keeps_weak_later_page_name_reads_in_same_submission() -> None:
+    detections = [
+        BulkNameDetectionResult(
+            page_number=1,
+            student_name="Jordan Lee",
+            exam_name="Math 20",
+            confidence=0.96,
+            evidence={"x": 0.08, "y": 0.05, "w": 0.28, "h": 0.07},
+        ),
+        BulkNameDetectionResult(
+            page_number=2,
+            student_name="Jardan",
+            exam_name="Math 20",
+            confidence=0.58,
+            evidence={"x": 0.42, "y": 0.63, "w": 0.18, "h": 0.05},
+        ),
+        BulkNameDetectionResult(
+            page_number=3,
+            student_name=None,
+            exam_name="Math 20",
+            confidence=0.0,
+            evidence=None,
+        ),
+    ]
+
+    candidates, warnings = exams_router._segment_bulk_candidates(detections, roster=[], min_pages_per_student=1)
+
+    assert warnings == []
+    assert len(candidates) == 1
+    assert candidates[0].student_name == "Jordan Lee"
+    assert candidates[0].page_start == 1
+    assert candidates[0].page_end == 3
+
+
 def test_delete_exam_removes_related_rows_and_local_files(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
@@ -107,6 +253,7 @@ def test_delete_exam_removes_related_rows_and_local_files(tmp_path, monkeypatch)
         parse_job = ExamKeyParseJob(exam_id=exam_id, status="done", page_count=1, pages_done=1)
         session.add(parse_job)
         session.flush()
+        session.add(ExamIntakeJob(exam_id=exam_id, status="running", stage="detecting_names", page_count=1, pages_processed=0, submissions_created=0))
 
         bulk_upload = ExamBulkUploadFile(exam_id=exam_id, original_filename="bulk.pdf", stored_path=f"exams/{exam_id}/bulk/input.pdf")
         session.add(bulk_upload)
@@ -138,6 +285,7 @@ def test_delete_exam_removes_related_rows_and_local_files(tmp_path, monkeypatch)
         assert session.exec(select(Submission).where(Submission.exam_id == exam_id)).all() == []
         assert session.exec(select(Question).where(Question.exam_id == exam_id)).all() == []
         assert session.exec(select(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id)).all() == []
+        assert session.exec(select(ExamIntakeJob).where(ExamIntakeJob.exam_id == exam_id)).all() == []
         assert session.exec(select(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id)).all() == []
         assert session.exec(select(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id)).all() == []
         assert session.exec(select(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id)).all() == []
@@ -730,6 +878,35 @@ def test_bulk_upload_preview_accepts_single_image(tmp_path, monkeypatch) -> None
         assert len(payload["candidates"]) == 1
         assert payload["candidates"][0]["page_start"] == 1
         assert payload["candidates"][0]["page_end"] == 1
+
+
+def test_bulk_upload_preview_splits_multiple_images_into_individual_candidates(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+    monkeypatch.setenv("OPENAI_MOCK", "1")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Bulk Image Split Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        preview = client.post(
+            f"/api/exams/{exam_id}/submissions/bulk",
+            files=[
+                ("files", ("student-1.jpg", _tiny_png_bytes(), "image/jpeg")),
+                ("files", ("student-2.jpg", _tiny_png_bytes(), "image/jpeg")),
+                ("files", ("student-3.jpg", _tiny_png_bytes(), "image/jpeg")),
+            ],
+        )
+        assert preview.status_code == 201
+        payload = preview.json()
+        assert payload["page_count"] == 3
+        assert len(payload["candidates"]) == 3
+        assert [candidate["page_start"] for candidate in payload["candidates"]] == [1, 2, 3]
+        assert [candidate["page_end"] for candidate in payload["candidates"]] == [1, 2, 3]
 
 
 def test_parse_answer_key_incremental_flow(tmp_path, monkeypatch) -> None:
