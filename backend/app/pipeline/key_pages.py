@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 
-_MAX_WIDTH = 800
+_MAX_DIMENSION = 1024
 _JPEG_QUALITY = 60
 
 
@@ -25,15 +25,14 @@ class NormalizedImage:
     final_size_bytes: int
 
 
-def normalize_key_page_image(image_path: Path, max_width: int = _MAX_WIDTH, jpeg_quality: int = _JPEG_QUALITY) -> NormalizedImage:
+def normalize_key_page_image(image_path: Path, max_dimension: int = _MAX_DIMENSION, jpeg_quality: int = _JPEG_QUALITY) -> NormalizedImage:
     """Normalize image for key parsing payloads and size constraints."""
 
     original_size = image_path.stat().st_size
     with Image.open(image_path) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
-        if image.width > max_width:
-            scale = max_width / float(image.width)
-            image = image.resize((max_width, int(image.height * scale)), Image.Resampling.LANCZOS)
+        if image.width > max_dimension or image.height > max_dimension:
+            image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
 
         output = io.BytesIO()
         image.save(output, format="JPEG", quality=jpeg_quality, optimize=True)

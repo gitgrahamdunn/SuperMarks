@@ -57,6 +57,7 @@ class ExamIntakeJob(SQLModel, table=True):
     initial_review_ready: bool = False
     fully_warmed: bool = False
     review_ready: bool = False
+    thinking_level: str = "low"
     attempt_count: int = 0
     runner_id: Optional[str] = None
     lease_expires_at: Optional[datetime] = None

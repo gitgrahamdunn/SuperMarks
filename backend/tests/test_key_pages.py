@@ -14,8 +14,20 @@ def test_normalize_key_page_image_resizes_and_emits_jpeg(tmp_path: Path) -> None
 
     normalized = normalize_key_page_image(source)
 
-    assert normalized.width == 800
-    assert normalized.height < 1200
+    assert normalized.width == 1024
+    assert normalized.height < 1024
     assert normalized.mime_type == "image/jpeg"
     assert normalized.final_size_bytes > 0
     assert normalized.image_bytes[:2] == b"\xff\xd8"
+
+
+def test_normalize_key_page_image_caps_tall_pages_within_1024_box(tmp_path: Path) -> None:
+    source = tmp_path / "tall.png"
+    image = Image.new("RGB", (1200, 2600), color=(10, 10, 120))
+    image.save(source, format="PNG")
+
+    normalized = normalize_key_page_image(source)
+
+    assert normalized.width < 1024
+    assert normalized.height == 1024
+    assert normalized.mime_type == "image/jpeg"

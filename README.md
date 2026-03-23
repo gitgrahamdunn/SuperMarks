@@ -13,7 +13,7 @@ This repository is locked to **Strategy B: direct backend API calls only**.
 - No frontend `/api` proxy functions.
 - Do not add frontend `/api` rewrites.
 
-See `docs/ARCHITECTURE.md` for guardrails.
+See `docs/ARCHITECTURE.md` for guardrails and `docs/EXPERIMENTATION.md` for the future A/B testing reference.
 
 ## Required Environment Variables
 

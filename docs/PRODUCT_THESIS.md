@@ -107,6 +107,7 @@ Only after trust and review flow are strong:
 - Do not let deployment architecture drive product behavior.
 - Do not confuse parsing/AI sophistication with actual user value.
 - The first version must already be useful when the teacher is still the one making the grading decision.
+- If experimentation is added later, it should stay invisible to teachers and avoid adding debug-heavy or test-mode UI to the workflow. See `docs/EXPERIMENTATION.md`.
 
 ## Working rule for future changes
 

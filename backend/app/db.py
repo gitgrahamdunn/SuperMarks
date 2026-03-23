@@ -120,6 +120,7 @@ def create_db_and_tables() -> None:
     _ensure_column("examintakejob", "initial_review_ready", "initial_review_ready BOOLEAN DEFAULT 0")
     _ensure_column("examintakejob", "fully_warmed", "fully_warmed BOOLEAN DEFAULT 0")
     _ensure_column("examintakejob", "review_ready", "review_ready BOOLEAN DEFAULT 0")
+    _ensure_column("examintakejob", "thinking_level", "thinking_level VARCHAR DEFAULT 'low'")
     _ensure_column("examintakejob", "last_progress_at", "last_progress_at VARCHAR")
 
 

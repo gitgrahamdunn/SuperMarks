@@ -333,6 +333,7 @@ class ExamIntakeJobRead(BaseModel):
     initial_review_ready: bool
     fully_warmed: bool
     review_ready: bool
+    thinking_level: str
     metrics: dict[str, float | int | str] | None = None
     error_message: str | None = None
     last_progress_at: datetime | None = None

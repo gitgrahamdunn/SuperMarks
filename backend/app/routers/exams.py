@@ -28,6 +28,7 @@ from sqlmodel import Session, delete, select
 
 from app.blob_service import BlobDownloadError, create_signed_blob_url, download_blob_bytes, normalize_blob_path
 from app.ai.openai_vision import (
+    _normalize_front_page_gemini_thinking_level,
     _front_page_model,
     AnswerKeyParser,
     BulkNameDetectionResult,
@@ -91,6 +92,30 @@ def _front_page_candidate_worker_count(submission_count: int) -> int:
     return max(1, min(desired, max(submission_count, 1)))
 
 
+def _record_front_page_usage_metrics(metrics: dict[str, object], usage: dict[str, object] | None) -> None:
+    if not usage:
+        return
+    metrics["front_page_provider"] = str(usage.get("provider") or metrics.get("front_page_provider") or "")
+    metrics["front_page_model"] = str(usage.get("model") or metrics.get("front_page_model") or "")
+    metrics["front_page_thinking_level"] = str(usage.get("thinking_level") or metrics.get("front_page_thinking_level") or "")
+    metrics["front_page_thinking_budget"] = int(usage.get("thinking_budget") or metrics.get("front_page_thinking_budget") or 0)
+    metrics["front_page_calls"] = int(metrics.get("front_page_calls") or 0) + 1
+    metrics["front_page_prompt_tokens"] = int(metrics.get("front_page_prompt_tokens") or 0) + int(usage.get("prompt_tokens") or 0)
+    metrics["front_page_output_tokens"] = int(metrics.get("front_page_output_tokens") or 0) + int(usage.get("candidate_tokens") or 0)
+    metrics["front_page_thought_tokens"] = int(metrics.get("front_page_thought_tokens") or 0) + int(usage.get("thought_tokens") or 0)
+    metrics["front_page_total_tokens"] = int(metrics.get("front_page_total_tokens") or 0) + int(usage.get("total_tokens") or 0)
+    metrics["front_page_estimated_cost_usd"] = round(
+        float(metrics.get("front_page_estimated_cost_usd") or 0.0) + float(usage.get("estimated_cost_usd") or 0.0),
+        6,
+    )
+    metrics["front_page_image_bytes_total"] = int(metrics.get("front_page_image_bytes_total") or 0) + int(usage.get("normalized_image_bytes") or 0)
+    metrics["front_page_image_width_total"] = int(metrics.get("front_page_image_width_total") or 0) + int(usage.get("normalized_image_width") or 0)
+    metrics["front_page_image_height_total"] = int(metrics.get("front_page_image_height_total") or 0) + int(usage.get("normalized_image_height") or 0)
+    calls = max(int(metrics.get("front_page_calls") or 0), 1)
+    metrics["front_page_avg_cost_per_page_usd"] = round(float(metrics["front_page_estimated_cost_usd"]) / calls, 6)
+    metrics["front_page_avg_image_bytes"] = round(int(metrics["front_page_image_bytes_total"]) / calls, 1)
+
+
 def _get_exam_question_lock(exam_id: int) -> threading.Lock:
     with _exam_question_locks_guard:
         lock = _exam_question_locks.get(exam_id)
@@ -145,6 +170,7 @@ def _exam_intake_job_read(job: ExamIntakeJob | None) -> ExamIntakeJobRead | None
         initial_review_ready=bool(job.initial_review_ready),
         fully_warmed=bool(job.fully_warmed),
         review_ready=bool(job.review_ready or job.initial_review_ready),
+        thinking_level=_normalize_front_page_gemini_thinking_level(job.thinking_level),
         metrics=metrics,
         error_message=job.error_message,
         last_progress_at=job.last_progress_at,
@@ -559,7 +585,7 @@ def _extract_image_upload_front_page_pages(
     extractor = get_front_page_totals_extractor()
     detected_exam_titles: list[str] = []
 
-    def extract_one(idx: int, page_path: Path) -> tuple[int, int, int, BulkNameDetectionResult, FrontPageTotalsCandidateRead, str]:
+    def extract_one(idx: int, page_path: Path) -> tuple[int, int, int, BulkNameDetectionResult, FrontPageTotalsCandidateRead, str, dict[str, object] | None]:
         with Image.open(page_path) as image:
             w, h = image.width, image.height
         try:
@@ -568,6 +594,7 @@ def _extract_image_upload_front_page_pages(
                 request_id=f"exam-{exam_id}-bulk-page-{idx}",
                 model_override=_front_page_model(),
                 template=None,
+                thinking_level_override=job.thinking_level if job else None,
             )
             candidate_payload = _front_page_candidate_read_from_payload(
                 result.payload,
@@ -589,6 +616,7 @@ def _extract_image_upload_front_page_pages(
                 source="extractor_unavailable:oneshot",
             )
             detected_exam_title = ""
+            usage = None
         except Exception:
             logger.exception("front-page one-shot intake failed for exam %s page %s", exam_id, idx)
             candidate_payload = FrontPageTotalsCandidateRead(
@@ -597,12 +625,15 @@ def _extract_image_upload_front_page_pages(
                 source="extractor_unavailable:oneshot",
             )
             detected_exam_title = ""
+            usage = None
+        else:
+            usage = result.usage
         detection = _front_page_name_detection_from_candidate(
             page_number=idx,
             candidate=candidate_payload,
             exam_name=detected_exam_title or None,
         )
-        return idx, w, h, detection, candidate_payload, detected_exam_title
+        return idx, w, h, detection, candidate_payload, detected_exam_title, usage
 
     processed_pages = 0
     worker_count = _front_page_candidate_worker_count(len(rendered_paths))
@@ -612,7 +643,7 @@ def _extract_image_upload_front_page_pages(
             for idx, page_path in enumerate(rendered_paths, start=1)
         }
         for future in concurrent.futures.as_completed(futures):
-            idx, width, height, detection, candidate_payload, detected_exam_title = future.result()
+            idx, width, height, detection, candidate_payload, detected_exam_title, usage = future.result()
             detections[idx - 1] = detection
             candidate_payloads[idx] = candidate_payload
             if detected_exam_title:
@@ -638,10 +669,21 @@ def _extract_image_upload_front_page_pages(
             processed_pages += 1
             if job:
                 now = utcnow()
+                current_metrics: dict[str, object] = {}
+                raw_metrics = (job.metrics_json or "").strip()
+                if raw_metrics:
+                    try:
+                        parsed_metrics = json.loads(raw_metrics)
+                        if isinstance(parsed_metrics, dict):
+                            current_metrics = parsed_metrics
+                    except json.JSONDecodeError:
+                        logger.warning("invalid intake metrics payload for job %s during one-shot front-page extraction", job.id)
+                _record_front_page_usage_metrics(current_metrics, usage)
                 job.pages_processed = processed_pages
                 job.updated_at = now
                 job.last_progress_at = now
                 job.lease_expires_at = _exam_intake_lease_deadline()
+                job.metrics_json = json.dumps(current_metrics)
                 session.add(job)
                 session.commit()
             else:
@@ -834,6 +876,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 session.add(job)
                 session.commit()
                 return
+            intake_metrics["front_page_thinking_level"] = _normalize_front_page_gemini_thinking_level(job.thinking_level)
             job.status = "running"
             job.stage = "detecting_names"
             job.updated_at = utcnow()
@@ -1477,6 +1520,7 @@ def start_exam_intake_job(
     exam_id: int,
     files: list[UploadFile] | None = File(default=None),
     file: UploadFile | None = File(default=None),
+    front_page_thinking_level: str | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> ExamIntakeJobRead:
     exam = session.get(Exam, exam_id)
@@ -1492,6 +1536,7 @@ def start_exam_intake_job(
         upload_files.append(file)
     if not upload_files:
         raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
+    normalized_thinking_level = _normalize_front_page_gemini_thinking_level(front_page_thinking_level)
 
     bulk = ExamBulkUploadFile(exam_id=exam_id, original_filename="bulk-upload", stored_path="")
     session.add(bulk)
@@ -1540,15 +1585,20 @@ def start_exam_intake_job(
         initial_review_ready=False,
         fully_warmed=False,
         review_ready=False,
+        thinking_level=normalized_thinking_level,
         last_progress_at=utcnow(),
-        metrics_json=json.dumps({"render_upload_ms": render_upload_ms, "page_count": len(rendered_paths)}),
+        metrics_json=json.dumps({
+            "render_upload_ms": render_upload_ms,
+            "page_count": len(rendered_paths),
+            "front_page_thinking_level": normalized_thinking_level,
+        }),
     )
     session.add(job)
     session.commit()
     session.refresh(job)
 
-    thread = threading.Thread(target=_run_exam_intake_job_background, args=(exam_id, job.id or 0), daemon=True)
-    thread.start()
+    if job.id is not None:
+        _spawn_exam_intake_job_thread(job.id)
     return _exam_intake_job_read(job)
 
 
@@ -1589,15 +1639,19 @@ def retry_exam_intake_job(exam_id: int, session: Session = Depends(get_session))
         initial_review_ready=False,
         fully_warmed=False,
         review_ready=False,
+        thinking_level=_normalize_front_page_gemini_thinking_level(latest_job.thinking_level),
         last_progress_at=utcnow(),
+        metrics_json=json.dumps({
+            "front_page_thinking_level": _normalize_front_page_gemini_thinking_level(latest_job.thinking_level),
+        }),
     )
     exam.status = ExamStatus.DRAFT
     session.add(exam)
     session.add(retry_job)
     session.commit()
     session.refresh(retry_job)
-    thread = threading.Thread(target=_run_exam_intake_job_background, args=(exam_id, retry_job.id or 0), daemon=True)
-    thread.start()
+    if retry_job.id is not None:
+        _spawn_exam_intake_job_thread(retry_job.id)
     return _exam_intake_job_read(retry_job)
 
 

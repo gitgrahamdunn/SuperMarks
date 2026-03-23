@@ -324,6 +324,53 @@ def _front_page_nano_model() -> str:
     return "gpt-5-nano"
 
 
+def _normalize_front_page_gemini_thinking_level(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in {"off", "low", "med", "high"}:
+        return normalized
+    return (os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_DEFAULT_THINKING_LEVEL", "low").strip().lower() or "low")
+
+
+def _front_page_gemini_thinking_budget(level: str | None) -> int:
+    normalized = _normalize_front_page_gemini_thinking_level(level)
+    if normalized == "off":
+        return 0
+    if normalized == "high":
+        configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_HIGH", "2048")
+    elif normalized == "med":
+        configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_MED", "512")
+    else:
+        configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_LOW", "128")
+    try:
+        return max(0, int(configured or "0"))
+    except ValueError:
+        return 0
+
+
+def _gemini_front_page_pricing(model: str) -> tuple[float, float] | None:
+    normalized = (model or "").strip().lower()
+    if normalized.startswith("gemini-2.5-flash-lite"):
+        return (0.10, 0.40)
+    if normalized.startswith("gemini-2.5-flash"):
+        return (0.30, 2.50)
+    return None
+
+
+def _estimate_gemini_front_page_cost_usd(
+    *,
+    model: str,
+    prompt_tokens: int,
+    candidate_tokens: int,
+    thought_tokens: int,
+) -> float | None:
+    pricing = _gemini_front_page_pricing(model)
+    if pricing is None:
+        return None
+    input_rate, output_rate = pricing
+    billed_output_tokens = max(candidate_tokens, 0) + max(thought_tokens, 0)
+    return ((max(prompt_tokens, 0) * input_rate) + (billed_output_tokens * output_rate)) / 1_000_000
+
+
 @dataclass
 class ParseResult:
     payload: dict[str, object]
@@ -853,6 +900,13 @@ class BulkNameDetectionResult:
 class FrontPageTotalsExtractResult:
     payload: dict[str, object]
     model: str
+    usage: dict[str, object] | None = None
+
+
+@dataclass
+class GeminiStructuredJsonResult:
+    payload: dict[str, object]
+    usage: dict[str, object] | None = None
 
 
 class FrontPageTotalsExtractor(Protocol):
@@ -863,6 +917,7 @@ class FrontPageTotalsExtractor(Protocol):
         *,
         model_override: str | None = None,
         template: dict[str, object] | None = None,
+        thinking_level_override: str | None = None,
     ) -> FrontPageTotalsExtractResult:
         """Extract front-page totals candidates from a single rendered page image."""
 
@@ -889,11 +944,18 @@ class GeminiStructuredVisionClient:
         image: bytes,
         mime_type: str,
         response_json_schema: dict[str, object] | None = None,
-    ) -> dict[str, object]:
+        thinking_budget: int | None = None,
+    ) -> GeminiStructuredJsonResult:
         encoded = base64.b64encode(image).decode("utf-8")
         normalized_mime = mime_type.lower().strip()
         if normalized_mime not in {"image/png", "image/jpeg"}:
             normalized_mime = "image/jpeg"
+        generation_config: dict[str, object] = {
+            "responseMimeType": "application/json",
+            **({"responseJsonSchema": response_json_schema} if response_json_schema else {}),
+        }
+        if thinking_budget is not None:
+            generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
         response = self._client.post(
             f"{self._base_url}/v1beta/models/{model}:generateContent",
             params={"key": self._api_key},
@@ -904,10 +966,7 @@ class GeminiStructuredVisionClient:
                         {"inlineData": {"mimeType": normalized_mime, "data": encoded}},
                     ],
                 }],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    **({"responseJsonSchema": response_json_schema} if response_json_schema else {}),
-                },
+                "generationConfig": generation_config,
             },
         )
         try:
@@ -939,7 +998,23 @@ class GeminiStructuredVisionClient:
                 body=response.text,
                 message="Gemini request failed: empty text response",
             )
-        return _load_json_with_fallbacks(_normalize_model_response_text(text))
+        usage_metadata = payload.get("usageMetadata")
+        usage: dict[str, object] | None = None
+        if isinstance(usage_metadata, dict):
+            prompt_tokens = int(usage_metadata.get("promptTokenCount") or 0)
+            candidate_tokens = int(usage_metadata.get("candidatesTokenCount") or 0)
+            thought_tokens = int(usage_metadata.get("thoughtsTokenCount") or 0)
+            total_tokens = int(usage_metadata.get("totalTokenCount") or 0)
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "candidate_tokens": candidate_tokens,
+                "thought_tokens": thought_tokens,
+                "total_tokens": total_tokens,
+            }
+        return GeminiStructuredJsonResult(
+            payload=_load_json_with_fallbacks(_normalize_model_response_text(text)),
+            usage=usage,
+        )
 
 
 class OpenAIBulkNameDetector:
@@ -1035,13 +1110,15 @@ class GeminiBulkNameDetector:
     def detect(self, image_path: Path, page_number: int, model: str, request_id: str) -> BulkNameDetectionResult:
         _ = request_id
         normalized = normalize_key_page_image(image_path)
-        parsed = self._client.generate_json(
+        result = self._client.generate_json(
             model=model,
             prompt=self._build_prompt(),
             image=normalized.image_bytes,
             mime_type=normalized.mime_type,
             response_json_schema=build_bulk_name_response_json_schema(),
+            thinking_budget=0,
         )
+        parsed = result.payload
         evidence = parsed.get("evidence")
         return BulkNameDetectionResult(
             page_number=page_number,
@@ -1119,21 +1196,21 @@ def build_front_page_totals_response_schema() -> dict[str, Any]:
             },
             "objective_scores": {
                 "type": "array",
-                "description": "All visible outcome or objective summary rows in page order.",
+                "description": "All visible outcome or objective summary rows in page order. Keep a visible row even if one field is unclear by setting only that field to null.",
                 "items": {
                     "type": "object",
                     "propertyOrdering": ["objective_code", "marks_awarded", "max_marks"],
                     "properties": {
                         "objective_code": {
-                            **_front_page_candidate_value_schema(),
-                            "description": "Visible outcome or objective row label exactly as shown on the page.",
+                            "description": "Visible outcome or objective row label exactly as shown on the page. Use null only if the row is visible but the label cannot be read.",
+                            "anyOf": [_front_page_candidate_value_schema(), {"type": "null"}],
                         },
                         "marks_awarded": {
-                            **_front_page_candidate_value_schema(),
-                            "description": "Awarded score for this outcome row.",
+                            "description": "Awarded score for this outcome row. Use null only if the row is visible but the awarded score cannot be read.",
+                            "anyOf": [_front_page_candidate_value_schema(), {"type": "null"}],
                         },
                         "max_marks": {
-                            "description": "Possible score for this outcome row when shown.",
+                            "description": "Possible score for this outcome row when shown. Use null when the row is visible but max marks are absent or unclear.",
                             "anyOf": [_front_page_candidate_value_schema(), {"type": "null"}],
                         },
                     },
@@ -1255,7 +1332,9 @@ class OpenAIFrontPageTotalsExtractor:
         *,
         model_override: str | None = None,
         template: dict[str, object] | None = None,
+        thinking_level_override: str | None = None,
     ) -> FrontPageTotalsExtractResult:
+        _ = thinking_level_override
         normalized = normalize_key_page_image(image_path)
         schema = build_front_page_totals_response_schema()
         model = model_override or _front_page_model()
@@ -1315,19 +1394,41 @@ class GeminiFrontPageTotalsExtractor:
         *,
         model_override: str | None = None,
         template: dict[str, object] | None = None,
+        thinking_level_override: str | None = None,
     ) -> FrontPageTotalsExtractResult:
         _ = request_id
         normalized = normalize_key_page_image(image_path)
         model = model_override or _front_page_model()
         prompt = _build_front_page_totals_prompt(template)
-        parsed = self._client.generate_json(
+        thinking_level = _normalize_front_page_gemini_thinking_level(thinking_level_override)
+        thinking_budget = _front_page_gemini_thinking_budget(thinking_level)
+        result = self._client.generate_json(
             model=model,
             prompt=prompt,
             image=normalized.image_bytes,
             mime_type=normalized.mime_type,
             response_json_schema=build_front_page_totals_response_schema(),
+            thinking_budget=thinking_budget,
         )
-        return FrontPageTotalsExtractResult(payload=parsed, model=model)
+        usage = dict(result.usage or {})
+        if usage:
+            estimated_cost_usd = _estimate_gemini_front_page_cost_usd(
+                model=model,
+                prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                candidate_tokens=int(usage.get("candidate_tokens") or 0),
+                thought_tokens=int(usage.get("thought_tokens") or 0),
+            )
+            usage.update({
+                "provider": "gemini",
+                "model": model,
+                "thinking_level": thinking_level,
+                "thinking_budget": thinking_budget,
+                "normalized_image_width": normalized.width,
+                "normalized_image_height": normalized.height,
+                "normalized_image_bytes": normalized.final_size_bytes,
+                "estimated_cost_usd": estimated_cost_usd or 0.0,
+            })
+        return FrontPageTotalsExtractResult(payload=result.payload, model=model, usage=usage or None)
 
 
 class MockFrontPageTotalsExtractor:
@@ -1338,8 +1439,9 @@ class MockFrontPageTotalsExtractor:
         *,
         model_override: str | None = None,
         template: dict[str, object] | None = None,
+        thinking_level_override: str | None = None,
     ) -> FrontPageTotalsExtractResult:
-        _ = (image_path, request_id, template)
+        _ = (image_path, request_id, template, thinking_level_override)
         return FrontPageTotalsExtractResult(
             payload={
                 "exam_name": {

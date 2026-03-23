@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError, api, buildApiUrl } from '../api/client';
 import { FileUploader } from '../components/FileUploader';
 import { Modal } from '../components/Modal';
@@ -41,6 +41,8 @@ type ParseChecklistStep = {
   status: ParseChecklistStatus;
 };
 
+type ThinkingLevel = 'off' | 'low' | 'med' | 'high';
+
 const MB = 1024 * 1024;
 const LARGE_FILE_BYTES = 8 * MB;
 const LARGE_TOTAL_BYTES = 12 * MB;
@@ -74,6 +76,13 @@ const formatElapsed = (totalSeconds: number) => {
 };
 
 const formatMb = (bytes: number) => `${(bytes / MB).toFixed(2)} MB`;
+
+const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
+  { value: 'off', label: 'Off' },
+  { value: 'low', label: 'Low' },
+  { value: 'med', label: 'Med' },
+  { value: 'high', label: 'High' },
+];
 
 const isNetworkFetchError = (error: unknown) =>
   error instanceof Error && (error instanceof TypeError || /load failed|failed to fetch|network/i.test(error.message));
@@ -214,6 +223,12 @@ const intakeProgressPercent = (job: ExamIntakeJobRead | null | undefined) => {
   return Math.max(8, Math.min(96, Math.round(weighted * 100)));
 };
 
+const formatUsd = (value: number) => {
+  if (!Number.isFinite(value)) return '$0.00';
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
+};
+
 
 export function ExamsPage() {
   const [exams, setExams] = useState<ExamRead[]>([]);
@@ -232,12 +247,14 @@ export function ExamsPage() {
   const [failedSummary, setFailedSummary] = useState<string | null>(null);
   const [parsePageCount, setParsePageCount] = useState(0);
   const [checklistSteps, setChecklistSteps] = useState<ParseChecklistStep[]>(() => initChecklist());
+  const [frontPageThinkingLevel, setFrontPageThinkingLevel] = useState<ThinkingLevel>('low');
   const requestControllerRef = useRef<AbortController | null>(null);
   const currentStepRef = useRef<WizardStep>('creating');
   const openWizardButtonRef = useRef<HTMLButtonElement>(null);
 
   const { showError, showSuccess, showWarning } = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const totalFileBytes = useMemo(() => modalFiles.reduce((sum, file) => sum + file.size, 0), [modalFiles]);
   const totalTooLarge = totalFileBytes > LARGE_TOTAL_BYTES;
@@ -260,6 +277,11 @@ export function ExamsPage() {
       .sort((a, b) => a - b),
     [exams],
   );
+  const showCostDebug = useMemo(() => {
+    if (import.meta.env.VITE_ENABLE_COST_DEBUG !== '1') return false;
+    const params = new URLSearchParams(location.search);
+    return params.get('debug') === 'cost';
+  }, [location.search]);
 
   const loadExams = async () => {
     try {
@@ -375,6 +397,7 @@ export function ExamsPage() {
   const resetWizardState = () => {
     setModalFiles([]);
     setAllowLargeUpload(false);
+    setFrontPageThinkingLevel('low');
     resetWizardProgress();
   };
   const dismissModal = () => {
@@ -473,7 +496,7 @@ export function ExamsPage() {
       setParseProgress(14);
       updateCurrentStep('uploading');
       markChecklist('uploading_key', 'active');
-      const intakeJob = await api.startExamIntakeJob(activeExamId, modalFiles, requestOptions);
+      const intakeJob = await api.startExamIntakeJob(activeExamId, modalFiles, frontPageThinkingLevel, requestOptions);
       setExams((prev) => prev.map((item) => (item.id === activeExamId ? { ...item, intake_job: intakeJob, status: 'DRAFT' } : item)));
       markChecklist('uploading_key', 'done');
       setParseProgress(100);
@@ -708,6 +731,12 @@ export function ExamsPage() {
               const preparingStageLabel = formatIntakeStage(exam.intake_job);
               const preparingSummary = formatPreparingSummary(exam.intake_job);
               const preparingPercent = intakeProgressPercent(exam.intake_job);
+              const frontPageMetrics = intakeJob?.metrics ?? null;
+              const debugCostPerPage = Number(frontPageMetrics?.front_page_avg_cost_per_page_usd ?? 0);
+              const debugAverageImageBytes = Number(frontPageMetrics?.front_page_avg_image_bytes ?? 0);
+              const debugProvider = String(frontPageMetrics?.front_page_provider ?? '').trim();
+              const debugModel = String(frontPageMetrics?.front_page_model ?? '').trim();
+              const debugThinkingLevel = String(intakeJob?.thinking_level || frontPageMetrics?.front_page_thinking_level || 'low').trim().toUpperCase();
               return (
                 <article key={exam.id} className="workspace-card">
                   <div className="workspace-card-header">
@@ -744,6 +773,20 @@ export function ExamsPage() {
                   )}
                   {intakeJob?.status === 'failed' && exam.intake_job?.error_message && (
                     <p className="warning-text" style={{ margin: 0 }}>{exam.intake_job.error_message}</p>
+                  )}
+                  {showCostDebug && frontPageMetrics && Number(frontPageMetrics.front_page_calls ?? 0) > 0 && (
+                    <div className="review-readonly-block surface-muted" style={{ margin: 0 }}>
+                      <strong>Front-page cost</strong>
+                      <p className="subtle-text" style={{ margin: '.35rem 0 0' }}>
+                        {debugProvider || 'provider'} · {debugModel || 'model'} · {debugThinkingLevel}
+                      </p>
+                      <p className="subtle-text" style={{ margin: '.2rem 0 0' }}>
+                        {formatUsd(debugCostPerPage)}/page · {(frontPageMetrics.front_page_prompt_tokens as number) || 0} prompt · {(frontPageMetrics.front_page_output_tokens as number) || 0} output · {(frontPageMetrics.front_page_thought_tokens as number) || 0} thought
+                      </p>
+                      <p className="subtle-text" style={{ margin: '.2rem 0 0' }}>
+                        {(frontPageMetrics.front_page_calls as number) || 0} call{Number(frontPageMetrics.front_page_calls || 0) === 1 ? '' : 's'} · {debugAverageImageBytes > 0 ? `${Math.round(debugAverageImageBytes).toLocaleString()} avg bytes` : 'image bytes unavailable'}
+                      </p>
+                    </div>
                   )}
                   <div className="actions-row" style={{ marginTop: 0 }}>
                     {canOpenWorkspace ? (
@@ -819,6 +862,24 @@ export function ExamsPage() {
                   Total upload exceeds 12 MB. Confirm to continue anyway.
                 </label>
               )}
+            </div>
+            <div className="stack" style={{ gap: '.45rem' }}>
+              <label>Thinking</label>
+              <div className="actions-row" role="radiogroup" aria-label="Front-page thinking level" style={{ marginTop: 0 }}>
+                {THINKING_LEVEL_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={frontPageThinkingLevel === option.value}
+                    className={frontPageThinkingLevel === option.value ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+                    onClick={() => setFrontPageThinkingLevel(option.value)}
+                    disabled={isRunning}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
             </div>
             {(isRunning || parseProgress > 0 || wizardError || step === 'done') && (
               <div className="stack" style={{ gap: '.65rem' }}>

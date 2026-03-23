@@ -22,6 +22,7 @@ export interface ExamIntakeJobRead {
   initial_review_ready: boolean;
   fully_warmed: boolean;
   review_ready: boolean;
+  thinking_level: string;
   metrics?: Record<string, string | number> | null;
   error_message?: string | null;
   last_progress_at?: string | null;

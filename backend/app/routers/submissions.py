@@ -22,6 +22,7 @@ from app.blob_store import BlobUploadError, upload_bytes
 from app.models import (
     AnswerCrop,
     Exam,
+    ExamIntakeJob,
     ExamStatus,
     GradeResult,
     Question,
@@ -42,6 +43,7 @@ from app.ai.openai_vision import (
     OpenAIRequestError,
     _front_page_mini_model,
     _front_page_nano_model,
+    _normalize_front_page_gemini_thinking_level,
     get_front_page_totals_extractor,
 )
 from app.reporting import accumulate_objective_totals, front_page_objective_totals, front_page_totals_read, objective_totals_read
@@ -886,6 +888,17 @@ def _front_page_candidate_cache_read(submission: Submission) -> FrontPageTotalsC
         return None
 
 
+def _latest_exam_front_page_thinking_level(exam_id: int, session: Session) -> str | None:
+    latest_job = session.exec(
+        select(ExamIntakeJob)
+        .where(ExamIntakeJob.exam_id == exam_id)
+        .order_by(ExamIntakeJob.created_at.desc(), ExamIntakeJob.id.desc())
+    ).first()
+    if not latest_job:
+        return None
+    return _normalize_front_page_gemini_thinking_level(latest_job.thinking_level)
+
+
 def _extract_front_page_candidates(
     submission: Submission,
     *,
@@ -912,6 +925,7 @@ def _extract_front_page_candidates(
             raise HTTPException(status_code=404, detail="Front page image not found")
 
         extractor = get_front_page_totals_extractor()
+        thinking_level = _latest_exam_front_page_thinking_level(submission.exam_id, session)
         try:
             try:
                 result = extractor.extract(
@@ -919,6 +933,7 @@ def _extract_front_page_candidates(
                     request_id=f"submission-{submission.id}-front-page",
                     model_override=model_override,
                     template=template,
+                    thinking_level_override=thinking_level,
                 )
             except TypeError:
                 result = extractor.extract(image_path=image_path, request_id=f"submission-{submission.id}-front-page")
@@ -935,6 +950,20 @@ def _extract_front_page_candidates(
                 objective_scores=[],
                 warnings=["Extractor failed for this paper. You can still confirm totals manually."],
                 source="extractor_unavailable",
+            )
+
+        if result.usage:
+            logger.info(
+                "front-page extraction usage submission=%s exam=%s provider=%s model=%s thinking=%s prompt_tokens=%s output_tokens=%s thought_tokens=%s estimated_cost_usd=%s",
+                submission.id,
+                submission.exam_id,
+                result.usage.get("provider"),
+                result.usage.get("model"),
+                result.usage.get("thinking_level"),
+                result.usage.get("prompt_tokens"),
+                result.usage.get("candidate_tokens"),
+                result.usage.get("thought_tokens"),
+                result.usage.get("estimated_cost_usd"),
             )
 
         objective_scores: list[FrontPageObjectiveScoreCandidate] = []

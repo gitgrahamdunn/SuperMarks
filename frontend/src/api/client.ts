@@ -456,9 +456,10 @@ export const api = {
     body: JSON.stringify({ name }),
     ...options,
   }, EXAM_CREATE_TIMEOUT_MS),
-  startExamIntakeJob: async (examId: number, files: File[], options?: RequestInit) => {
+  startExamIntakeJob: async (examId: number, files: File[], thinkingLevel = 'low', options?: RequestInit) => {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
+    formData.append('front_page_thinking_level', thinkingLevel);
     return request<ExamIntakeJobRead>(`exams/${examId}/intake-jobs/start`, {
       method: 'POST',
       body: formData,

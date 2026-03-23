@@ -9,8 +9,11 @@ from app.ai.openai_vision import (
     OpenAIFrontPageTotalsExtractor,
     OpenAIBulkNameDetector,
     SchemaBuildError,
+    _estimate_gemini_front_page_cost_usd,
     _front_page_model,
+    _front_page_gemini_thinking_budget,
     _front_page_provider_name,
+    _normalize_front_page_gemini_thinking_level,
     _normalize_model_response_text,
     _recover_front_page_payload,
     build_bulk_name_response_json_schema,
@@ -130,6 +133,10 @@ def test_front_page_totals_schema_is_strict_and_narrow() -> None:
     assert "exam title" in props["student_name"]["description"].lower()
     assert "final overall awarded total" in props["overall_marks_awarded"]["description"].lower()
     assert "page order" in props["objective_scores"]["description"].lower()
+    objective_props = props["objective_scores"]["items"]["properties"]
+    assert any(option.get("type") == "null" for option in objective_props["objective_code"]["anyOf"])
+    assert any(option.get("type") == "null" for option in objective_props["marks_awarded"]["anyOf"])
+    assert any(option.get("type") == "null" for option in objective_props["max_marks"]["anyOf"])
 
 
 def test_bulk_name_schema_is_strict_and_descriptive() -> None:
@@ -139,6 +146,38 @@ def test_bulk_name_schema_is_strict_and_descriptive() -> None:
     assert "student name" in schema["properties"]["student_name"]["description"].lower()
     assert "exam title" in schema["properties"]["student_name"]["description"].lower()
     assert "page header" in schema["properties"]["exam_name"]["description"].lower()
+
+
+def test_normalize_front_page_gemini_thinking_level_respects_valid_values(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERMARKS_FRONT_PAGE_GEMINI_DEFAULT_THINKING_LEVEL", "med")
+
+    assert _normalize_front_page_gemini_thinking_level("OFF") == "off"
+    assert _normalize_front_page_gemini_thinking_level(" low ") == "low"
+    assert _normalize_front_page_gemini_thinking_level("med") == "med"
+    assert _normalize_front_page_gemini_thinking_level("high") == "high"
+    assert _normalize_front_page_gemini_thinking_level("unexpected") == "med"
+
+
+def test_front_page_gemini_thinking_budget_uses_configured_levels(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_LOW", "64")
+    monkeypatch.setenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_MED", "256")
+    monkeypatch.setenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_HIGH", "1024")
+
+    assert _front_page_gemini_thinking_budget("off") == 0
+    assert _front_page_gemini_thinking_budget("low") == 64
+    assert _front_page_gemini_thinking_budget("med") == 256
+    assert _front_page_gemini_thinking_budget("high") == 1024
+
+
+def test_estimate_gemini_front_page_cost_usd_counts_thought_tokens() -> None:
+    estimated = _estimate_gemini_front_page_cost_usd(
+        model="gemini-2.5-flash",
+        prompt_tokens=2000,
+        candidate_tokens=300,
+        thought_tokens=500,
+    )
+
+    assert estimated == pytest.approx(0.0026, rel=1e-6)
 
 
 def test_recover_front_page_payload_salvages_name_and_totals_from_malformed_json() -> None:

@@ -298,7 +298,7 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
     calls: list[str] = []
 
     class StubExtractor:
-        def extract(self, image_path, request_id, *, model_override=None, template=None):
+        def extract(self, image_path, request_id, *, model_override=None, template=None, thinking_level_override=None):
             _ = (request_id, model_override, template)
             calls.append(str(image_path))
             student_label = Path(image_path).stem.replace("page_", "Student ")
@@ -316,6 +316,20 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
                     "warnings": [],
                 },
                 model="gemini-2.5-flash",
+                usage={
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "thinking_level": thinking_level_override or "low",
+                    "thinking_budget": 128,
+                    "prompt_tokens": 1000,
+                    "candidate_tokens": 120,
+                    "thought_tokens": 80,
+                    "total_tokens": 1200,
+                    "normalized_image_width": 800,
+                    "normalized_image_height": 1000,
+                    "normalized_image_bytes": 24000,
+                    "estimated_cost_usd": 0.0008,
+                },
             )
 
     monkeypatch.setattr(exams_router, "get_front_page_totals_extractor", lambda: StubExtractor())
@@ -327,6 +341,20 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
         bulk = ExamBulkUploadFile(exam_id=exam.id, original_filename="2 uploaded images", stored_path="")
         session.add(bulk)
         session.flush()
+        job = ExamIntakeJob(
+            exam_id=exam.id,
+            bulk_upload_id=bulk.id,
+            status="running",
+            stage="extracting_front_pages",
+            page_count=2,
+            pages_built=2,
+            pages_processed=0,
+            thinking_level="med",
+            metrics_json=json.dumps({"front_page_thinking_level": "med"}),
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
 
         rendered_paths: list[Path] = []
         for idx in range(1, 3):
@@ -339,6 +367,7 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
             bulk=bulk,
             rendered_paths=rendered_paths,
             session=session,
+            job=job,
         )
 
         candidates, warnings = exams_router._build_bulk_preview_from_detections(
@@ -361,10 +390,99 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
         assert exam.name == "Math 20-1 Unit Test"
         assert len(calls) == 2
         assert len(created) == 2
+        session.refresh(job)
+        metrics = json.loads(job.metrics_json or "{}")
+        assert metrics["front_page_calls"] == 2
+        assert metrics["front_page_thinking_level"] == "med"
+        assert metrics["front_page_prompt_tokens"] == 2000
+        assert metrics["front_page_output_tokens"] == 240
+        assert metrics["front_page_thought_tokens"] == 160
+        assert metrics["front_page_avg_cost_per_page_usd"] == pytest.approx(0.0008)
 
         submissions = session.exec(select(Submission).where(Submission.exam_id == exam.id).order_by(Submission.id)).all()
         assert len(submissions) == 2
         assert all((submission.front_page_candidates_json or "").strip() for submission in submissions)
+
+
+def test_start_exam_intake_job_persists_selected_thinking_level(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    spawned_job_ids: list[int] = []
+    monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: spawned_job_ids.append(job_id))
+
+    with TestClient(app) as client:
+        exam = client.post("/api/exams", json={"name": "Thinking Level Exam"})
+        assert exam.status_code == 201
+        exam_id = exam.json()["id"]
+
+        response = client.post(
+            f"/api/exams/{exam_id}/intake-jobs/start",
+            files=[("files", ("paper-1.png", _tiny_png_bytes(), "image/png"))],
+            data={"front_page_thinking_level": "high"},
+        )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["thinking_level"] == "high"
+    assert spawned_job_ids
+
+    with Session(db.engine) as session:
+        job = session.exec(select(ExamIntakeJob).where(ExamIntakeJob.exam_id == exam_id)).first()
+        assert job is not None
+        assert job.thinking_level == "high"
+        assert json.loads(job.metrics_json or "{}")["front_page_thinking_level"] == "high"
+
+
+def test_retry_exam_intake_job_preserves_thinking_level(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    spawned_job_ids: list[int] = []
+    monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: spawned_job_ids.append(job_id))
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Retry Thinking Exam", status=ExamStatus.FAILED)
+        session.add(exam)
+        session.flush()
+        bulk = ExamBulkUploadFile(exam_id=exam.id, original_filename="papers.pdf", stored_path="")
+        session.add(bulk)
+        session.flush()
+        job = ExamIntakeJob(
+            exam_id=exam.id,
+            bulk_upload_id=bulk.id,
+            status="failed",
+            stage="review_not_ready",
+            page_count=2,
+            pages_built=2,
+            pages_processed=2,
+            thinking_level="off",
+        )
+        session.add(job)
+        session.commit()
+        exam_id = exam.id
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/exams/{exam_id}/intake-jobs/retry")
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["thinking_level"] == "off"
+    assert spawned_job_ids
+
+    with Session(db.engine) as session:
+        jobs = session.exec(
+            select(ExamIntakeJob).where(ExamIntakeJob.exam_id == exam_id).order_by(ExamIntakeJob.created_at.asc(), ExamIntakeJob.id.asc())
+        ).all()
+        assert len(jobs) == 2
+        assert jobs[-1].thinking_level == "off"
+        assert json.loads(jobs[-1].metrics_json or "{}")["front_page_thinking_level"] == "off"
 
 
 def test_delete_exam_removes_related_rows_and_local_files(tmp_path, monkeypatch) -> None:
