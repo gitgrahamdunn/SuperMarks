@@ -253,6 +253,35 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
   border-radius: 10px;
 }
 
+.front-page-preview-nav,
+.front-page-preview-subnav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .45rem;
+  margin-top: .08rem;
+}
+
+.front-page-preview-subnav {
+  margin-top: 0;
+}
+
+.front-page-preview-nav .btn,
+.front-page-preview-subnav .btn {
+  min-width: 2rem;
+  min-height: 1.9rem;
+  padding: .05rem .45rem;
+}
+
+.front-page-preview-nav-label,
+.front-page-preview-subnav-label {
+  min-width: 3.7rem;
+  text-align: center;
+  font-size: .78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 .front-page-swipe-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -431,6 +460,17 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
 
   .front-page-swipe-page-image {
     max-height: 44vh;
+  }
+
+  .front-page-preview-nav,
+  .front-page-preview-subnav {
+    gap: .35rem;
+  }
+
+  .front-page-preview-nav .btn,
+  .front-page-preview-subnav .btn {
+    min-width: 1.9rem;
+    min-height: 1.8rem;
   }
 
   .front-page-swipe-summary-compact {
@@ -1171,7 +1211,18 @@ body {
 .library-card-progress {
   display: flex;
   flex-direction: column;
-  gap: .25rem;
+  gap: .32rem;
+  min-height: 2.2rem;
+}
+.library-card-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: .75rem;
+  font-size: .82rem;
+}
+.library-card-progress-meta strong {
+  font-size: .88rem;
 }
 .library-card-progress-bar {
   width: 100%;
@@ -1183,11 +1234,10 @@ body {
 }
 .library-card-progress-bar span {
   display: block;
-  width: 42%;
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--primary), color-mix(in srgb, var(--success), white 8%));
-  animation: library-progress-slide 1.15s ease-in-out infinite;
+  transition: width .28s ease;
 }
 .library-card-progress-bar span::after {
   content: "";
@@ -1201,10 +1251,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: .7rem;
-}
-@keyframes library-progress-slide {
-  0% { transform: translateX(-90%); }
-  100% { transform: translateX(230%); }
 }
 @media (max-width: 900px) {
   .workflow-grid, .result-card-grid, .command-center-grid { grid-template-columns: 1fr; }

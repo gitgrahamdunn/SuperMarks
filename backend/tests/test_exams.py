@@ -20,10 +20,10 @@ from fastapi.testclient import TestClient
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from app import db
-from app.ai.openai_vision import BulkNameDetectionResult, OpenAIAnswerKeyParser, ParseResult
+from app.ai.openai_vision import BulkNameDetectionResult, FrontPageTotalsExtractResult, OpenAIAnswerKeyParser, ParseResult
 from app.main import app
 from app.routers import exams as exams_router
-from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
+from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
 from app.settings import settings
 
 def _tiny_png_bytes() -> bytes:
@@ -87,8 +87,15 @@ def test_list_exams_includes_latest_intake_job_state(tmp_path) -> None:
             status="running",
             stage="detecting_names",
             page_count=3,
+            pages_built=3,
             pages_processed=2,
             submissions_created=0,
+            candidates_ready=0,
+            review_open_threshold=3,
+            initial_review_ready=False,
+            fully_warmed=False,
+            review_ready=False,
+            lease_expires_at=utcnow() + timedelta(minutes=5),
             metrics_json=json.dumps({"render_upload_ms": 11.2}),
         ))
         session.commit()
@@ -101,8 +108,74 @@ def test_list_exams_includes_latest_intake_job_state(tmp_path) -> None:
     exam_row = next(item for item in payload if item["name"] == "Queued Intake Exam")
     assert exam_row["intake_job"]["status"] == "running"
     assert exam_row["intake_job"]["stage"] == "detecting_names"
+    assert exam_row["intake_job"]["pages_built"] == 3
     assert exam_row["intake_job"]["pages_processed"] == 2
+    assert exam_row["intake_job"]["candidates_ready"] == 0
+    assert exam_row["intake_job"]["review_open_threshold"] == 3
+    assert exam_row["intake_job"]["initial_review_ready"] is False
+    assert exam_row["intake_job"]["fully_warmed"] is False
+    assert exam_row["intake_job"]["review_ready"] is False
     assert exam_row["intake_job"]["metrics"]["render_upload_ms"] == 11.2
+
+
+def test_list_exams_auto_resumes_stalled_intake_job(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    resumed_job_ids: list[int] = []
+    monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: resumed_job_ids.append(job_id))
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Stalled Intake Exam", status=ExamStatus.DRAFT)
+        session.add(exam)
+        session.flush()
+        job = ExamIntakeJob(
+            exam_id=exam.id,
+            status="running",
+            stage="warming_initial_review",
+            page_count=3,
+            pages_built=3,
+            pages_processed=3,
+            submissions_created=3,
+            candidates_ready=1,
+            review_open_threshold=3,
+            initial_review_ready=True,
+            fully_warmed=False,
+            review_ready=False,
+            lease_expires_at=utcnow() - timedelta(minutes=3),
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        job_id = job.id
+
+    with TestClient(app) as client:
+        response = client.get("/api/exams")
+
+    assert response.status_code == 200
+    payload = response.json()
+    exam_row = next(item for item in payload if item["name"] == "Stalled Intake Exam")
+    assert exam_row["status"] == "REVIEWING"
+    assert exam_row["intake_job"]["status"] == "queued"
+    assert exam_row["intake_job"]["stage"] == "resuming"
+    assert exam_row["intake_job"]["initial_review_ready"] is True
+    assert exam_row["intake_job"]["fully_warmed"] is False
+    assert exam_row["intake_job"]["review_ready"] is True
+    assert exam_row["intake_job"]["error_message"] is None
+    assert resumed_job_ids == [job_id]
+
+
+def test_split_initial_and_remaining_review_ids_uses_first_ten_threshold(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERMARKS_FRONT_PAGE_REVIEW_OPEN_THRESHOLD", "10")
+
+    initial_ids, remaining_ids, threshold = exams_router._split_initial_and_remaining_review_ids(list(range(1, 31)))
+
+    assert threshold == 10
+    assert initial_ids == list(range(1, 11))
+    assert remaining_ids == list(range(11, 31))
 
 
 def test_mark_exam_review_ready_requires_pages_and_candidate_payloads(tmp_path) -> None:
@@ -213,6 +286,85 @@ def test_segment_bulk_candidates_keeps_weak_later_page_name_reads_in_same_submis
     assert candidates[0].student_name == "Jordan Lee"
     assert candidates[0].page_start == 1
     assert candidates[0].page_end == 3
+
+
+def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    calls: list[str] = []
+
+    class StubExtractor:
+        def extract(self, image_path, request_id, *, model_override=None, template=None):
+            _ = (request_id, model_override, template)
+            calls.append(str(image_path))
+            student_label = Path(image_path).stem.replace("page_", "Student ")
+            return FrontPageTotalsExtractResult(
+                payload={
+                    "exam_name": {"value_text": "Math 20-1 Unit Test", "confidence": 0.9, "evidence": []},
+                    "student_name": {
+                        "value_text": student_label,
+                        "confidence": 0.94,
+                        "evidence": [{"page_number": 1, "quote": student_label, "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.05}],
+                    },
+                    "overall_marks_awarded": {"value_text": "42", "confidence": 0.9, "evidence": []},
+                    "overall_max_marks": {"value_text": "50", "confidence": 0.9, "evidence": []},
+                    "objective_scores": [],
+                    "warnings": [],
+                },
+                model="gemini-2.5-flash",
+            )
+
+    monkeypatch.setattr(exams_router, "get_front_page_totals_extractor", lambda: StubExtractor())
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Untitled Test")
+        session.add(exam)
+        session.flush()
+        bulk = ExamBulkUploadFile(exam_id=exam.id, original_filename="2 uploaded images", stored_path="")
+        session.add(bulk)
+        session.flush()
+
+        rendered_paths: list[Path] = []
+        for idx in range(1, 3):
+            path = tmp_path / f"page_{idx:04d}.png"
+            path.write_bytes(_tiny_png_bytes())
+            rendered_paths.append(path)
+
+        detections, prefilled = exams_router._extract_image_upload_front_page_pages(
+            exam=exam,
+            bulk=bulk,
+            rendered_paths=rendered_paths,
+            session=session,
+        )
+
+        candidates, warnings = exams_router._build_bulk_preview_from_detections(
+            upload_files=None,
+            bulk=bulk,
+            detections=detections,
+            roster=None,
+        )
+        created = exams_router._finalize_bulk_candidates(
+            exam=exam,
+            bulk=bulk,
+            candidates=candidates,
+            session=session,
+            prefilled_candidate_payloads=prefilled,
+        )
+        session.commit()
+        session.refresh(exam)
+
+        assert warnings == []
+        assert exam.name == "Math 20-1 Unit Test"
+        assert len(calls) == 2
+        assert len(created) == 2
+
+        submissions = session.exec(select(Submission).where(Submission.exam_id == exam.id).order_by(Submission.id)).all()
+        assert len(submissions) == 2
+        assert all((submission.front_page_candidates_json or "").strip() for submission in submissions)
 
 
 def test_delete_exam_removes_related_rows_and_local_files(tmp_path, monkeypatch) -> None:

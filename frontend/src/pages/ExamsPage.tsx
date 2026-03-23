@@ -4,7 +4,7 @@ import { ApiError, api, buildApiUrl } from '../api/client';
 import { FileUploader } from '../components/FileUploader';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/ToastProvider';
-import type { ExamRead } from '../types/api';
+import type { ExamIntakeJobRead, ExamRead } from '../types/api';
 
 type WizardStep = 'creating' | 'uploading' | 'building_pages' | 'parsing' | 'done';
 type ParseChecklistStepId =
@@ -107,10 +107,18 @@ const formatExamDateTime = (value: string) => {
 
 const normalizeExamStatus = (exam: ExamRead) => {
   const intakeStatus = exam.intake_job?.status?.trim().toLowerCase();
+  const initialReviewReady = Boolean(exam.intake_job?.initial_review_ready || exam.intake_job?.review_ready);
+  const fullyWarmed = Boolean(exam.intake_job?.fully_warmed);
   if (intakeStatus === 'queued' || intakeStatus === 'running') {
+    if (initialReviewReady) {
+      return { label: fullyWarmed ? 'In progress' : 'Review ready', tone: 'status-ready' };
+    }
     return { label: 'Preparing', tone: 'status-in-progress' };
   }
   if (intakeStatus === 'failed') {
+    if (initialReviewReady) {
+      return { label: 'Review ready', tone: 'status-ready' };
+    }
     return { label: 'Failed', tone: 'status-blocked' };
   }
 
@@ -134,6 +142,76 @@ const normalizeExamStatus = (exam: ExamRead) => {
     return { label: 'Needs review', tone: 'status-blocked' };
   }
   return { label: exam.status || 'Active workspace', tone: 'status-neutral' };
+};
+
+const PREPARING_STAGE_LABELS: Record<string, string> = {
+  queued: 'Preparing files',
+  resuming: 'Resuming',
+  extracting_front_pages: 'Reading front pages',
+  detecting_names: 'Reading names',
+  creating_submissions: 'Building review queue',
+  warming_initial_review: 'Preparing first papers',
+  warming_remaining_review: 'Preparing remaining papers',
+  warming_review: 'Preparing review',
+  finalizing_review: 'Finalizing review',
+  complete: 'Ready to review',
+  partial_ready: 'Review ready',
+  review_not_ready: 'Review blocked',
+  stalled: 'Needs retry',
+};
+
+const formatIntakeStage = (job: ExamIntakeJobRead | null | undefined) => {
+  if (!job) return 'Preparing';
+  return PREPARING_STAGE_LABELS[job.stage] || job.stage.replace(/_/g, ' ');
+};
+
+const formatPreparingSummary = (job: ExamIntakeJobRead | null | undefined) => {
+  if (!job) return 'Preparing review';
+  const pageCount = Math.max(job.page_count || 0, 0);
+  const pagesBuilt = Math.min(Math.max(job.pages_built || 0, 0), pageCount || 0);
+  const submissionsCreated = Math.max(job.submissions_created || 0, 0);
+  const candidatesReady = Math.min(Math.max(job.candidates_ready || 0, 0), submissionsCreated || 0);
+  const reviewOpenThreshold = Math.min(Math.max(job.review_open_threshold || 0, 0), submissionsCreated || 0);
+  const parts = [`${pagesBuilt}/${pageCount || 0} pages built`];
+  if (submissionsCreated > 0 && reviewOpenThreshold > 0 && !job.initial_review_ready) {
+    parts.push(`${Math.min(candidatesReady, reviewOpenThreshold)}/${reviewOpenThreshold} papers ready to open`);
+  } else if (submissionsCreated > 0 && reviewOpenThreshold > 0 && !job.fully_warmed) {
+    parts.push(`${reviewOpenThreshold}/${reviewOpenThreshold} papers ready to open`);
+    parts.push(`${candidatesReady}/${submissionsCreated} total papers ready`);
+  } else if (submissionsCreated > 0) {
+    parts.push(`${candidatesReady}/${submissionsCreated} review items ready`);
+  }
+  return parts.join(' · ');
+};
+
+const intakeProgressPercent = (job: ExamIntakeJobRead | null | undefined) => {
+  if (!job) return 8;
+  if (job.fully_warmed || (job.status === 'complete' && job.fully_warmed)) return 100;
+
+  const pageCount = Math.max(job.page_count || 0, 1);
+  const pagesBuiltProgress = Math.min((job.pages_built || 0) / pageCount, 1);
+  const pagesProcessedProgress = Math.min((job.pages_processed || 0) / pageCount, 1);
+  const submissionsCreatedProgress = job.submissions_created > 0 ? 1 : 0;
+  const reviewOpenThreshold = Math.max(job.review_open_threshold || 0, 1);
+  const initialReviewProgress = job.submissions_created > 0
+    ? Math.min((job.candidates_ready || 0) / reviewOpenThreshold, 1)
+    : 0;
+  const candidatesReadyProgress = job.submissions_created > 0
+    ? Math.min((job.candidates_ready || 0) / job.submissions_created, 1)
+    : 0;
+
+  if (job.initial_review_ready || job.review_ready) {
+    const weightedPostOpen = 0.7 + (candidatesReadyProgress * 0.26);
+    return Math.max(72, Math.min(98, Math.round(weightedPostOpen * 100)));
+  }
+
+  const weighted = (
+    pagesBuiltProgress * 0.25
+    + pagesProcessedProgress * 0.2
+    + submissionsCreatedProgress * 0.1
+    + initialReviewProgress * 0.45
+  );
+  return Math.max(8, Math.min(96, Math.round(weighted * 100)));
 };
 
 
@@ -172,10 +250,16 @@ export function ExamsPage() {
     [sortedExams, searchTerm],
   );
   const activeExamCount = exams.filter((exam) => !normalizeExamStatus(exam).label.toLowerCase().includes('complete')).length;
-  const hasRunningIntake = exams.some((exam) => {
-    const jobStatus = exam.intake_job?.status?.trim().toLowerCase();
-    return jobStatus === 'queued' || jobStatus === 'running';
-  });
+  const activeIntakeExamIds = useMemo(
+    () => exams
+      .filter((exam) => {
+        const jobStatus = exam.intake_job?.status?.trim().toLowerCase();
+        return jobStatus === 'queued' || jobStatus === 'running';
+      })
+      .map((exam) => exam.id)
+      .sort((a, b) => a - b),
+    [exams],
+  );
 
   const loadExams = async () => {
     try {
@@ -193,12 +277,56 @@ export function ExamsPage() {
   }, []);
 
   useEffect(() => {
-    if (!hasRunningIntake) return;
+    if (activeIntakeExamIds.length === 0) return;
+
+    let cancelled = false;
+
+    const pollActiveJobs = async () => {
+      const results = await Promise.allSettled(activeIntakeExamIds.map((examId) => api.getLatestExamIntakeJob(examId)));
+      if (cancelled) return;
+
+      let shouldRefreshExams = false;
+      const nextJobsByExamId = new Map<number, ExamRead['intake_job']>();
+      activeIntakeExamIds.forEach((examId, index) => {
+        const result = results[index];
+        if (result.status !== 'fulfilled') return;
+        nextJobsByExamId.set(examId, result.value);
+        const status = result.value?.status?.trim().toLowerCase();
+        if (status === 'complete' || status === 'failed') {
+          shouldRefreshExams = true;
+        }
+      });
+
+      setExams((prev) => prev.map((exam) => {
+        if (!nextJobsByExamId.has(exam.id)) return exam;
+        const nextJob = nextJobsByExamId.get(exam.id) ?? null;
+        const nextStatus = nextJob?.status?.trim().toLowerCase();
+        const patchedStatus = nextJob?.initial_review_ready
+          ? 'REVIEWING'
+          : nextStatus === 'failed'
+            ? 'FAILED'
+            : exam.status;
+        return {
+          ...exam,
+          status: patchedStatus,
+          intake_job: nextJob,
+        };
+      }));
+
+      if (shouldRefreshExams) {
+        void loadExams();
+      }
+    };
+
+    void pollActiveJobs();
     const id = window.setInterval(() => {
-      void loadExams();
-    }, 2500);
-    return () => window.clearInterval(id);
-  }, [hasRunningIntake]);
+      void pollActiveJobs();
+    }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [activeIntakeExamIds.join(','), showError]);
 
   const handleDeleteExam = async (exam: ExamRead) => {
     const confirmed = window.confirm(`Delete "${exam.name}" and all of its submissions, parsing jobs, and results? This cannot be undone.`);
@@ -351,9 +479,9 @@ export function ExamsPage() {
       setParseProgress(100);
       updateCurrentStep('done');
       showSuccess('Workspace created. Papers are preparing in Home.');
-      await loadExams();
       requestControllerRef.current = null;
       dismissModal();
+      void loadExams();
       return;
     } catch (err) {
       const stepName = currentStepRef.current;
@@ -531,16 +659,6 @@ export function ExamsPage() {
             <p className="metric-value">{activeExamCount}</p>
             <p className="metric-meta">Still in progress.</p>
           </article>
-          <article className="metric-card">
-            <p className="metric-label">Recent</p>
-            <p className="metric-value">{Math.min(sortedExams.length, 3)}</p>
-            <p className="metric-meta">Latest workspaces.</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-label">Latest activity</p>
-            <p className="metric-value">{sortedExams.length > 0 ? formatExamDate(sortedExams[0].created_at) : '—'}</p>
-            <p className="metric-meta">Most recent workspace.</p>
-          </article>
         </div>
       </section>
 
@@ -581,9 +699,15 @@ export function ExamsPage() {
             {filteredExams.map((exam) => {
               const status = normalizeExamStatus(exam);
               const isDeleting = deletingExamId === exam.id;
+              const intakeJob = exam.intake_job;
               const isPreparing = status.label === 'Preparing';
               const isFailed = status.label === 'Failed';
-              const canOpenWorkspace = !isPreparing && !isFailed;
+              const initialReviewReady = Boolean(intakeJob?.initial_review_ready || intakeJob?.review_ready);
+              const fullyWarmed = Boolean(intakeJob?.fully_warmed);
+              const canOpenWorkspace = initialReviewReady || (!isPreparing && !isFailed);
+              const preparingStageLabel = formatIntakeStage(exam.intake_job);
+              const preparingSummary = formatPreparingSummary(exam.intake_job);
+              const preparingPercent = intakeProgressPercent(exam.intake_job);
               return (
                 <article key={exam.id} className="workspace-card">
                   <div className="workspace-card-header">
@@ -597,19 +721,28 @@ export function ExamsPage() {
                     <span>Created {formatExamDate(exam.created_at)}</span>
                     <span>Exam ID {exam.id}</span>
                   </div>
-                  {isPreparing && (
+                  {(isPreparing || (canOpenWorkspace && intakeJob && !fullyWarmed)) && (
                     <div className="library-card-progress" aria-label="Preparing test">
+                      <div className="library-card-progress-meta">
+                        <strong>{preparingStageLabel}</strong>
+                        <span>{preparingPercent}%</span>
+                      </div>
                       <div className="library-card-progress-bar" aria-hidden="true">
-                        <span />
+                        <span style={{ width: `${preparingPercent}%` }} />
                       </div>
                     </div>
                   )}
-                  {isPreparing && exam.intake_job && (
+                  {exam.intake_job && (isPreparing || (canOpenWorkspace && !fullyWarmed)) && (
                     <p className="subtle-text" style={{ margin: 0 }}>
-                      {exam.intake_job.pages_processed}/{exam.intake_job.page_count} pages ready
+                      {preparingSummary}
                     </p>
                   )}
-                  {isFailed && exam.intake_job?.error_message && (
+                  {canOpenWorkspace && intakeJob && !fullyWarmed && (
+                    <p className="subtle-text" style={{ margin: 0 }}>
+                      You can open the workspace now. Remaining papers will keep preparing in the background.
+                    </p>
+                  )}
+                  {intakeJob?.status === 'failed' && exam.intake_job?.error_message && (
                     <p className="warning-text" style={{ margin: 0 }}>{exam.intake_job.error_message}</p>
                   )}
                   <div className="actions-row" style={{ marginTop: 0 }}>
@@ -620,7 +753,7 @@ export function ExamsPage() {
                         {isPreparing ? 'Preparing…' : 'Unavailable'}
                       </button>
                     )}
-                    {isFailed && (
+                    {(isFailed || (canOpenWorkspace && intakeJob && !fullyWarmed && intakeJob.status === 'failed')) && (
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"

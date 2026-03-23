@@ -247,6 +247,11 @@ def _front_page_provider_api_key() -> str:
     explicit = os.getenv("SUPERMARKS_FRONT_PAGE_API_KEY", "").strip()
     if explicit:
         return explicit
+    if _front_page_provider_name() == "gemini":
+        return (
+            os.getenv("GEMINI_API_KEY", "").strip()
+            or os.getenv("GOOGLE_API_KEY", "").strip()
+        )
     openai_key = os.getenv("OPENAI_API_KEY", "").strip()
     if _front_page_provider_name() != "doubleword":
         return openai_key
@@ -260,6 +265,8 @@ def _front_page_provider_base_url() -> str | None:
     )
     if value:
         return value
+    if _front_page_provider_name() == "gemini":
+        return "https://generativelanguage.googleapis.com"
     if _front_page_provider_name() == "doubleword":
         fallback = os.getenv("SUPERMARKS_LLM_BASE_URL", "").strip()
         return fallback or None
@@ -270,6 +277,8 @@ def _front_page_provider_name() -> str:
     configured = os.getenv("SUPERMARKS_FRONT_PAGE_PROVIDER", "").strip()
     if configured:
         return configured
+    if os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip():
+        return "gemini"
     return _provider_name()
 
 
@@ -277,6 +286,8 @@ def _front_page_model() -> str:
     configured = os.getenv("SUPERMARKS_FRONT_PAGE_MODEL", "").strip()
     if configured:
         return configured
+    if _front_page_provider_name() == "gemini":
+        return "gemini-2.5-flash"
     if _front_page_provider_name() == "doubleword":
         return (
             os.getenv("SUPERMARKS_KEY_PARSE_NANO_MODEL", "").strip()
@@ -290,6 +301,8 @@ def _front_page_mini_model() -> str:
     configured = os.getenv("SUPERMARKS_FRONT_PAGE_MODEL", "").strip()
     if configured:
         return configured
+    if _front_page_provider_name() == "gemini":
+        return _front_page_model()
     return (
         os.getenv("SUPERMARKS_KEY_PARSE_MINI_MODEL", "").strip()
         or "gpt-5-mini"
@@ -300,6 +313,8 @@ def _front_page_nano_model() -> str:
     configured = os.getenv("SUPERMARKS_FRONT_PAGE_MODEL", "").strip()
     if configured:
         return configured
+    if _front_page_provider_name() == "gemini":
+        return _front_page_model()
     if _front_page_provider_name() == "doubleword":
         return (
             os.getenv("SUPERMARKS_KEY_PARSE_NANO_MODEL", "").strip()
@@ -857,6 +872,76 @@ class BulkNameDetector(Protocol):
         """Detect student name from a single rendered page image."""
 
 
+class GeminiStructuredVisionClient:
+    def __init__(self, timeout_seconds: float = 60.0) -> None:
+        api_key = _front_page_provider_api_key()
+        if not api_key:
+            raise RuntimeError("SUPERMARKS_FRONT_PAGE_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY is not set")
+        self._api_key = api_key
+        self._base_url = (_front_page_provider_base_url() or "https://generativelanguage.googleapis.com").rstrip("/")
+        self._client = httpx.Client(timeout=timeout_seconds)
+
+    def generate_json(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        image: bytes,
+        mime_type: str,
+        response_json_schema: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        encoded = base64.b64encode(image).decode("utf-8")
+        normalized_mime = mime_type.lower().strip()
+        if normalized_mime not in {"image/png", "image/jpeg"}:
+            normalized_mime = "image/jpeg"
+        response = self._client.post(
+            f"{self._base_url}/v1beta/models/{model}:generateContent",
+            params={"key": self._api_key},
+            json={
+                "contents": [{
+                    "parts": [
+                        {"text": prompt},
+                        {"inlineData": {"mimeType": normalized_mime, "data": encoded}},
+                    ],
+                }],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    **({"responseJsonSchema": response_json_schema} if response_json_schema else {}),
+                },
+            },
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise OpenAIRequestError(
+                status_code=response.status_code,
+                body=response.text,
+                message=f"Gemini request failed: {exc}",
+            ) from exc
+        payload = response.json()
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            raise OpenAIRequestError(
+                status_code=response.status_code,
+                body=response.text,
+                message="Gemini request failed: empty candidate response",
+            )
+        content = candidates[0].get("content") if isinstance(candidates[0], dict) else None
+        parts = content.get("parts") if isinstance(content, dict) else None
+        text = ""
+        if isinstance(parts, list):
+            for part in parts:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    text += part["text"]
+        if not text.strip():
+            raise OpenAIRequestError(
+                status_code=response.status_code,
+                body=response.text,
+                message="Gemini request failed: empty text response",
+            )
+        return _load_json_with_fallbacks(_normalize_model_response_text(text))
+
+
 class OpenAIBulkNameDetector:
     def __init__(self, timeout_seconds: float = 60.0) -> None:
         api_key = _front_page_provider_api_key()
@@ -934,6 +1019,39 @@ class OpenAIBulkNameDetector:
             raise OpenAIRequestError(status_code=status_code, body=str(exc), message=f"OpenAI request failed: {exc}") from exc
 
 
+class GeminiBulkNameDetector:
+    def __init__(self, timeout_seconds: float = 60.0) -> None:
+        self._client = GeminiStructuredVisionClient(timeout_seconds=timeout_seconds)
+
+    def _build_prompt(self) -> str:
+        return (
+            "Extract two things from this exam page and return strict JSON only. "
+            "1. student_name: the student name from top header fields like Name or Student. "
+            "2. exam_name: the test title or course assessment title shown in the page header. "
+            "Do not return the student name as the exam title. "
+            "Also return confidence (0..1) for the student name read and evidence as normalized x,y,w,h coordinates for the student name field when visible."
+        )
+
+    def detect(self, image_path: Path, page_number: int, model: str, request_id: str) -> BulkNameDetectionResult:
+        _ = request_id
+        normalized = normalize_key_page_image(image_path)
+        parsed = self._client.generate_json(
+            model=model,
+            prompt=self._build_prompt(),
+            image=normalized.image_bytes,
+            mime_type=normalized.mime_type,
+            response_json_schema=build_bulk_name_response_json_schema(),
+        )
+        evidence = parsed.get("evidence")
+        return BulkNameDetectionResult(
+            page_number=page_number,
+            student_name=str(parsed.get("student_name") or "").strip() or None,
+            exam_name=str(parsed.get("exam_name") or "").strip() or None,
+            confidence=float(parsed.get("confidence") or 0.0),
+            evidence=evidence if isinstance(evidence, dict) else None,
+        )
+
+
 class MockBulkNameDetector:
     def detect(self, image_path: Path, page_number: int, model: str, request_id: str) -> BulkNameDetectionResult:
         _ = (image_path, model, request_id)
@@ -945,13 +1063,17 @@ class MockBulkNameDetector:
 def _front_page_candidate_value_schema() -> dict[str, Any]:
     return {
         "type": "object",
+        "description": "One extracted value from the front-page summary, with the exact visible text and supporting evidence.",
+        "propertyOrdering": ["value_text", "confidence", "evidence"],
         "properties": {
-            "value_text": {"type": "string"},
-            "confidence": {"type": "number"},
+            "value_text": {"type": "string", "description": "Exact visible text from the page for this value."},
+            "confidence": {"type": "number", "description": "Confidence from 0 to 1 for this value."},
             "evidence": {
                 "type": "array",
+                "description": "Short evidence quotes and normalized box coordinates for where this value was read.",
                 "items": {
                     "type": "object",
+                    "propertyOrdering": ["page_number", "quote", "x", "y", "w", "h"],
                     "properties": {
                         "page_number": {"type": "integer"},
                         "quote": {"type": "string"},
@@ -969,22 +1091,98 @@ def _front_page_candidate_value_schema() -> dict[str, Any]:
 def build_front_page_totals_response_schema() -> dict[str, Any]:
     schema = {
         "type": "object",
+        "description": "Teacher-visible front-page score summary for one student paper page.",
+        "propertyOrdering": [
+            "exam_name",
+            "student_name",
+            "overall_marks_awarded",
+            "overall_max_marks",
+            "objective_scores",
+            "warnings",
+        ],
         "properties": {
-            "student_name": {"anyOf": [_front_page_candidate_value_schema(), {"type": "null"}]},
-            "overall_marks_awarded": {"anyOf": [_front_page_candidate_value_schema(), {"type": "null"}]},
-            "overall_max_marks": {"anyOf": [_front_page_candidate_value_schema(), {"type": "null"}]},
+            "exam_name": {
+                "description": "Printed exam or test title from the page header. This is not the student name.",
+                "anyOf": [_front_page_candidate_value_schema(), {"type": "null"}],
+            },
+            "student_name": {
+                "description": "Student name written on the paper. This is not the exam title.",
+                "anyOf": [_front_page_candidate_value_schema(), {"type": "null"}],
+            },
+            "overall_marks_awarded": {
+                "description": "Final overall awarded total for the full test, not an outcome row total.",
+                "anyOf": [_front_page_candidate_value_schema(), {"type": "null"}],
+            },
+            "overall_max_marks": {
+                "description": "Final overall possible total for the full test, not an outcome row max.",
+                "anyOf": [_front_page_candidate_value_schema(), {"type": "null"}],
+            },
             "objective_scores": {
                 "type": "array",
+                "description": "All visible outcome or objective summary rows in page order.",
                 "items": {
                     "type": "object",
+                    "propertyOrdering": ["objective_code", "marks_awarded", "max_marks"],
                     "properties": {
-                        "objective_code": _front_page_candidate_value_schema(),
-                        "marks_awarded": _front_page_candidate_value_schema(),
-                        "max_marks": {"anyOf": [_front_page_candidate_value_schema(), {"type": "null"}]},
+                        "objective_code": {
+                            **_front_page_candidate_value_schema(),
+                            "description": "Visible outcome or objective row label exactly as shown on the page.",
+                        },
+                        "marks_awarded": {
+                            **_front_page_candidate_value_schema(),
+                            "description": "Awarded score for this outcome row.",
+                        },
+                        "max_marks": {
+                            "description": "Possible score for this outcome row when shown.",
+                            "anyOf": [_front_page_candidate_value_schema(), {"type": "null"}],
+                        },
                     },
                 },
             },
-            "warnings": {"type": "array", "items": {"type": "string"}},
+            "warnings": {
+                "type": "array",
+                "description": "Any ambiguity, conflicts, or missing-structure notes detected while extracting the summary.",
+                "items": {"type": "string"},
+            },
+        },
+    }
+    _ensure_strict_schema_node(schema)
+    validate_schema_strictness(schema)
+    return schema
+
+
+def build_bulk_name_response_json_schema() -> dict[str, Any]:
+    schema = {
+        "type": "object",
+        "description": "Student-name and exam-title read from one exam page.",
+        "propertyOrdering": ["page_number", "student_name", "exam_name", "confidence", "evidence"],
+        "properties": {
+            "page_number": {"type": "integer", "description": "1-based page number for this read."},
+            "student_name": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "description": "Student name from fields like Name or Student. Not the exam title.",
+            },
+            "exam_name": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "description": "Printed exam or test title from the page header. Not the student name.",
+            },
+            "confidence": {"type": "number", "description": "Confidence from 0 to 1 for the student_name read."},
+            "evidence": {
+                "description": "Normalized box coordinates for the student-name field when visible.",
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "propertyOrdering": ["x", "y", "w", "h"],
+                        "properties": {
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "w": {"type": "number"},
+                            "h": {"type": "number"},
+                        },
+                    },
+                    {"type": "null"},
+                ],
+            },
         },
     }
     _ensure_strict_schema_node(schema)
@@ -1007,38 +1205,33 @@ def _build_front_page_totals_prompt(template: dict[str, object] | None = None) -
             overall_hint_parts.append("overall possible total")
         overall_hint = ", ".join(overall_hint_parts) if overall_hint_parts else "no overall total fields"
         return (
-            "You are extracting only the teacher-visible front-page score summary from a single student exam paper page. "
-            "This exam already has a known front-page summary template. Use the printed labels, printed table layout, and printed score columns to match the page against that template before reading values. "
+            "Extract only the teacher-visible front-page score summary from one student exam page. "
+            "Also return the exam or test title from the printed page header in exam_name when visible. "
+            "This exam already has a known front-page template. Match the printed summary table or score area to that template before reading values. "
             f"The {stability_hint} expected outcome rows are: {outcome_hint}. "
             f"The expected overall summary fields are: {overall_hint}. "
-            "Your job is to find the scores for that known structure, not to rediscover a new structure unless the page clearly shows a conflicting summary table. "
-            "Once a summary row is identified, the score values in that row may be typed or handwritten. Accept handwritten scores only when they are clearly written inside the summary row or score cell. "
-            "Ignore handwritten numbers elsewhere on the page, including question work, annotations, rubric notes, worked solutions, answer-key content, and per-question marks unless they are clearly repeated inside the front-page summary table. "
-            "Return each expected outcome row in page order when visible. If one expected row is partially unclear, still return the row and set the unclear field to null rather than dropping it. "
-            "If the page clearly shows an extra or conflicting summary row not in the known template, include it and add a warning describing the mismatch. "
-            "When a total is shown as a ratio like 42/50, return 42 as overall_marks_awarded and 50 as overall_max_marks. "
-            "When an objective row is shown as a ratio like OB1 18/20, return objective_code='OB1', marks_awarded='18', and max_marks='20'. "
-            "Do not invent missing rows. Do not infer hidden totals. Do not sum values yourself unless the page explicitly shows the summary you are returning. "
-            "If a field is not clearly visible, return null for that field or an empty list for objective_scores. "
-            "For each returned value, copy the exact visible text into value_text, set a 0..1 confidence, and include short evidence quotes with normalized box coordinates when possible. "
-            "If there is ambiguity between multiple candidate totals, choose the one most clearly presented as the final overall summary and add a warning describing the ambiguity. "
+            "Your job is to fill that known structure, not rediscover a new one, unless the page clearly shows a conflicting summary table. "
+            "Use printed labels, printed row layout, and printed score columns to identify the summary table. Scores inside that table may be typed or handwritten. Accept handwritten values only when they are clearly inside the summary row or score cell. Ignore handwritten numbers elsewhere on the page. "
+            "Return every expected visible outcome row in page order. If a row is visible but one field is unclear, return the row and set only the unclear field to null. "
+            "Do not confuse an outcome row total with the final overall total. If the page clearly shows an extra or conflicting summary row not in the known template, include it and add a warning. "
+            "If a total is shown as 42/50, return awarded=42 and max=50. If an outcome row is shown as OB1 18/20, return objective_code='OB1', marks_awarded='18', and max_marks='20'. "
+            "Do not invent rows, infer hidden totals, or sum values yourself. If a field is not clearly visible, return null, or return an empty list for objective_scores. "
+            "For each returned value, copy the exact visible text into value_text, set confidence 0..1, and include short evidence quotes with normalized box coordinates when possible. "
+            "If multiple candidate overall totals compete, choose the one most clearly shown as the final overall summary and add a warning. "
             "Return strict JSON only."
         )
 
     return (
-        "You are extracting only the teacher-visible front-page score summary from a single student exam paper page. "
-        "This is for a fast teacher confirmation workflow. If a student name is visible, return it exactly; do not redact or suppress it. "
-        "Your first priority is to find every visible objective/category/outcome score row shown in a front-page summary area or score table. Do not stop after finding the overall total. "
-        "Look across the full page for summary information that a teacher would copy from the front page: student name, overall awarded total, overall possible total, and all visible objective/category/outcome totals. "
-        "Use printed labels, printed table layout, and printed score columns to identify the summary table or grouped score area. Strongly prefer labels such as Name, Student, Total, Final, Score, Marks, Result, Outcome, Objective, Category, Strand, LO, or OB, but short labels like 1, 2, 3, 4, K, T, C, A, LO1, or OB1 can also be valid row labels when they appear in the printed summary structure. "
-        "Once a summary row is identified, the score values in that row may be typed or handwritten. Accept handwritten scores only when they are clearly written inside the summary row or score cell. Ignore handwritten numbers elsewhere on the page, including question work, annotations, rubric notes, worked solutions, answer-key content, and per-question marks unless they are clearly repeated inside the front-page summary table. "
-        "If a visible summary table contains multiple rows, return all visible rows in page order. Do not omit a row just because the label is short, generic, or partially unclear. If an outcome row is visible but one field is unclear, still return the row and set the unclear field to null rather than dropping the row. "
-        "When a total is shown as a ratio like 42/50, return 42 as overall_marks_awarded and 50 as overall_max_marks. "
-        "When an objective row is shown as a ratio like OB1 18/20, return objective_code='OB1', marks_awarded='18', and max_marks='20'. "
-        "Do not invent missing rows. Do not infer hidden totals. Do not sum values yourself unless the page explicitly shows the summary you are returning. "
-        "If a field is not clearly visible, return null for that field or an empty list for objective_scores. "
-        "For each returned value, copy the exact visible text into value_text, set a 0..1 confidence, and include short evidence quotes with normalized box coordinates when possible. "
-        "If there is ambiguity between multiple candidate totals, choose the one most clearly presented as the final overall summary and add a warning describing the ambiguity. "
+        "Extract only the teacher-visible front-page score summary from one student exam page. "
+        "If a student name is visible, return it exactly in student_name. If the printed page header shows the exam or test title, return that in exam_name. Do not confuse the student name with the test title. "
+        "First find the printed summary table or score area that a teacher would copy from. Then return all visible outcome/objective/category rows from that summary, plus the final overall awarded total and overall max when shown. Do not stop after finding the overall total. "
+        "Use printed labels, printed row layout, and printed score columns to identify the summary structure. Labels may be words like Outcome, Objective, Category, Strand, LO, OB, Total, or Name, and may also be short labels like 1, 2, 3, 4, K, T, C, A, LO1, or OB1 when they appear in the printed summary structure. "
+        "Scores inside the summary table may be typed or handwritten. Accept handwritten values only when they are clearly inside the summary row or score cell. Ignore handwritten numbers elsewhere on the page. "
+        "Return all visible outcome rows in page order. Do not omit a row just because the label is short or partially unclear. If a row is visible but one field is unclear, return the row and set only the unclear field to null. "
+        "Do not confuse an outcome row total with the final overall total. If a total is shown as 42/50, return awarded=42 and max=50. If an outcome row is shown as OB1 18/20, return objective_code='OB1', marks_awarded='18', and max_marks='20'. "
+        "Do not invent rows, infer hidden totals, or sum values yourself. If a field is not clearly visible, return null, or return an empty list for objective_scores. "
+        "For each returned value, copy the exact visible text into value_text, set confidence 0..1, and include short evidence quotes with normalized box coordinates when possible. "
+        "If multiple candidate overall totals compete, choose the one most clearly shown as the final overall summary and add a warning. "
         "Return strict JSON only."
     )
 
@@ -1111,6 +1304,32 @@ class OpenAIFrontPageTotalsExtractor:
             raise OpenAIRequestError(status_code=status_code, body=str(exc), message=f"OpenAI request failed: {exc}") from exc
 
 
+class GeminiFrontPageTotalsExtractor:
+    def __init__(self, timeout_seconds: float = 60.0) -> None:
+        self._client = GeminiStructuredVisionClient(timeout_seconds=timeout_seconds)
+
+    def extract(
+        self,
+        image_path: Path,
+        request_id: str,
+        *,
+        model_override: str | None = None,
+        template: dict[str, object] | None = None,
+    ) -> FrontPageTotalsExtractResult:
+        _ = request_id
+        normalized = normalize_key_page_image(image_path)
+        model = model_override or _front_page_model()
+        prompt = _build_front_page_totals_prompt(template)
+        parsed = self._client.generate_json(
+            model=model,
+            prompt=prompt,
+            image=normalized.image_bytes,
+            mime_type=normalized.mime_type,
+            response_json_schema=build_front_page_totals_response_schema(),
+        )
+        return FrontPageTotalsExtractResult(payload=parsed, model=model)
+
+
 class MockFrontPageTotalsExtractor:
     def extract(
         self,
@@ -1123,6 +1342,11 @@ class MockFrontPageTotalsExtractor:
         _ = (image_path, request_id, template)
         return FrontPageTotalsExtractResult(
             payload={
+                "exam_name": {
+                    "value_text": "Math 20-1 Unit Test",
+                    "confidence": 0.9,
+                    "evidence": [{"page_number": 1, "quote": "Math 20-1 Unit Test", "x": 0.12, "y": 0.02, "w": 0.36, "h": 0.05}],
+                },
                 "student_name": {
                     "value_text": "Jordan Lee",
                     "confidence": 0.93,
@@ -1154,10 +1378,14 @@ class MockFrontPageTotalsExtractor:
 def get_front_page_totals_extractor() -> FrontPageTotalsExtractor:
     if os.getenv("OPENAI_MOCK", "").strip() == "1":
         return MockFrontPageTotalsExtractor()
+    if _front_page_provider_name() == "gemini":
+        return GeminiFrontPageTotalsExtractor()
     return OpenAIFrontPageTotalsExtractor()
 
 
 def get_bulk_name_detector() -> BulkNameDetector:
     if os.getenv("OPENAI_MOCK", "").strip() == "1":
         return MockBulkNameDetector()
+    if _front_page_provider_name() == "gemini":
+        return GeminiBulkNameDetector()
     return OpenAIBulkNameDetector()

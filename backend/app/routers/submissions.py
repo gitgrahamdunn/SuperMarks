@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import threading
@@ -35,7 +36,7 @@ from app.models import (
 )
 from app.pipeline.crops import crop_regions_and_stitch
 from app.pipeline.grade import get_grader
-from app.pipeline.pages import Pdf2ImageConverter, normalize_image_to_png
+from app.pipeline.pages import Pdf2ImageConverter, build_page_preview_image, normalize_image_to_png, preview_image_path_for_page
 from app.pipeline.transcribe import get_ocr_provider
 from app.ai.openai_vision import (
     OpenAIRequestError,
@@ -78,9 +79,9 @@ _ALLOWED_SUBMISSION_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 _VERCEL_SERVER_UPLOAD_LIMIT_BYTES = 25 * 1024 * 1024
 _FRONT_PAGE_CANDIDATE_LOCKS: dict[int, threading.Lock] = {}
 _FRONT_PAGE_CANDIDATE_LOCKS_GUARD = threading.Lock()
-_FRONT_PAGE_TEMPLATE_SEED_LIMIT = 5
-_FRONT_PAGE_TEMPLATE_MIN_STABLE_SAMPLES = 3
-_FRONT_PAGE_TEMPLATE_STABLE_THRESHOLD = 0.9
+_FRONT_PAGE_TEMPLATE_SEED_LIMIT = max(1, int(os.getenv("SUPERMARKS_FRONT_PAGE_TEMPLATE_SEED_LIMIT", "3") or "3"))
+_FRONT_PAGE_TEMPLATE_MIN_STABLE_SAMPLES = max(1, int(os.getenv("SUPERMARKS_FRONT_PAGE_TEMPLATE_MIN_STABLE_SAMPLES", "2") or "2"))
+_FRONT_PAGE_TEMPLATE_STABLE_THRESHOLD = float(os.getenv("SUPERMARKS_FRONT_PAGE_TEMPLATE_STABLE_THRESHOLD", "0.9") or "0.9")
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -276,6 +277,7 @@ def _build_pages_for_submission(submission: Submission, session: Session) -> lis
         page_paths = converter.convert(source_path, out_dir)
         for idx, page_path in enumerate(page_paths, 1):
             w, h = normalize_image_to_png(page_path, page_path)
+            build_page_preview_image(page_path)
             row = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=str(page_path), width=w, height=h)
             session.add(row)
             session.flush()
@@ -289,6 +291,7 @@ def _build_pages_for_submission(submission: Submission, session: Session) -> lis
             except BlobDownloadError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             w, h = normalize_image_to_png(source_path, out_path)
+            build_page_preview_image(out_path)
             row = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=str(out_path), width=w, height=h)
             session.add(row)
             session.flush()
@@ -753,6 +756,15 @@ def prepare_submission_for_marking(
     return status
 
 
+def _ensure_page_preview(image_path: Path) -> Path:
+    preview_path = preview_image_path_for_page(image_path)
+    if preview_path.exists():
+        return preview_path
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Page image not found")
+    return build_page_preview_image(image_path, preview_path)
+
+
 @router.get("/{submission_id}/page/{page_number}")
 def get_page_image(submission_id: int, page_number: int, session: Session = Depends(get_session)) -> FileResponse:
     submission = session.get(Submission, submission_id)
@@ -770,6 +782,22 @@ def get_page_image(submission_id: int, page_number: int, session: Session = Depe
         raise HTTPException(status_code=404, detail="Page image not found")
 
     return FileResponse(image_path)
+
+
+@router.get("/{submission_id}/page/{page_number}/preview")
+def get_page_preview_image(submission_id: int, page_number: int, session: Session = Depends(get_session)) -> FileResponse:
+    submission = session.get(Submission, submission_id)
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    page = session.exec(
+        select(SubmissionPage).where(SubmissionPage.submission_id == submission_id, SubmissionPage.page_number == page_number)
+    ).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    preview_path = _ensure_page_preview(Path(page.image_path))
+    return FileResponse(preview_path, media_type="image/jpeg")
 
 
 @router.get("/{submission_id}/crop/{question_id}")

@@ -11,6 +11,7 @@ from app import db
 from api.index import app as api_app
 from app.main import app
 from app.models import Submission, SubmissionPage, SubmissionStatus
+from app.pipeline.pages import preview_image_path_for_page
 from app.settings import settings
 
 
@@ -148,3 +149,8 @@ def test_api_key_seeds_session_cookie_for_asset_requests(tmp_path, monkeypatch) 
         image_response = client.get(f"/api/submissions/{submission_id}/page/1")
         assert image_response.status_code == 200
         assert image_response.headers["content-type"].startswith("image/")
+
+        preview_response = client.get(f"/api/submissions/{submission_id}/page/1/preview")
+        assert preview_response.status_code == 200
+        assert preview_response.headers["content-type"].startswith("image/jpeg")
+        assert preview_image_path_for_page(image_path).exists()

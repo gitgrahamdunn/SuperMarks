@@ -363,12 +363,12 @@ def test_front_page_totals_seed_with_mini_then_switch_to_template_nano(tmp_path,
         assert response.status_code == 200
         assert response.json()['source'] == 'gpt-5-nano:template'
 
-    assert len(calls) == 4
-    assert [call['model_override'] for call in calls[:3]] == ['gpt-5-mini', 'gpt-5-mini', 'gpt-5-mini']
-    assert calls[3]['model_override'] == 'gpt-5-nano'
-    assert calls[3]['template'] is not None
-    assert calls[3]['template']['stable'] is True
-    assert calls[3]['template']['outcome_codes'] == ['OB1', 'OB2']
+    assert len(calls) == 3
+    assert [call['model_override'] for call in calls[:2]] == ['gpt-5-mini', 'gpt-5-mini']
+    assert calls[2]['model_override'] == 'gpt-5-nano'
+    assert calls[2]['template'] is not None
+    assert calls[2]['template']['stable'] is True
+    assert calls[2]['template']['outcome_codes'] == ['OB1', 'OB2']
 
     with Session(db.engine) as session:
         exam = session.get(Exam, exam_id)

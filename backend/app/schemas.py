@@ -325,10 +325,17 @@ class ExamIntakeJobRead(BaseModel):
     status: str
     stage: str
     page_count: int
+    pages_built: int
     pages_processed: int
     submissions_created: int
+    candidates_ready: int
+    review_open_threshold: int
+    initial_review_ready: bool
+    fully_warmed: bool
+    review_ready: bool
     metrics: dict[str, float | int | str] | None = None
     error_message: str | None = None
+    last_progress_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

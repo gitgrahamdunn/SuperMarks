@@ -14,9 +14,17 @@ export interface ExamIntakeJobRead {
   status: string;
   stage: string;
   page_count: number;
+  pages_built: number;
   pages_processed: number;
   submissions_created: number;
+  candidates_ready: number;
+  review_open_threshold: number;
+  initial_review_ready: boolean;
+  fully_warmed: boolean;
+  review_ready: boolean;
+  metrics?: Record<string, string | number> | null;
   error_message?: string | null;
+  last_progress_at?: string | null;
   created_at: string;
   updated_at: string;
 }

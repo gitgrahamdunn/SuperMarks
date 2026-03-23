@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { AutoGrowTextarea } from '../components/AutoGrowTextarea';
@@ -15,6 +15,7 @@ const frontPageCandidateValueCache = new Map<number, FrontPageTotalsCandidate>()
 const frontPageCandidatePromiseCache = new Map<number, Promise<FrontPageTotalsCandidate>>();
 const frontPageSubmissionValueCache = new Map<number, SubmissionRead>();
 const frontPageSubmissionPromiseCache = new Map<number, Promise<SubmissionRead>>();
+const frontPagePreviewWarmCache = new Set<string>();
 const FRONT_PAGE_CACHE_MAX = 24;
 const FRONT_PAGE_PREFETCH_WINDOW = 3;
 
@@ -38,6 +39,14 @@ function rememberCacheEntry<T>(cache: Map<number, T>, key: number, value: T): vo
     if (oldestKey == null) break;
     cache.delete(oldestKey);
   }
+}
+
+function warmPreviewUrl(url: string): void {
+  if (!url || frontPagePreviewWarmCache.has(url)) return;
+  const image = new window.Image();
+  image.decoding = 'async';
+  image.src = url;
+  frontPagePreviewWarmCache.add(url);
 }
 
 async function loadFrontPageCandidatesCached(submissionId: number): Promise<FrontPageTotalsCandidate> {
@@ -129,6 +138,24 @@ function formatOutcomeLabel(value: string): string {
   return /^outcome\b/i.test(trimmed) ? trimmed : `Outcome ${trimmed}`;
 }
 
+function initialEditableNameParts(
+  submission: Pick<SubmissionRead, 'student_name' | 'first_name' | 'last_name'>,
+  candidateTotals: FrontPageTotalsCandidate | null,
+): { firstName: string; lastName: string } {
+  const savedFirstName = formatStudentName(submission.first_name);
+  const savedLastName = formatStudentName(submission.last_name);
+  if (savedFirstName || savedLastName) {
+    return { firstName: savedFirstName, lastName: savedLastName };
+  }
+
+  const submissionNameParts = splitStudentName(submission.student_name);
+  if (submissionNameParts.firstName || submissionNameParts.lastName) {
+    return submissionNameParts;
+  }
+
+  return splitStudentName(candidateTotals?.student_name?.value_text);
+}
+
 function buildInitialFrontPageFormState(
   questions: QuestionRead[],
   totals: SubmissionRead['front_page_totals'] | null | undefined,
@@ -216,6 +243,7 @@ export function SubmissionFrontPageTotalsPage() {
   const [selectedPageNumber, setSelectedPageNumber] = useState(1);
   const [saving, setSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [previewImageFailed, setPreviewImageFailed] = useState(false);
 
   const getOrderedFrontPageSubmissions = (rows: SubmissionRead[]) =>
     rows
@@ -233,6 +261,40 @@ export function SubmissionFrontPageTotalsPage() {
     return ordered.find((candidate) => !candidate.front_page_totals?.confirmed && candidate.id !== currentId) ?? null;
   };
 
+  const findAdjacentFrontPageSubmission = (rows: SubmissionRead[], currentId: number, direction: -1 | 1) => {
+    const ordered = getOrderedFrontPageSubmissions(rows);
+    const currentIndex = ordered.findIndex((row) => row.id === currentId);
+    if (currentIndex < 0) return null;
+    return ordered[currentIndex + direction] ?? null;
+  };
+
+  useLayoutEffect(() => {
+    const initialRouteSubmission = routeState?.submission && routeState.submission.pages.length > 0 ? routeState.submission : null;
+    const cachedSubmission = initialRouteSubmission ?? getCachedFrontPageSubmission(submissionId);
+    const initialCandidateTotals = routeState?.candidateTotals ?? getCachedFrontPageCandidates(submissionId);
+
+    setSubmission(cachedSubmission);
+    setExamSubmissions(routeState?.examSubmissions ?? []);
+    setCandidateTotals(initialCandidateTotals);
+    setCandidateError(null);
+    setAllowManualReviewWithoutCandidates(false);
+    setIsEditing(false);
+    setSaving(false);
+    setSelectedPageNumber(cachedSubmission?.pages[0]?.page_number ?? 1);
+    setIsCandidateLoading(cachedSubmission?.front_page_totals?.confirmed ? false : true);
+    setCandidateLoadSeconds(0);
+    setPreviewImageFailed(false);
+
+    if (cachedSubmission) {
+      const initialNameParts = initialEditableNameParts(cachedSubmission, initialCandidateTotals);
+      setFirstNameInput(initialNameParts.firstName);
+      setLastNameInput(initialNameParts.lastName);
+    } else {
+      setFirstNameInput('');
+      setLastNameInput('');
+    }
+  }, [routeState, submissionId]);
+
   useEffect(() => {
     if (!submissionId || !examId) return;
     let cancelled = false;
@@ -244,9 +306,10 @@ export function SubmissionFrontPageTotalsPage() {
         if (cachedSubmission) {
           rememberCacheEntry(frontPageSubmissionValueCache, submissionId, cachedSubmission);
           const initialState = buildInitialFrontPageFormState(questions, cachedSubmission.front_page_totals, null, cachedSubmission.student_name);
+          const initialNameParts = initialEditableNameParts(cachedSubmission, routeState?.candidateTotals ?? null);
           setSubmission(cachedSubmission);
-          setFirstNameInput(cachedSubmission.first_name || splitStudentName(cachedSubmission.student_name).firstName);
-          setLastNameInput(cachedSubmission.last_name || splitStudentName(cachedSubmission.student_name).lastName);
+          setFirstNameInput(initialNameParts.firstName);
+          setLastNameInput(initialNameParts.lastName);
           setOverallMarksAwarded(initialState.overallMarksAwarded);
           setOverallMaxMarks(initialState.overallMaxMarks);
           setTeacherNote(initialState.teacherNote);
@@ -266,12 +329,13 @@ export function SubmissionFrontPageTotalsPage() {
         if (cancelled) return;
 
         const initialState = buildInitialFrontPageFormState(questionData, submissionData.front_page_totals, null, submissionData.student_name);
+        const initialNameParts = initialEditableNameParts(submissionData, routeState?.candidateTotals ?? null);
         rememberCacheEntry(frontPageSubmissionValueCache, submissionId, submissionData);
         setSubmission(submissionData);
         setExamSubmissions(submissionRows);
         setQuestions(questionData);
-        setFirstNameInput(submissionData.first_name || splitStudentName(submissionData.student_name).firstName);
-        setLastNameInput(submissionData.last_name || splitStudentName(submissionData.student_name).lastName);
+        setFirstNameInput(initialNameParts.firstName);
+        setLastNameInput(initialNameParts.lastName);
         setOverallMarksAwarded(initialState.overallMarksAwarded);
         setOverallMaxMarks(initialState.overallMaxMarks);
         setTeacherNote(initialState.teacherNote);
@@ -320,6 +384,9 @@ export function SubmissionFrontPageTotalsPage() {
           setAllowManualReviewWithoutCandidates(false);
           if (!submission.front_page_totals) {
             const nextState = buildInitialFrontPageFormState(questions, submission.front_page_totals, cachedCandidate, submission.student_name);
+            const nextNameParts = initialEditableNameParts(submission, cachedCandidate);
+            setFirstNameInput((current) => (current.trim() ? current : nextNameParts.firstName));
+            setLastNameInput((current) => (current.trim() ? current : nextNameParts.lastName));
             setOverallMarksAwarded(nextState.overallMarksAwarded);
             setOverallMaxMarks(nextState.overallMaxMarks);
             setTeacherNote(nextState.teacherNote);
@@ -338,6 +405,9 @@ export function SubmissionFrontPageTotalsPage() {
         setCandidateTotals(candidateData);
         if (!submission.front_page_totals) {
           const nextState = buildInitialFrontPageFormState(questions, submission.front_page_totals, candidateData, submission.student_name);
+          const nextNameParts = initialEditableNameParts(submission, candidateData);
+          setFirstNameInput((current) => (current.trim() ? current : nextNameParts.firstName));
+          setLastNameInput((current) => (current.trim() ? current : nextNameParts.lastName));
           setOverallMarksAwarded(nextState.overallMarksAwarded);
           setOverallMaxMarks(nextState.overallMaxMarks);
           setTeacherNote(nextState.teacherNote);
@@ -375,12 +445,53 @@ export function SubmissionFrontPageTotalsPage() {
     () => submission?.pages.find((page) => page.page_number === selectedPageNumber) ?? submission?.pages[0] ?? null,
     [selectedPageNumber, submission?.pages],
   );
-  const pageImageUrl = selectedPage ? api.getPageImageUrl(submissionId, selectedPage.page_number) : '';
+  const pagePreviewUrl = selectedPage ? api.getPagePreviewUrl(submissionId, selectedPage.page_number) : '';
+  const fullPageImageUrl = selectedPage ? api.getPageImageUrl(submissionId, selectedPage.page_number) : '';
+  const pageImageUrl = previewImageFailed ? fullPageImageUrl : pagePreviewUrl;
+  const selectedPageIndex = useMemo(
+    () => submission?.pages.findIndex((page) => page.page_number === selectedPageNumber) ?? -1,
+    [selectedPageNumber, submission?.pages],
+  );
+  const canGoToPreviousPage = selectedPageIndex > 0;
+  const canGoToNextPage = selectedPageIndex >= 0 && selectedPageIndex < (submission?.pages.length ?? 0) - 1;
 
   const frontPageSubmissions = useMemo(
     () => examSubmissions.filter((candidate) => candidate.capture_mode === 'front_page_totals'),
     [examSubmissions],
   );
+  const orderedFrontPageSubmissions = useMemo(
+    () => getOrderedFrontPageSubmissions(frontPageSubmissions),
+    [frontPageSubmissions],
+  );
+  const currentFrontPageIndex = useMemo(
+    () => orderedFrontPageSubmissions.findIndex((candidate) => candidate.id === submissionId),
+    [orderedFrontPageSubmissions, submissionId],
+  );
+  const previousFrontPageSubmission = useMemo(
+    () => findAdjacentFrontPageSubmission(frontPageSubmissions, submissionId, -1),
+    [frontPageSubmissions, submissionId],
+  );
+  const sequentialNextFrontPageSubmission = useMemo(
+    () => findAdjacentFrontPageSubmission(frontPageSubmissions, submissionId, 1),
+    [frontPageSubmissions, submissionId],
+  );
+
+  const previousFrontPagePreviewUrl = previousFrontPageSubmission?.pages[0]
+    ? api.getPagePreviewUrl(previousFrontPageSubmission.id, previousFrontPageSubmission.pages[0].page_number)
+    : '';
+  const nextFrontPagePreviewUrl = sequentialNextFrontPageSubmission?.pages[0]
+    ? api.getPagePreviewUrl(sequentialNextFrontPageSubmission.id, sequentialNextFrontPageSubmission.pages[0].page_number)
+    : '';
+  const previousPagePreviewUrl = submission && canGoToPreviousPage
+    ? api.getPagePreviewUrl(submissionId, submission.pages[selectedPageIndex - 1].page_number)
+    : '';
+  const nextPagePreviewUrl = submission && canGoToNextPage
+    ? api.getPagePreviewUrl(submissionId, submission.pages[selectedPageIndex + 1].page_number)
+    : '';
+
+  useEffect(() => {
+    setPreviewImageFailed(false);
+  }, [pagePreviewUrl]);
 
   useEffect(() => {
     const pendingFrontPageSubmissionIds = frontPageSubmissions
@@ -404,6 +515,16 @@ export function SubmissionFrontPageTotalsPage() {
       cancelled = true;
     };
   }, [frontPageSubmissions, submissionId]);
+
+  useEffect(() => {
+    [
+      pagePreviewUrl,
+      previousFrontPagePreviewUrl,
+      nextFrontPagePreviewUrl,
+      previousPagePreviewUrl,
+      nextPagePreviewUrl,
+    ].forEach((url) => warmPreviewUrl(url));
+  }, [nextFrontPagePreviewUrl, nextPagePreviewUrl, pagePreviewUrl, previousFrontPagePreviewUrl, previousPagePreviewUrl]);
 
   const nextFrontPageSubmission = useMemo(
     () => (submission ? findNextFrontPageSubmission(frontPageSubmissions, submission.id) : null),
@@ -449,8 +570,9 @@ export function SubmissionFrontPageTotalsPage() {
   const resetCorrectionForm = () => {
     if (!submission) return;
     const nextState = buildInitialFrontPageFormState(questions, savedTotals, candidateTotals, submission.student_name);
-    setFirstNameInput(submission.first_name || splitStudentName(submission.student_name).firstName);
-    setLastNameInput(submission.last_name || splitStudentName(submission.student_name).lastName);
+    const nextNameParts = initialEditableNameParts(submission, candidateTotals);
+    setFirstNameInput(nextNameParts.firstName);
+    setLastNameInput(nextNameParts.lastName);
     setOverallMarksAwarded(nextState.overallMarksAwarded);
     setOverallMaxMarks(nextState.overallMaxMarks);
     setTeacherNote(nextState.teacherNote);
@@ -460,6 +582,28 @@ export function SubmissionFrontPageTotalsPage() {
 
   const updateObjective = (index: number, patch: Partial<FrontPageObjectiveScore>) => {
     setObjectiveScores((current) => current.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
+  };
+
+  const navigateToFrontPageSubmission = async (targetSubmission: SubmissionRead | null) => {
+    if (!targetSubmission || targetSubmission.id === submissionId || saving) return;
+
+    const [nextSubmissionResult, nextCandidateResult] = await Promise.allSettled([
+      loadFrontPageSubmissionCached(targetSubmission.id),
+      loadFrontPageCandidatesCached(targetSubmission.id),
+    ]);
+    const nextSubmissionState = nextSubmissionResult.status === 'fulfilled' ? nextSubmissionResult.value : targetSubmission;
+    const nextCandidateState = nextCandidateResult.status === 'fulfilled' ? nextCandidateResult.value : getCachedFrontPageCandidates(targetSubmission.id);
+
+    navigate(
+      `/submissions/${targetSubmission.id}/front-page-totals?examId=${examId}&returnTo=${encodeURIComponent(returnTo)}&returnLabel=${encodeURIComponent(returnLabel)}`,
+      {
+        state: {
+          submission: nextSubmissionState,
+          examSubmissions,
+          candidateTotals: nextCandidateState ?? null,
+        } satisfies FrontPageRouteState,
+      },
+    );
   };
 
   const save = async (goNext: boolean) => {
@@ -668,21 +812,6 @@ export function SubmissionFrontPageTotalsPage() {
             <p style={{ margin: 0 }}><Link to={returnTo}>← {returnLabel}</Link></p>
           </div>
 
-          {submission.pages.length > 1 && (
-            <div className="actions-row" style={{ marginTop: 0 }}>
-              {submission.pages.map((page) => (
-                <button
-                  key={page.id}
-                  type="button"
-                  className={`btn btn-sm ${selectedPageNumber === page.page_number ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => setSelectedPageNumber(page.page_number)}
-                >
-                  Page {page.page_number}
-                </button>
-              ))}
-            </div>
-          )}
-
           {selectedPage ? (
             <>
               <div className="image-frame front-page-swipe-image">
@@ -690,8 +819,71 @@ export function SubmissionFrontPageTotalsPage() {
                   src={pageImageUrl}
                   alt={`Page ${selectedPage.page_number} for ${formatStudentName(submission.student_name)}`}
                   className="front-page-swipe-page-image"
+                  loading="eager"
+                  fetchPriority="high"
+                  onError={() => {
+                    if (!previewImageFailed && pagePreviewUrl) {
+                      setPreviewImageFailed(true);
+                    }
+                  }}
                 />
               </div>
+              {orderedFrontPageSubmissions.length > 1 && (
+                <div className="front-page-preview-nav" aria-label="Test navigation">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => void navigateToFrontPageSubmission(previousFrontPageSubmission)}
+                    disabled={!previousFrontPageSubmission || saving}
+                    aria-label="Previous test"
+                  >
+                    ←
+                  </button>
+                  <span className="front-page-preview-nav-label">
+                    {currentFrontPageIndex + 1} / {orderedFrontPageSubmissions.length}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => void navigateToFrontPageSubmission(sequentialNextFrontPageSubmission)}
+                    disabled={!sequentialNextFrontPageSubmission || saving}
+                    aria-label="Next test"
+                  >
+                    →
+                  </button>
+                </div>
+              )}
+              {submission.pages.length > 1 && (
+                <div className="front-page-preview-subnav" aria-label="Page navigation">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => {
+                      if (!canGoToPreviousPage) return;
+                      setSelectedPageNumber(submission.pages[selectedPageIndex - 1].page_number);
+                    }}
+                    disabled={!canGoToPreviousPage}
+                    aria-label="Previous page"
+                  >
+                    ←
+                  </button>
+                  <span className="front-page-preview-subnav-label">
+                    {selectedPageIndex + 1} / {submission.pages.length}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => {
+                      if (!canGoToNextPage) return;
+                      setSelectedPageNumber(submission.pages[selectedPageIndex + 1].page_number);
+                    }}
+                    disabled={!canGoToNextPage}
+                    aria-label="Next page"
+                  >
+                    →
+                  </button>
+                </div>
+              )}
             </>
           ) : (
             <div className="review-readonly-block">No built page image yet. Add photos or a PDF, then rebuild this paper preview.</div>

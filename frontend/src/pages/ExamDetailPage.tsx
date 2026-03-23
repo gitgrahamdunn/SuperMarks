@@ -571,7 +571,8 @@ export function ExamDetailPage() {
   const nextTotalsLink = nextTotalsRow
     ? buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)
     : (nextTotalsSubmission ? buildSubmissionWorkflowLink(nextTotalsSubmission.id, nextTotalsSubmission.capture_mode) : null);
-  const nextTotalsPreviewPage = nextTotalsSubmission?.pages[0] ?? null;
+  const intakeJob = detail.exam.intake_job ?? null;
+  const reviewWarmInBackground = Boolean(intakeJob && (intakeJob.initial_review_ready || intakeJob.review_ready) && !intakeJob.fully_warmed);
 
   return (
     <div className="page-stack">
@@ -611,6 +612,9 @@ export function ExamDetailPage() {
                   {frontPageCompletionPercent}% complete ({confirmedTotalsCount}/{frontPageRows.length} confirmed).
                 </p>
                 <p className="subtle-text">Resumes where you left off.</p>
+                {reviewWarmInBackground && (
+                  <p className="subtle-text">Remaining papers are still preparing in the background.</p>
+                )}
               </>
             )}
           </section>

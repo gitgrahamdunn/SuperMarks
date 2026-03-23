@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PIL import Image
+
+_PREVIEW_MAX_WIDTH = max(400, int(os.getenv("SUPERMARKS_PAGE_PREVIEW_MAX_WIDTH", "1400") or "1400"))
+_PREVIEW_JPEG_QUALITY = max(40, min(95, int(os.getenv("SUPERMARKS_PAGE_PREVIEW_JPEG_QUALITY", "75") or "75")))
 
 
 class PDFConverter:
@@ -44,3 +48,27 @@ def normalize_image_to_png(input_path: Path, output_path: Path) -> tuple[int, in
         rgb = image.convert("RGB")
         rgb.save(output_path, format="PNG")
         return rgb.width, rgb.height
+
+
+def preview_image_path_for_page(image_path: Path) -> Path:
+    """Return the deterministic sidecar preview path for a rendered page image."""
+    return image_path.with_name(f"{image_path.stem}.preview.jpg")
+
+
+def build_page_preview_image(input_path: Path, output_path: Path | None = None) -> Path:
+    """Build a lighter JPEG preview for a rendered page image and return its path."""
+    preview_path = output_path or preview_image_path_for_page(input_path)
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(input_path) as image:
+        rgb = image.convert("RGB")
+        if rgb.width > _PREVIEW_MAX_WIDTH:
+            scaled_height = max(1, round(rgb.height * (_PREVIEW_MAX_WIDTH / rgb.width)))
+            rgb = rgb.resize((_PREVIEW_MAX_WIDTH, scaled_height), Image.Resampling.LANCZOS)
+        rgb.save(
+            preview_path,
+            format="JPEG",
+            quality=_PREVIEW_JPEG_QUALITY,
+            optimize=True,
+            progressive=True,
+        )
+    return preview_path

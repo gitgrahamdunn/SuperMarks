@@ -13,6 +13,7 @@ from app.ai.openai_vision import (
     _front_page_provider_name,
     _normalize_model_response_text,
     _recover_front_page_payload,
+    build_bulk_name_response_json_schema,
     build_answer_key_response_schema,
     build_front_page_totals_response_schema,
     build_key_parse_chat_request,
@@ -116,6 +117,28 @@ def test_front_page_totals_schema_is_strict_and_narrow() -> None:
     assert "objective_scores" in props
     assert "warnings" in props
     validate_schema_strictness(schema)
+
+    assert schema["propertyOrdering"] == [
+        "exam_name",
+        "student_name",
+        "overall_marks_awarded",
+        "overall_max_marks",
+        "objective_scores",
+        "warnings",
+    ]
+    assert "student name" in props["student_name"]["description"].lower()
+    assert "exam title" in props["student_name"]["description"].lower()
+    assert "final overall awarded total" in props["overall_marks_awarded"]["description"].lower()
+    assert "page order" in props["objective_scores"]["description"].lower()
+
+
+def test_bulk_name_schema_is_strict_and_descriptive() -> None:
+    schema = build_bulk_name_response_json_schema()
+    validate_schema_strictness(schema)
+    assert schema["propertyOrdering"] == ["page_number", "student_name", "exam_name", "confidence", "evidence"]
+    assert "student name" in schema["properties"]["student_name"]["description"].lower()
+    assert "exam title" in schema["properties"]["student_name"]["description"].lower()
+    assert "page header" in schema["properties"]["exam_name"]["description"].lower()
 
 
 def test_recover_front_page_payload_salvages_name_and_totals_from_malformed_json() -> None:

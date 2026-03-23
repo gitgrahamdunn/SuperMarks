@@ -681,6 +681,7 @@ export const api = {
     body: JSON.stringify(payload),
   }),
   getPageImageUrl: (submissionId: number, pageNumber: number) => buildApiUrl(`submissions/${submissionId}/page/${pageNumber}`),
+  getPagePreviewUrl: (submissionId: number, pageNumber: number) => buildApiUrl(`submissions/${submissionId}/page/${pageNumber}/preview`),
   getCropImageUrl: (submissionId: number, questionId: number) => buildApiUrl(`submissions/${submissionId}/crop/${questionId}`),
   getSignedBlobUrl: (pathname: string) => request<{ url: string }>('blob/signed-url', {
     method: 'POST',

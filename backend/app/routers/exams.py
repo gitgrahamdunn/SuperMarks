@@ -37,6 +37,7 @@ from app.ai.openai_vision import (
     build_answer_key_response_schema,
     get_answer_key_parser,
     get_bulk_name_detector,
+    get_front_page_totals_extractor,
 )
 from app import db as db_state
 from app.db import get_session
@@ -44,8 +45,9 @@ from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, Exa
 from app.reporting import front_page_totals_read
 from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_gradebook_xlsx_artifact, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, invalidate_exam_reporting_cache, write_csv_export
 from app.name_utils import compose_student_name, normalize_student_name, split_student_name, submission_display_name, submission_name_parts
-from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamIntakeJobRead, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
+from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamIntakeJobRead, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, FrontPageTotalsCandidateRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
+from app.pipeline.pages import build_page_preview_image
 from app.storage import ensure_dir, reset_dir, relative_to_data
 from app.storage_provider import get_storage_provider, get_storage_signed_url, materialize_object_to_path
 from app.blob_store import BlobUploadError, upload_bytes, upload_rendered_key_page
@@ -59,6 +61,34 @@ _parse_job_runner_locks: dict[int, threading.Lock] = {}
 _parse_job_runner_guard = threading.Lock()
 _exam_intake_runner_locks: dict[int, threading.Lock] = {}
 _exam_intake_runner_guard = threading.Lock()
+
+
+def _front_page_review_open_threshold(submission_count: int) -> int:
+    configured = os.getenv("SUPERMARKS_FRONT_PAGE_REVIEW_OPEN_THRESHOLD", "10").strip()
+    try:
+        desired = int(configured or "10")
+    except ValueError:
+        desired = 10
+    desired = max(1, desired)
+    return min(desired, max(submission_count, 1))
+
+
+def _name_detection_worker_count(page_count: int) -> int:
+    configured = os.getenv("SUPERMARKS_NAME_DETECT_WORKERS", "8").strip()
+    try:
+        desired = int(configured or "8")
+    except ValueError:
+        desired = 8
+    return max(1, min(desired, max(page_count, 1)))
+
+
+def _front_page_candidate_worker_count(submission_count: int) -> int:
+    configured = os.getenv("SUPERMARKS_FRONT_PAGE_WARM_WORKERS", "8").strip()
+    try:
+        desired = int(configured or "8")
+    except ValueError:
+        desired = 8
+    return max(1, min(desired, max(submission_count, 1)))
 
 
 def _get_exam_question_lock(exam_id: int) -> threading.Lock:
@@ -107,19 +137,27 @@ def _exam_intake_job_read(job: ExamIntakeJob | None) -> ExamIntakeJobRead | None
         status=job.status,
         stage=job.stage,
         page_count=job.page_count,
+        pages_built=job.pages_built,
         pages_processed=job.pages_processed,
         submissions_created=job.submissions_created,
+        candidates_ready=job.candidates_ready,
+        review_open_threshold=job.review_open_threshold,
+        initial_review_ready=bool(job.initial_review_ready),
+        fully_warmed=bool(job.fully_warmed),
+        review_ready=bool(job.review_ready or job.initial_review_ready),
         metrics=metrics,
         error_message=job.error_message,
+        last_progress_at=job.last_progress_at,
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
 
 
 def _latest_exam_intake_job(exam_id: int, session: Session) -> ExamIntakeJob | None:
-    return session.exec(
+    job = session.exec(
         select(ExamIntakeJob).where(ExamIntakeJob.exam_id == exam_id).order_by(ExamIntakeJob.created_at.desc(), ExamIntakeJob.id.desc())
     ).first()
+    return _auto_resume_exam_intake_job_if_needed(job, session)
 
 
 def _latest_exam_intake_jobs_by_exam_id(exam_ids: list[int], session: Session) -> dict[int, ExamIntakeJob]:
@@ -132,12 +170,12 @@ def _latest_exam_intake_jobs_by_exam_id(exam_ids: list[int], session: Session) -
     ).all()
     latest_by_exam_id: dict[int, ExamIntakeJob] = {}
     for job in jobs:
-        latest_by_exam_id.setdefault(job.exam_id, job)
+        latest_by_exam_id.setdefault(job.exam_id, _auto_resume_exam_intake_job_if_needed(job, session))
     return latest_by_exam_id
 
 
 def _exam_intake_lease_deadline():
-    return utcnow() + timedelta(minutes=5)
+    return utcnow() + timedelta(minutes=10)
 
 
 def _coerce_utc(value):
@@ -163,11 +201,50 @@ def _claim_exam_intake_job(job_id: int, runner_id: str, session: Session) -> boo
     job.attempt_count = int(job.attempt_count or 0) + 1
     job.started_at = job.started_at or now
     job.updated_at = now
+    job.last_progress_at = now
     job.lease_expires_at = _exam_intake_lease_deadline()
     session.add(job)
     session.commit()
     session.refresh(job)
     return True
+
+
+def _spawn_exam_intake_job_thread(job_id: int) -> None:
+    thread = threading.Thread(target=_run_exam_intake_job_background_by_job_id, args=(job_id,), daemon=True)
+    thread.start()
+
+
+def _auto_resume_exam_intake_job_if_needed(job: ExamIntakeJob | None, session: Session) -> ExamIntakeJob | None:
+    if not job:
+        return job
+    is_stalled_running_job = job.status == "running" and bool(job.lease_expires_at) and _coerce_utc(job.lease_expires_at) <= utcnow()
+    is_retryable_stalled_failure = job.status == "failed" and job.stage == "stalled"
+    if not is_stalled_running_job and not is_retryable_stalled_failure:
+        return job
+
+    now = utcnow()
+    job.status = "queued"
+    job.stage = "resuming"
+    job.fully_warmed = False
+    job.review_ready = bool(job.initial_review_ready)
+    job.error_message = None
+    job.updated_at = now
+    job.finished_at = None
+    job.runner_id = None
+    job.lease_expires_at = None
+    job.last_progress_at = now
+    session.add(job)
+
+    exam = session.get(Exam, job.exam_id)
+    if exam and exam.status != ExamStatus.READY:
+        exam.status = ExamStatus.REVIEWING if job.initial_review_ready else ExamStatus.DRAFT
+        session.add(exam)
+
+    session.commit()
+    session.refresh(job)
+    if job.id is not None:
+        _spawn_exam_intake_job_thread(job.id)
+    return job
 
 
 def _resume_pending_exam_intake_jobs() -> None:
@@ -178,37 +255,55 @@ def _resume_pending_exam_intake_jobs() -> None:
             .where(ExamIntakeJob.status.in_(["queued", "running"]))
             .order_by(ExamIntakeJob.created_at.asc(), ExamIntakeJob.id.asc())
         ).all()
-        resumable_ids = [
-            job.id for job in jobs
-            if job.id is not None and (
-                job.status == "queued"
-                or job.lease_expires_at is None
-                or _coerce_utc(job.lease_expires_at) <= now
-            )
-        ]
+        resumable_ids: list[int] = []
+        for job in jobs:
+            if job.id is None:
+                continue
+            lease_expires_at = _coerce_utc(job.lease_expires_at)
+            if job.status == "queued":
+                resumable_ids.append(job.id)
+                continue
+            if job.status == "running" and (lease_expires_at is None or lease_expires_at <= now):
+                job.status = "queued"
+                job.stage = "resuming"
+                job.fully_warmed = False
+                job.review_ready = bool(job.initial_review_ready)
+                job.error_message = None
+                job.runner_id = None
+                job.lease_expires_at = None
+                job.finished_at = None
+                job.updated_at = now
+                job.last_progress_at = now
+                session.add(job)
+                resumable_ids.append(job.id)
+        session.commit()
     for job_id in resumable_ids:
-        thread = threading.Thread(target=_run_exam_intake_job_background_by_job_id, args=(job_id,), daemon=True)
-        thread.start()
+        _spawn_exam_intake_job_thread(job_id)
 
 
 def _warm_front_page_candidates_background(exam_id: int, submission_ids: list[int]) -> list[int]:
     from app.routers.submissions import get_or_create_front_page_totals_candidates
 
     failed_submission_ids: list[int] = []
+    progress_lock = threading.Lock()
+    ready_count = 0
 
     def warm_one(submission_id: int) -> None:
         with Session(db_state.engine) as session:
+            get_or_create_front_page_totals_candidates(submission_id, session)
+
+    worker_count = _front_page_candidate_worker_count(len(submission_ids))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {executor.submit(warm_one, submission_id): submission_id for submission_id in submission_ids}
+        for future in concurrent.futures.as_completed(futures):
+            submission_id = futures[future]
             try:
-                get_or_create_front_page_totals_candidates(submission_id, session)
+                future.result()
+                with progress_lock:
+                    ready_count += 1
             except Exception:
                 logger.exception("background front-page candidate warm failed for exam %s submission %s", exam_id, submission_id)
                 failed_submission_ids.append(submission_id)
-
-    worker_count = max(1, min(4, len(submission_ids)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [executor.submit(warm_one, submission_id) for submission_id in submission_ids]
-        for future in concurrent.futures.as_completed(futures):
-            future.result()
 
     return failed_submission_ids
 
@@ -241,17 +336,56 @@ def _front_page_review_readiness_failures(submission_ids: list[int], session: Se
     return failures
 
 
+def _split_initial_and_remaining_review_ids(submission_ids: list[int]) -> tuple[list[int], list[int], int]:
+    threshold = _front_page_review_open_threshold(len(submission_ids))
+    initial_ids = submission_ids[:threshold]
+    remaining_ids = submission_ids[threshold:]
+    return initial_ids, remaining_ids, threshold
+
+
+def _set_exam_initial_review_ready(
+    exam_id: int,
+    job_id: int,
+    *,
+    threshold: int,
+    candidates_ready: int,
+    stage: str,
+    metrics: dict[str, object],
+) -> None:
+    with Session(db_state.engine) as session:
+        job = session.get(ExamIntakeJob, job_id)
+        exam = session.get(Exam, exam_id)
+        if not job:
+            return
+        now = utcnow()
+        job.review_open_threshold = threshold
+        job.candidates_ready = max(job.candidates_ready, candidates_ready)
+        job.initial_review_ready = True
+        job.review_ready = True
+        job.stage = stage
+        job.updated_at = now
+        job.last_progress_at = now
+        job.lease_expires_at = _exam_intake_lease_deadline()
+        job.metrics_json = json.dumps(metrics)
+        session.add(job)
+        if exam and exam.status != ExamStatus.READY:
+            exam.status = ExamStatus.REVIEWING
+            session.add(exam)
+        session.commit()
+
+
 def _mark_exam_review_ready_if_possible(exam_id: int, submission_ids: list[int], *, failed_submission_ids: list[int] | None = None) -> None:
     failed_submission_ids = failed_submission_ids or []
     with Session(db_state.engine) as session:
         exam = session.get(Exam, exam_id)
         if not exam:
             return
-        readiness_failures = _front_page_review_readiness_failures(submission_ids, session)
+        initial_ids, _remaining_ids, _threshold = _split_initial_and_remaining_review_ids(submission_ids)
+        readiness_failures = _front_page_review_readiness_failures(initial_ids, session)
         if failed_submission_ids:
             readiness_failures.extend(
                 f"Front-page warm failed for submission {submission_id}."
-                for submission_id in sorted(set(failed_submission_ids))
+                for submission_id in sorted(set(failed_submission_ids).intersection(initial_ids))
             )
         if readiness_failures:
             if exam.status != ExamStatus.READY:
@@ -290,50 +424,235 @@ def _detect_bulk_pages(
     session: Session,
     job: ExamIntakeJob | None = None,
 ) -> list[BulkNameDetectionResult]:
-    session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id))
-    detections: list[BulkNameDetectionResult] = []
+    existing_pages = session.exec(
+        select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)
+    ).all()
+    page_rows_by_number = {row.page_number: row for row in existing_pages}
+    detections: list[BulkNameDetectionResult | None] = [None] * len(rendered_paths)
     detector = get_bulk_name_detector()
-    detected_exam_title = ""
-    for idx, page_path in enumerate(rendered_paths, start=1):
+    detected_exam_titles: list[str] = []
+
+    def detect_one(idx: int, page_path: Path) -> tuple[int, int, int, BulkNameDetectionResult, str]:
         with Image.open(page_path) as image:
             w, h = image.width, image.height
-        detection: BulkNameDetectionResult | None = None
         try:
             detection = detector.detect(page_path, idx, model=_front_page_model(), request_id=uuid.uuid4().hex)
             if detection.student_name is None or detection.confidence < 0.5:
                 detection = detector.detect(page_path, idx, model=_front_page_model(), request_id=uuid.uuid4().hex)
         except OpenAIRequestError:
             detection = BulkNameDetectionResult(page_number=idx, student_name=None, exam_name=None, confidence=0.0, evidence=None)
+        except Exception:
+            logger.exception("bulk name detection failed for exam %s page %s", exam.id, idx)
+            detection = BulkNameDetectionResult(page_number=idx, student_name=None, exam_name=None, confidence=0.0, evidence=None)
         normalized_detected_exam_title = _normalize_exam_title(detection.exam_name)
         if normalized_detected_exam_title and not _looks_like_same_name(normalized_detected_exam_title, detection.student_name):
-            detected_exam_title = normalized_detected_exam_title
-        session.add(
-            BulkUploadPage(
-                bulk_upload_id=bulk.id,
-                page_number=idx,
-                image_path=str(page_path),
-                width=w,
-                height=h,
-                detected_student_name=detection.student_name,
-                detection_confidence=detection.confidence,
-                detection_evidence_json=json.dumps(detection.evidence or {}),
-            )
-        )
-        detections.append(detection)
-        if job:
-            job.pages_processed = idx
-            job.updated_at = utcnow()
-            session.add(job)
-            session.commit()
-        else:
-            session.flush()
+            return idx, w, h, detection, normalized_detected_exam_title
+        return idx, w, h, detection, ""
 
-    if detected_exam_title:
-        exam.name = detected_exam_title
+    processed_pages = 0
+    worker_count = _name_detection_worker_count(len(rendered_paths))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(detect_one, idx, page_path): idx
+            for idx, page_path in enumerate(rendered_paths, start=1)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            idx, width, height, detection, detected_exam_title = future.result()
+            detections[idx - 1] = detection
+            if detected_exam_title:
+                detected_exam_titles.append(detected_exam_title)
+
+            row = page_rows_by_number.get(idx)
+            if row is None:
+                row = BulkUploadPage(
+                    bulk_upload_id=bulk.id,
+                    page_number=idx,
+                    image_path=str(rendered_paths[idx - 1]),
+                    width=width,
+                    height=height,
+                )
+            row.image_path = str(rendered_paths[idx - 1])
+            row.width = width
+            row.height = height
+            row.detected_student_name = detection.student_name
+            row.detection_confidence = detection.confidence
+            row.detection_evidence_json = json.dumps(detection.evidence or {})
+            session.add(row)
+
+            processed_pages += 1
+            if job:
+                now = utcnow()
+                job.pages_processed = processed_pages
+                job.updated_at = now
+                job.last_progress_at = now
+                job.lease_expires_at = _exam_intake_lease_deadline()
+                session.add(job)
+                session.commit()
+            else:
+                session.flush()
+
+    if detected_exam_titles:
+        exam.name = max(detected_exam_titles, key=len)
         session.add(exam)
     if not job:
         session.commit()
-    return detections
+    return [item for item in detections if item is not None]
+
+
+def _front_page_candidate_read_from_payload(
+    payload: dict[str, object],
+    *,
+    source: str,
+) -> FrontPageTotalsCandidateRead:
+    return FrontPageTotalsCandidateRead.model_validate({
+        "student_name": payload.get("student_name"),
+        "overall_marks_awarded": payload.get("overall_marks_awarded"),
+        "overall_max_marks": payload.get("overall_max_marks"),
+        "objective_scores": payload.get("objective_scores") or [],
+        "warnings": payload.get("warnings") or [],
+        "source": source,
+    })
+
+
+def _front_page_name_detection_from_candidate(
+    *,
+    page_number: int,
+    candidate: FrontPageTotalsCandidateRead,
+    exam_name: str | None,
+) -> BulkNameDetectionResult:
+    student_name_value = None
+    if candidate.student_name:
+        student_name_value = candidate.student_name.value_text.strip() or None
+    evidence = candidate.student_name.evidence[0] if candidate.student_name and candidate.student_name.evidence else None
+    evidence_box = None
+    if evidence:
+        evidence_box = {
+            "x": evidence.x if evidence.x is not None else 0.0,
+            "y": evidence.y if evidence.y is not None else 0.0,
+            "w": evidence.w if evidence.w is not None else 0.0,
+            "h": evidence.h if evidence.h is not None else 0.0,
+        }
+    return BulkNameDetectionResult(
+        page_number=page_number,
+        student_name=student_name_value,
+        exam_name=exam_name,
+        confidence=float(candidate.student_name.confidence if candidate.student_name else 0.0),
+        evidence=evidence_box,
+    )
+
+
+def _extract_image_upload_front_page_pages(
+    *,
+    exam: Exam,
+    bulk: ExamBulkUploadFile,
+    rendered_paths: list[Path],
+    session: Session,
+    job: ExamIntakeJob | None = None,
+) -> tuple[list[BulkNameDetectionResult], dict[int, FrontPageTotalsCandidateRead]]:
+    exam_id = exam.id or 0
+    existing_pages = session.exec(
+        select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)
+    ).all()
+    page_rows_by_number = {row.page_number: row for row in existing_pages}
+    detections: list[BulkNameDetectionResult | None] = [None] * len(rendered_paths)
+    candidate_payloads: dict[int, FrontPageTotalsCandidateRead] = {}
+    extractor = get_front_page_totals_extractor()
+    detected_exam_titles: list[str] = []
+
+    def extract_one(idx: int, page_path: Path) -> tuple[int, int, int, BulkNameDetectionResult, FrontPageTotalsCandidateRead, str]:
+        with Image.open(page_path) as image:
+            w, h = image.width, image.height
+        try:
+            result = extractor.extract(
+                image_path=page_path,
+                request_id=f"exam-{exam_id}-bulk-page-{idx}",
+                model_override=_front_page_model(),
+                template=None,
+            )
+            candidate_payload = _front_page_candidate_read_from_payload(
+                result.payload,
+                source=f"{result.model}:oneshot" if result.model else "oneshot",
+            )
+            exam_name_payload = result.payload.get("exam_name")
+            exam_name_value = None
+            if isinstance(exam_name_payload, dict):
+                exam_name_value = str(exam_name_payload.get("value_text") or "").strip() or None
+            normalized_exam_title = _normalize_exam_title(exam_name_value)
+            if normalized_exam_title and not _looks_like_same_name(normalized_exam_title, candidate_payload.student_name.value_text if candidate_payload.student_name else None):
+                detected_exam_title = normalized_exam_title
+            else:
+                detected_exam_title = ""
+        except OpenAIRequestError:
+            candidate_payload = FrontPageTotalsCandidateRead(
+                objective_scores=[],
+                warnings=["Extractor unavailable for this paper right now. You can still confirm totals manually."],
+                source="extractor_unavailable:oneshot",
+            )
+            detected_exam_title = ""
+        except Exception:
+            logger.exception("front-page one-shot intake failed for exam %s page %s", exam_id, idx)
+            candidate_payload = FrontPageTotalsCandidateRead(
+                objective_scores=[],
+                warnings=["Extractor failed for this paper. You can still confirm totals manually."],
+                source="extractor_unavailable:oneshot",
+            )
+            detected_exam_title = ""
+        detection = _front_page_name_detection_from_candidate(
+            page_number=idx,
+            candidate=candidate_payload,
+            exam_name=detected_exam_title or None,
+        )
+        return idx, w, h, detection, candidate_payload, detected_exam_title
+
+    processed_pages = 0
+    worker_count = _front_page_candidate_worker_count(len(rendered_paths))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(extract_one, idx, page_path): idx
+            for idx, page_path in enumerate(rendered_paths, start=1)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            idx, width, height, detection, candidate_payload, detected_exam_title = future.result()
+            detections[idx - 1] = detection
+            candidate_payloads[idx] = candidate_payload
+            if detected_exam_title:
+                detected_exam_titles.append(detected_exam_title)
+
+            row = page_rows_by_number.get(idx)
+            if row is None:
+                row = BulkUploadPage(
+                    bulk_upload_id=bulk.id,
+                    page_number=idx,
+                    image_path=str(rendered_paths[idx - 1]),
+                    width=width,
+                    height=height,
+                )
+            row.image_path = str(rendered_paths[idx - 1])
+            row.width = width
+            row.height = height
+            row.detected_student_name = detection.student_name
+            row.detection_confidence = detection.confidence
+            row.detection_evidence_json = json.dumps(detection.evidence or {})
+            session.add(row)
+
+            processed_pages += 1
+            if job:
+                now = utcnow()
+                job.pages_processed = processed_pages
+                job.updated_at = now
+                job.last_progress_at = now
+                job.lease_expires_at = _exam_intake_lease_deadline()
+                session.add(job)
+                session.commit()
+            else:
+                session.flush()
+
+    if detected_exam_titles:
+        exam.name = max(detected_exam_titles, key=len)
+        session.add(exam)
+    if not job:
+        session.commit()
+    return [item for item in detections if item is not None], candidate_payloads
 
 
 def _build_bulk_preview_from_detections(
@@ -366,6 +685,7 @@ def _finalize_bulk_candidates(
     bulk: ExamBulkUploadFile,
     candidates: list[BulkUploadCandidate],
     session: Session,
+    prefilled_candidate_payloads: dict[int, FrontPageTotalsCandidateRead] | None = None,
 ) -> list[SubmissionRead]:
     pages = session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)).all()
     if not pages:
@@ -383,6 +703,8 @@ def _finalize_bulk_candidates(
                 raise HTTPException(status_code=400, detail=f"Overlapping page range at page {page_num}")
             used_pages.add(page_num)
 
+    prefilled_candidate_payloads = prefilled_candidate_payloads or {}
+
     for candidate in candidates:
         candidate_first_name, candidate_last_name = split_student_name(candidate.student_name)
         submission = Submission(
@@ -395,6 +717,11 @@ def _finalize_bulk_candidates(
         )
         session.add(submission)
         session.flush()
+        if candidate.page_start == candidate.page_end:
+            prefilled_candidate = prefilled_candidate_payloads.get(candidate.page_start)
+            if prefilled_candidate is not None:
+                submission.front_page_candidates_json = prefilled_candidate.model_dump_json()
+                session.add(submission)
 
         page_reads = []
         submission_files: list[SubmissionFileRead] = []
@@ -449,6 +776,9 @@ def _finalize_bulk_candidates(
                         size_bytes=file_row.size_bytes,
                     )
                 )
+            src_path = Path(src.image_path)
+            if src_path.exists():
+                build_page_preview_image(src_path)
             sp = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=src.image_path, width=src.width, height=src.height)
             session.add(sp)
             session.flush()
@@ -494,6 +824,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 job.stage = "missing_bulk"
                 job.error_message = "Bulk upload payload is missing."
                 job.updated_at = utcnow()
+                job.last_progress_at = job.updated_at
                 intake_metrics["failed_stage"] = "missing_bulk"
                 intake_metrics["total_ms"] = round((time.perf_counter() - overall_started) * 1000, 1)
                 job.metrics_json = json.dumps(intake_metrics)
@@ -506,6 +837,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             job.status = "running"
             job.stage = "detecting_names"
             job.updated_at = utcnow()
+            job.last_progress_at = job.updated_at
             job.runner_id = runner_id
             job.lease_expires_at = _exam_intake_lease_deadline()
             job.metrics_json = json.dumps(intake_metrics)
@@ -514,8 +846,25 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
 
             rendered_paths = [Path(row.image_path) for row in session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)).all()]
             intake_metrics["page_count"] = len(rendered_paths)
-            detections = _detect_bulk_pages(exam=exam, bulk=bulk, rendered_paths=rendered_paths, session=session, job=job)
-            intake_metrics["detecting_names_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            prefilled_candidate_payloads: dict[int, FrontPageTotalsCandidateRead] = {}
+            if not bulk.stored_path:
+                job.stage = "extracting_front_pages"
+                job.updated_at = utcnow()
+                job.last_progress_at = job.updated_at
+                job.lease_expires_at = _exam_intake_lease_deadline()
+                session.add(job)
+                session.commit()
+                detections, prefilled_candidate_payloads = _extract_image_upload_front_page_pages(
+                    exam=exam,
+                    bulk=bulk,
+                    rendered_paths=rendered_paths,
+                    session=session,
+                    job=job,
+                )
+                intake_metrics["extracting_front_pages_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            else:
+                detections = _detect_bulk_pages(exam=exam, bulk=bulk, rendered_paths=rendered_paths, session=session, job=job)
+                intake_metrics["detecting_names_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
             job.stage = "creating_submissions"
             job.updated_at = utcnow()
             job.lease_expires_at = _exam_intake_lease_deadline()
@@ -525,12 +874,21 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             session.commit()
 
             candidates, _warnings = _build_bulk_preview_from_detections(upload_files=None, bulk=bulk, detections=detections, roster=None)
-            created = _finalize_bulk_candidates(exam=exam, bulk=bulk, candidates=candidates, session=session)
+            created = _finalize_bulk_candidates(
+                exam=exam,
+                bulk=bulk,
+                candidates=candidates,
+                session=session,
+                prefilled_candidate_payloads=prefilled_candidate_payloads,
+            )
             intake_metrics["creating_submissions_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
             intake_metrics["candidate_count"] = len(candidates)
             job.submissions_created = len(created)
-            job.stage = "warming_review"
+            job.candidates_ready = 0
+            job.review_ready = False
+            job.stage = "warming_initial_review"
             job.updated_at = utcnow()
+            job.last_progress_at = job.updated_at
             job.lease_expires_at = _exam_intake_lease_deadline()
             stage_started = time.perf_counter()
             job.metrics_json = json.dumps(intake_metrics)
@@ -539,37 +897,132 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             session.add(exam)
             session.commit()
 
-        created_submission_ids = [item.id for item in created]
+        created_submission_ids = [item.id for item in created if item.id is not None]
+        initial_submission_ids, remaining_submission_ids, review_open_threshold = _split_initial_and_remaining_review_ids(created_submission_ids)
         failed_submission_ids: list[int] = []
-        if created_submission_ids:
-            failed_submission_ids = _warm_front_page_candidates_background(exam_id, created_submission_ids)
-        intake_metrics["warming_review_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        ready_submission_ids: set[int] = set()
+        candidate_progress_lock = threading.Lock()
+
+        with Session(db_state.engine) as session:
+            job = session.get(ExamIntakeJob, job_id)
+            if job:
+                now = utcnow()
+                job.review_open_threshold = review_open_threshold
+                job.updated_at = now
+                job.last_progress_at = now
+                job.lease_expires_at = _exam_intake_lease_deadline()
+                job.metrics_json = json.dumps(intake_metrics)
+                session.add(job)
+                session.commit()
+
+        def record_candidate_progress(ready_submission_id: int) -> None:
+            with candidate_progress_lock:
+                ready_submission_ids.add(ready_submission_id)
+                ready_count = len(ready_submission_ids)
+            with Session(db_state.engine) as progress_session:
+                progress_job = progress_session.get(ExamIntakeJob, job_id)
+                if not progress_job or progress_job.status != "running":
+                    return
+                now = utcnow()
+                progress_job.candidates_ready = max(progress_job.candidates_ready, ready_count)
+                progress_job.review_open_threshold = review_open_threshold
+                progress_job.updated_at = now
+                progress_job.last_progress_at = now
+                progress_job.lease_expires_at = _exam_intake_lease_deadline()
+                progress_job.metrics_json = json.dumps(intake_metrics)
+                progress_session.add(progress_job)
+                progress_session.commit()
+
+        def warm_submission_ids(submission_ids: list[int]) -> list[int]:
+            if not submission_ids:
+                return []
+
+            def warm_one(submission_id: int) -> None:
+                from app.routers.submissions import get_or_create_front_page_totals_candidates
+
+                with Session(db_state.engine) as submission_session:
+                    get_or_create_front_page_totals_candidates(submission_id, submission_session)
+
+            failed_ids: list[int] = []
+            worker_count = _front_page_candidate_worker_count(len(submission_ids))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {executor.submit(warm_one, submission_id): submission_id for submission_id in submission_ids}
+                for future in concurrent.futures.as_completed(futures):
+                    submission_id = futures[future]
+                    try:
+                        future.result()
+                        record_candidate_progress(submission_id)
+                    except Exception:
+                        logger.exception("background front-page candidate warm failed for exam %s submission %s", exam_id, submission_id)
+                        failed_ids.append(submission_id)
+            return failed_ids
+
+        initial_stage_started = stage_started
+        initial_failed_submission_ids = warm_submission_ids(initial_submission_ids)
+        intake_metrics["warming_initial_review_ms"] = round((time.perf_counter() - initial_stage_started) * 1000, 1)
+        failed_submission_ids.extend(initial_failed_submission_ids)
+
+        with Session(db_state.engine) as session:
+            initial_readiness_failures = _front_page_review_readiness_failures(initial_submission_ids, session)
+        if initial_failed_submission_ids:
+            initial_readiness_failures.extend(
+                f"Front-page warm failed for submission {submission_id}."
+                for submission_id in sorted(set(initial_failed_submission_ids))
+            )
+
+        if not initial_readiness_failures:
+            _set_exam_initial_review_ready(
+                exam_id,
+                job_id,
+                threshold=review_open_threshold,
+                candidates_ready=len(ready_submission_ids),
+                stage="warming_remaining_review" if remaining_submission_ids else "finalizing_review",
+                metrics=intake_metrics,
+            )
+
+        remaining_stage_started = time.perf_counter()
+        remaining_failed_submission_ids: list[int] = []
+        if remaining_submission_ids and not initial_readiness_failures:
+            remaining_failed_submission_ids = warm_submission_ids(remaining_submission_ids)
+            failed_submission_ids.extend(remaining_failed_submission_ids)
+        intake_metrics["warming_remaining_review_ms"] = round((time.perf_counter() - remaining_stage_started) * 1000, 1)
         intake_metrics["total_ms"] = round((time.perf_counter() - overall_started) * 1000, 1)
 
         with Session(db_state.engine) as session:
             job = session.get(ExamIntakeJob, job_id)
             exam = session.get(Exam, exam_id)
-            readiness_failures = _front_page_review_readiness_failures(created_submission_ids, session)
-            if failed_submission_ids:
+            readiness_failures = list(initial_readiness_failures)
+            ready_submission_count = len(ready_submission_ids)
+            if not readiness_failures and remaining_submission_ids:
+                readiness_failures = _front_page_review_readiness_failures(remaining_submission_ids, session)
+            if not initial_readiness_failures and remaining_failed_submission_ids:
                 readiness_failures.extend(
                     f"Front-page warm failed for submission {submission_id}."
-                    for submission_id in sorted(set(failed_submission_ids))
+                    for submission_id in sorted(set(remaining_failed_submission_ids))
                 )
             if job:
+                partial_ready = not initial_readiness_failures
                 job.status = "failed" if readiness_failures else "complete"
-                job.stage = "review_not_ready" if readiness_failures else "complete"
+                job.stage = "partial_ready" if (partial_ready and readiness_failures) else ("review_not_ready" if readiness_failures else "complete")
                 job.pages_processed = job.page_count
+                job.pages_built = job.page_count
+                job.candidates_ready = ready_submission_count
+                job.review_open_threshold = review_open_threshold
+                job.initial_review_ready = partial_ready
+                job.fully_warmed = not readiness_failures
+                job.review_ready = partial_ready
                 job.updated_at = utcnow()
+                job.last_progress_at = job.updated_at
                 job.runner_id = runner_id
                 job.lease_expires_at = None
                 job.finished_at = utcnow()
                 if readiness_failures:
-                    intake_metrics["failed_stage"] = "review_not_ready"
+                    intake_metrics["failed_stage"] = "warming_remaining_review" if partial_ready else "review_not_ready"
                 job.metrics_json = json.dumps(intake_metrics)
                 job.error_message = "; ".join(readiness_failures) if readiness_failures else None
                 session.add(job)
             if exam and exam.status != ExamStatus.READY:
-                exam.status = ExamStatus.FAILED if readiness_failures else ExamStatus.REVIEWING
+                exam.status = ExamStatus.REVIEWING if partial_ready else (ExamStatus.FAILED if readiness_failures else ExamStatus.REVIEWING)
                 session.add(exam)
             session.commit()
             invalidate_exam_reporting_cache(exam_id)
@@ -582,16 +1035,20 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             job = session.get(ExamIntakeJob, job_id)
             exam = session.get(Exam, exam_id)
             if job:
+                partial_ready = bool(job.initial_review_ready or job.review_ready)
                 job.status = "failed"
                 job.error_message = str(exc)
                 job.updated_at = utcnow()
+                job.last_progress_at = job.updated_at
                 job.runner_id = runner_id
                 job.lease_expires_at = None
                 job.finished_at = utcnow()
+                job.fully_warmed = False
+                job.review_ready = partial_ready
                 job.metrics_json = json.dumps(intake_metrics)
                 session.add(job)
             if exam and exam.status != ExamStatus.READY:
-                exam.status = ExamStatus.FAILED
+                exam.status = ExamStatus.REVIEWING if (job and (job.initial_review_ready or job.review_ready)) else ExamStatus.FAILED
                 session.add(exam)
             session.commit()
         logger.error("exam intake failed exam=%s job=%s metrics=%s", exam_id, job_id, intake_metrics)
@@ -1075,8 +1532,15 @@ def start_exam_intake_job(
         status="queued",
         stage="queued",
         page_count=len(rendered_paths),
+        pages_built=len(rendered_paths),
         pages_processed=0,
         submissions_created=0,
+        candidates_ready=0,
+        review_open_threshold=0,
+        initial_review_ready=False,
+        fully_warmed=False,
+        review_ready=False,
+        last_progress_at=utcnow(),
         metrics_json=json.dumps({"render_upload_ms": render_upload_ms, "page_count": len(rendered_paths)}),
     )
     session.add(job)
@@ -1117,8 +1581,15 @@ def retry_exam_intake_job(exam_id: int, session: Session = Depends(get_session))
         status="queued",
         stage="queued",
         page_count=latest_job.page_count,
+        pages_built=latest_job.pages_built,
         pages_processed=0,
         submissions_created=0,
+        candidates_ready=0,
+        review_open_threshold=latest_job.review_open_threshold,
+        initial_review_ready=False,
+        fully_warmed=False,
+        review_ready=False,
+        last_progress_at=utcnow(),
     )
     exam.status = ExamStatus.DRAFT
     session.add(exam)
@@ -1134,12 +1605,15 @@ def _exam_read(exam: Exam, latest_intake_job: ExamIntakeJob | None = None) -> Ex
     if latest_intake_job is None and exam.id:
         with Session(db_state.engine) as session:
             latest_intake_job = _latest_exam_intake_job(exam.id or 0, session)
+    effective_status = exam.status
+    if latest_intake_job and latest_intake_job.initial_review_ready and effective_status != ExamStatus.READY:
+        effective_status = ExamStatus.REVIEWING
     return ExamRead(
         id=exam.id,
         name=exam.name,
         created_at=exam.created_at,
         teacher_style_profile_json=exam.teacher_style_profile_json,
-        status=exam.status,
+        status=effective_status,
         intake_job=_exam_intake_job_read(latest_intake_job),
     )
 
@@ -1874,6 +2348,9 @@ def finalize_bulk_submission_preview(
                         size_bytes=file_row.size_bytes,
                     )
                 )
+            src_path = Path(src.image_path)
+            if src_path.exists():
+                build_page_preview_image(src_path)
             sp = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=src.image_path, width=src.width, height=src.height)
             session.add(sp)
             session.flush()

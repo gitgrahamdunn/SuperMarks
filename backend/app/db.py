@@ -114,6 +114,13 @@ def create_db_and_tables() -> None:
     _ensure_column("examintakejob", "started_at", "started_at VARCHAR")
     _ensure_column("examintakejob", "finished_at", "finished_at VARCHAR")
     _ensure_column("examintakejob", "metrics_json", "metrics_json TEXT")
+    _ensure_column("examintakejob", "pages_built", "pages_built INTEGER DEFAULT 0")
+    _ensure_column("examintakejob", "candidates_ready", "candidates_ready INTEGER DEFAULT 0")
+    _ensure_column("examintakejob", "review_open_threshold", "review_open_threshold INTEGER DEFAULT 0")
+    _ensure_column("examintakejob", "initial_review_ready", "initial_review_ready BOOLEAN DEFAULT 0")
+    _ensure_column("examintakejob", "fully_warmed", "fully_warmed BOOLEAN DEFAULT 0")
+    _ensure_column("examintakejob", "review_ready", "review_ready BOOLEAN DEFAULT 0")
+    _ensure_column("examintakejob", "last_progress_at", "last_progress_at VARCHAR")
 
 
 
