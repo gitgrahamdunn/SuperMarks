@@ -66,10 +66,37 @@ def test_database_url_required_in_production(monkeypatch) -> None:
     monkeypatch.setenv("SUPERMARKS_VERCEL_ENVIRONMENT", "1")
     monkeypatch.delenv("SUPERMARKS_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SUPERMARKS_ALLOW_PRODUCTION_SQLITE", raising=False)
 
     settings = Settings()
 
-    with pytest.raises(RuntimeError, match="DATABASE_URL is required in production"):
+    with pytest.raises(RuntimeError, match="DATABASE_URL is required in production unless"):
+        _ = settings.effective_database_url
+
+
+def test_database_url_allows_sqlite_for_self_hosted_production(monkeypatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    monkeypatch.delenv("VERCEL_ENV", raising=False)
+    monkeypatch.delenv("SUPERMARKS_VERCEL_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("SUPERMARKS_ENV", "production")
+    monkeypatch.setenv("SUPERMARKS_ALLOW_PRODUCTION_SQLITE", "1")
+    monkeypatch.delenv("SUPERMARKS_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    settings = Settings()
+
+    assert settings.effective_database_url.startswith("sqlite:///")
+
+
+def test_database_url_does_not_allow_sqlite_on_vercel_even_when_opted_in(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERMARKS_VERCEL_ENVIRONMENT", "1")
+    monkeypatch.setenv("SUPERMARKS_ALLOW_PRODUCTION_SQLITE", "1")
+    monkeypatch.delenv("SUPERMARKS_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    settings = Settings()
+
+    with pytest.raises(RuntimeError, match="DATABASE_URL is required in production unless"):
         _ = settings.effective_database_url
 
 

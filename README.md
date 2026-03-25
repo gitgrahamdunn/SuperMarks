@@ -28,7 +28,8 @@ See `docs/ARCHITECTURE.md` for guardrails and `docs/EXPERIMENTATION.md` for the 
 - `BACKEND_API_KEY=<backend-api-key>`
 - `CORS_ALLOW_ORIGINS=https://<frontend-domain>`
 - `APP_VERSION=<git-sha-or-build-id>` (optional, served by `GET /version`)
-- `DATABASE_URL=<postgres-connection-url>` (**required in production** for metadata persistence)
+- `DATABASE_URL=<postgres-connection-url>` (recommended for hosted/scalable production)
+- `SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1` (supported for self-hosted low-cost production on your own machine)
 
 ## Local development
 
@@ -119,6 +120,20 @@ Notes:
 Git-based automatic deployments are disabled for both Vercel projects to avoid Hobby plan deployment-cap limits.
 When you are ready to ship, deploy manually from the Vercel UI using **Redeploy**.
 
+## Recommended improvement loop
+
+For day-to-day product polish, do not use production deploys as the feedback loop.
+
+- Run the frontend locally with Vite for fast UI iteration.
+- Run the backend locally for normal development, or point the local frontend at the hosted backend only when you specifically need to verify hosted behavior.
+- Use the local/Tailscale-hosted flow for browser and mobile checks while iterating.
+- Batch related UI fixes together, then do one production deploy after the slice is actually ready.
+
+Practical rule:
+
+- local build + browser smoke first
+- production redeploy only for release-ready batches, not for each small tweak
+
 ## Versioning on Vercel
 
 For easier deploy verification, set both of these per deployment:
@@ -132,7 +147,33 @@ A good value is the same Git SHA (or release tag) in both projects.
 
 - Blob storage stores uploaded files/binaries.
 - `DATABASE_URL` stores all metadata (exams, questions, key files, submissions, pages, parse jobs).
-- In production, both Blob storage and `DATABASE_URL` must be configured for full persistence.
+- Hosted production should use Blob storage plus `DATABASE_URL`.
+- Self-hosted low-cost production can use local files plus SQLite on disk instead.
+
+## Low-cost self-hosted mode
+
+For `0–10` users, the cheapest practical path is:
+
+- frontend and/or backend hosted from your own machine
+- backend on SQLite
+- backend file storage on local disk
+- public reachability through the existing Tailscale-hosted flow
+
+Recommended env shape for that mode:
+
+```bash
+SUPERMARKS_ENV=production
+SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1
+SUPERMARKS_STORAGE_BACKEND=local
+SUPERMARKS_DATA_DIR=/absolute/path/to/supermarks-data
+SUPERMARKS_SQLITE_PATH=/absolute/path/to/supermarks-data/supermarks.db
+```
+
+Backup helper:
+
+```bash
+./scripts/backup-supermarks.sh
+```
 
 ## Current teacher-first workflow slice
 

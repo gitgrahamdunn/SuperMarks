@@ -55,6 +55,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("SUPERMARKS_DATABASE_URL", "DATABASE_URL"),
     )
+    allow_production_sqlite: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SUPERMARKS_ALLOW_PRODUCTION_SQLITE", "ALLOW_PRODUCTION_SQLITE"),
+    )
     max_upload_mb: int = 25
     storage_backend: str = Field(
         default="local",
@@ -121,8 +125,10 @@ class Settings(BaseSettings):
         if self.is_production:
             if self.database_url and self.database_url.strip():
                 return _normalize_database_url(self.database_url)
+            if self.allow_production_sqlite and not self.vercel_environment:
+                return self.sqlite_url
             raise RuntimeError(
-                "DATABASE_URL is required in production for durable exam metadata persistence."
+                "DATABASE_URL is required in production unless SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1 is set for self-hosting."
             )
         if self.database_url and self.database_url.strip():
             return _normalize_database_url(self.database_url)

@@ -71,7 +71,8 @@ Optional environment variables:
 - `SUPERMARKS_CORS_ORIGINS=https://<frontend-domain>`
 - `SUPERMARKS_CORS_ALLOW_ORIGIN_REGEX=https://.*\.vercel\.app`
 - `APP_VERSION=<git-sha-or-build-id>` (optional; exposed by `GET /version`)
-- `DATABASE_URL=<postgres-connection-url>` (**required in production**; stores all metadata)
+- `DATABASE_URL=<postgres-connection-url>` (recommended for hosted/scalable production)
+- `SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1` (supported only for self-hosting outside Vercel)
 
 
 Storage notes:
@@ -82,7 +83,32 @@ Storage notes:
 
 
 
-Persistence note: Blob stores files; DATABASE_URL stores metadata. Both are required for persistence in production.
+Persistence note:
+
+- Hosted production: Blob stores files and `DATABASE_URL` stores metadata.
+- Self-hosted low-cost production: local files plus SQLite on disk are supported.
+
+## Self-hosted low-cost mode
+
+If you want the cheapest practical setup for `0–10` users, run the backend on your own machine with:
+
+```bash
+SUPERMARKS_ENV=production
+SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1
+SUPERMARKS_STORAGE_BACKEND=local
+SUPERMARKS_DATA_DIR=/absolute/path/to/supermarks-data
+SUPERMARKS_SQLITE_PATH=/absolute/path/to/supermarks-data/supermarks.db
+```
+
+Recommended workflow:
+
+- keep the current long-running backend process model
+- expose it through the existing Tailscale-hosted flow
+- run backups regularly with:
+
+```bash
+./scripts/backup-supermarks.sh
+```
 
 ## Fly.io deployment
 

@@ -837,6 +837,7 @@ export function ExamsPage() {
                 onReject={(message) => showWarning(message)}
                 multiple
                 singularLabel="paper photo"
+                compactSelectedFiles
               />
               {modalFiles.length > 0 && (
                 <p className="subtle-text" style={{ margin: 0 }}>
@@ -924,7 +925,7 @@ export function ExamsPage() {
               </div>
             )}
 
-            <div className="actions-row">
+            <div className="actions-row modal-actions-sticky">
               <button type="submit" className="btn btn-primary" disabled={isRunning}>
                 {isRunning ? 'Preparing…' : 'Create exam'}
               </button>

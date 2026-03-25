@@ -12,6 +12,7 @@ interface FileUploaderProps {
   singularLabel?: string;
   acceptedTypes?: string[];
   acceptedLabel?: string;
+  compactSelectedFiles?: boolean;
 }
 
 function formatBytes(bytes: number): string {
@@ -28,6 +29,7 @@ export function FileUploader({
   singularLabel = 'file',
   acceptedTypes = DEFAULT_ACCEPTED_TYPES,
   acceptedLabel = 'PDF, PNG, JPG, JPEG',
+  compactSelectedFiles = false,
 }: FileUploaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -120,21 +122,21 @@ export function FileUploader({
       </div>
 
       {files.length > 0 && (
-        <div className="file-list-block">
+        <div className={`file-list-block${compactSelectedFiles ? ' file-list-block-compact' : ''}`}>
           <strong>{multiple ? 'Selected files' : `Selected ${singularLabel}`}</strong>
-          <ul className="file-list">
+          <ul className={`file-list${compactSelectedFiles ? ' file-list-compact' : ''}`}>
             {files.map((file) => {
               const isImage = file.type.startsWith('image/');
               const imagePreview = imagePreviews.find((preview) => preview.file === file);
               return (
-                <li key={`${file.name}-${file.size}`} className="file-row">
-                  <div className="file-row-meta">
+                <li key={`${file.name}-${file.size}`} className={`file-row${compactSelectedFiles ? ' file-row-compact' : ''}`}>
+                  <div className={`file-row-meta${compactSelectedFiles ? ' file-row-meta-compact' : ''}`}>
                     {isImage && imagePreview ? (
-                      <img src={imagePreview.url} alt={`${file.name} preview`} className="file-thumb" />
+                      <img src={imagePreview.url} alt={`${file.name} preview`} className={`file-thumb${compactSelectedFiles ? ' file-thumb-compact' : ''}`} />
                     ) : (
                       <span className="file-chip">{file.name.split('.').pop()?.toUpperCase() || 'FILE'}</span>
                     )}
-                    <span>{file.name} ({formatBytes(file.size)})</span>
+                    <span className={compactSelectedFiles ? 'file-name-compact' : undefined}>{file.name} ({formatBytes(file.size)})</span>
                   </div>
                   <button
                     type="button"
