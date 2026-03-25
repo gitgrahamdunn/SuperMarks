@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_LOCAL_DATA_DIR = BASE_DIR / "data"
 DEFAULT_VERCEL_DATA_DIR = Path("/tmp/supermarks")
+DEFAULT_FRONTEND_DIST_DIR = BASE_DIR.parent / "frontend" / "dist"
 
 
 TRUTHY_VALUES = {"1", "true", "yes", "on"}
@@ -91,6 +92,14 @@ class Settings(BaseSettings):
     blob_public_access: str = Field(
         default="public",
         validation_alias=AliasChoices("SUPERMARKS_BLOB_PUBLIC_ACCESS", "BLOB_PUBLIC_ACCESS"),
+    )
+    serve_frontend: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SUPERMARKS_SERVE_FRONTEND", "SERVE_FRONTEND"),
+    )
+    frontend_dist_dir: str = Field(
+        default=str(DEFAULT_FRONTEND_DIST_DIR),
+        validation_alias=AliasChoices("SUPERMARKS_FRONTEND_DIST_DIR", "FRONTEND_DIST_DIR"),
     )
 
     # Deployment toggles

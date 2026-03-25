@@ -129,3 +129,12 @@ def test_database_url_normalizes_postgresql_scheme_and_preserves_query(monkeypat
         settings.effective_database_url
         == "postgresql+psycopg://user:secret@localhost:5432/supermarks?sslmode=require&connect_timeout=10"
     )
+
+
+def test_frontend_dist_dir_defaults_to_repo_frontend_dist(monkeypatch) -> None:
+    monkeypatch.delenv("SUPERMARKS_FRONTEND_DIST_DIR", raising=False)
+    monkeypatch.delenv("FRONTEND_DIST_DIR", raising=False)
+
+    settings = Settings()
+
+    assert settings.frontend_dist_dir.endswith("/frontend/dist")

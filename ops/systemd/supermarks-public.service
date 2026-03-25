@@ -1,0 +1,13 @@
+[Unit]
+Description=SuperMarks public Tailscale Funnel
+After=network-online.target supermarks-backend.service
+Wants=network-online.target supermarks-backend.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/repos/SuperMarks
+ExecStart=%h/repos/SuperMarks/scripts/configure-tailscale-public.sh 8000
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

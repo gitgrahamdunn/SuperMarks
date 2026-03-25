@@ -96,19 +96,43 @@ If you want the cheapest practical setup for `0–10` users, run the backend on 
 SUPERMARKS_ENV=production
 SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1
 SUPERMARKS_STORAGE_BACKEND=local
+SUPERMARKS_SERVE_FRONTEND=1
 SUPERMARKS_DATA_DIR=/absolute/path/to/supermarks-data
 SUPERMARKS_SQLITE_PATH=/absolute/path/to/supermarks-data/supermarks.db
 ```
 
 Recommended workflow:
 
-- keep the current long-running backend process model
-- expose it through the existing Tailscale-hosted flow
+- prepare the local production runtime once:
+
+```bash
+./scripts/prepare-local-prod.sh
+```
+
+- install the reboot-safe user services:
+
+```bash
+./scripts/install-supermarks-service.sh
+```
+
+- verify the stack after boot or after updates:
+
+```bash
+./scripts/verify-local-prod.sh
+```
+
 - run backups regularly with:
 
 ```bash
 ./scripts/backup-supermarks.sh
 ```
+
+Local production notes:
+
+- the backend serves the built SPA from `frontend/dist`
+- runtime boot does not install dependencies
+- runtime boot does not use `uvicorn --reload`
+- Tailscale Funnel is re-applied against backend port `8000`
 
 ## Fly.io deployment
 

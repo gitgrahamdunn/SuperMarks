@@ -3,12 +3,14 @@
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import text
 from sqlmodel import Session
 
@@ -37,6 +39,33 @@ app = FastAPI(title=settings.app_name, version="0.1.0")
 
 
 logger = logging.getLogger(__name__)
+
+
+def _frontend_dist_path() -> Path:
+    return Path(settings.frontend_dist_dir).resolve()
+
+
+def _frontend_index_path() -> Path:
+    return _frontend_dist_path() / "index.html"
+
+
+def _should_serve_frontend() -> bool:
+    return settings.serve_frontend and _frontend_index_path().is_file()
+
+
+def _resolve_frontend_file_path(relative_path: str) -> Path | None:
+    dist_path = _frontend_dist_path()
+    requested_path = relative_path.strip("/")
+    if not requested_path:
+        return _frontend_index_path()
+    candidate = (dist_path / requested_path).resolve()
+    try:
+        candidate.relative_to(dist_path)
+    except ValueError:
+        return None
+    if candidate.is_file():
+        return candidate
+    return None
 
 
 
@@ -83,12 +112,19 @@ def on_startup() -> None:
         get_database_backend_name(),
         get_redacted_database_url(),
     )
+    logger.info(
+        "Frontend serving: %s (%s)",
+        "enabled" if _should_serve_frontend() else "disabled",
+        settings.frontend_dist_dir,
+    )
     create_db_and_tables()
     _resume_pending_exam_intake_jobs()
 
 
-@app.get("/", tags=["meta"])
-def root() -> dict[str, bool | str]:
+@app.get("/", tags=["meta"], response_model=None)
+def root() -> Response | dict[str, bool | str]:
+    if _should_serve_frontend():
+        return FileResponse(_frontend_index_path())
     return {"ok": True, "service": "supermarks-backend"}
 
 
@@ -166,3 +202,14 @@ def deep_health() -> dict[str, bool | str]:
 @app.post("/api/blob/client-upload-token", tags=["blob"], dependencies=[Depends(require_api_key)])
 def client_upload_token_stub() -> Response:
     return JSONResponse(status_code=501, content={"detail": "Client upload not implemented yet."})
+
+
+@app.get("/{full_path:path}", include_in_schema=False, response_model=None)
+def frontend_spa(full_path: str) -> Response:
+    if not _should_serve_frontend():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    resolved_path = _resolve_frontend_file_path(full_path)
+    if resolved_path is not None:
+        return FileResponse(resolved_path)
+    return FileResponse(_frontend_index_path())

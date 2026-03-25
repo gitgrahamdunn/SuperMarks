@@ -1,12 +1,12 @@
 [Unit]
-Description=SuperMarks hosted dev stack
+Description=SuperMarks local production backend
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=%h/repos/SuperMarks
-ExecStart=%h/repos/SuperMarks/scripts/host-supermarks.sh
+ExecStart=%h/repos/SuperMarks/scripts/prod-backend.sh
 Restart=always
 RestartSec=5
 

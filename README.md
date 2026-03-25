@@ -67,24 +67,14 @@ VITE_BACKEND_API_KEY=<your-local-key>
 
 ## Hosted on this machine
 
-This repo now includes a simple hosted-dev setup that keeps both services running locally and exposes the frontend over Tailscale HTTPS.
+There are now two local hosting modes:
 
-Start the combined app manually:
+### 1) Hosted dev stack
+
+Use this only for active iteration:
 
 ```bash
 ./scripts/host-supermarks.sh
-```
-
-Install it as a user service:
-
-```bash
-./scripts/install-supermarks-service.sh
-```
-
-Expose it publicly through Tailscale Funnel:
-
-```bash
-./scripts/configure-tailscale-public.sh
 ```
 
 Notes:
@@ -92,7 +82,24 @@ Notes:
 - Frontend stays on Vite, so frontend code changes hot-reload automatically.
 - Backend stays on `uvicorn --reload`, so backend code changes restart automatically.
 - `frontend/.env.local` can stay on `VITE_API_BASE_URL=/api` because Vite proxies `/api` to the backend.
-- If you need a different public hostname allowlist, set `VITE_ALLOWED_HOSTS=host1,host2` before starting the frontend service.
+
+### 2) Local production-safe stack
+
+Use this for reboot-safe public hosting from your machine:
+
+```bash
+./scripts/prepare-local-prod.sh
+./scripts/install-supermarks-service.sh
+./scripts/verify-local-prod.sh
+```
+
+What this does:
+
+- builds the frontend once to `frontend/dist`
+- runs one backend service on port `8000`
+- serves the built SPA directly from the backend
+- re-applies Tailscale Funnel to the backend on boot
+- avoids `vite dev`, `npm install`, and `uvicorn --reload` in the runtime boot path
 
 ### Current local verification status
 
@@ -165,6 +172,7 @@ Recommended env shape for that mode:
 SUPERMARKS_ENV=production
 SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1
 SUPERMARKS_STORAGE_BACKEND=local
+SUPERMARKS_SERVE_FRONTEND=1
 SUPERMARKS_DATA_DIR=/absolute/path/to/supermarks-data
 SUPERMARKS_SQLITE_PATH=/absolute/path/to/supermarks-data/supermarks.db
 ```
@@ -173,6 +181,12 @@ Backup helper:
 
 ```bash
 ./scripts/backup-supermarks.sh
+```
+
+Reboot-safe verification:
+
+```bash
+./scripts/verify-local-prod.sh
 ```
 
 ## Current teacher-first workflow slice
