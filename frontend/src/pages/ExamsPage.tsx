@@ -4,7 +4,7 @@ import { ApiError, api, buildApiUrl } from '../api/client';
 import { FileUploader } from '../components/FileUploader';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/ToastProvider';
-import type { ExamIntakeJobRead, ExamRead } from '../types/api';
+import type { ClassListRead, ExamIntakeJobRead, ExamRead } from '../types/api';
 
 type WizardStep = 'creating' | 'uploading' | 'building_pages' | 'parsing' | 'done';
 type ParseChecklistStepId =
@@ -83,7 +83,6 @@ const THINKING_LEVEL_OPTIONS: Array<{ value: ThinkingLevel; label: string }> = [
   { value: 'med', label: 'Med' },
   { value: 'high', label: 'High' },
 ];
-
 const isNetworkFetchError = (error: unknown) =>
   error instanceof Error && (error instanceof TypeError || /load failed|failed to fetch|network/i.test(error.message));
 
@@ -117,40 +116,49 @@ const formatExamDateTime = (value: string) => {
 const normalizeExamStatus = (exam: ExamRead) => {
   const intakeStatus = exam.intake_job?.status?.trim().toLowerCase();
   const initialReviewReady = Boolean(exam.intake_job?.initial_review_ready || exam.intake_job?.review_ready);
-  const fullyWarmed = Boolean(exam.intake_job?.fully_warmed);
   if (intakeStatus === 'queued' || intakeStatus === 'running') {
     if (initialReviewReady) {
-      return { label: fullyWarmed ? 'In progress' : 'Review ready', tone: 'status-ready' };
+      return { label: 'Ready', tone: 'status-ready' };
     }
-    return { label: 'Preparing', tone: 'status-in-progress' };
+    return { label: 'Working', tone: 'status-in-progress' };
   }
   if (intakeStatus === 'failed') {
     if (initialReviewReady) {
-      return { label: 'Review ready', tone: 'status-ready' };
+      return { label: 'Ready', tone: 'status-ready' };
     }
     return { label: 'Failed', tone: 'status-blocked' };
   }
 
   const normalized = exam.status?.trim().toLowerCase();
   if (!normalized) {
-    return { label: 'Active workspace', tone: 'status-ready' };
+    return { label: 'Ready', tone: 'status-ready' };
   }
   if (normalized === 'draft') {
-    return { label: 'Preparing', tone: 'status-in-progress' };
+    if (!exam.intake_job) {
+      return { label: 'Upload interrupted', tone: 'status-blocked' };
+    }
+    return { label: 'Working', tone: 'status-in-progress' };
   }
   if (normalized === 'ready' || normalized.includes('confirm')) {
-    return { label: 'Confirmed', tone: 'status-complete' };
+    return { label: 'Checked', tone: 'status-complete' };
   }
   if (normalized.includes('complete') || normalized.includes('done')) {
-    return { label: 'Complete', tone: 'status-complete' };
+    return { label: 'Checked', tone: 'status-complete' };
   }
   if (normalized.includes('progress') || normalized.includes('review')) {
-    return { label: 'In progress', tone: 'status-in-progress' };
+    return { label: 'Ready', tone: 'status-ready' };
   }
   if (normalized.includes('block') || normalized.includes('flag')) {
     return { label: 'Needs review', tone: 'status-blocked' };
   }
   return { label: exam.status || 'Active workspace', tone: 'status-neutral' };
+};
+
+const libraryStatusClassName = (label: string) => {
+  if (label === 'Working') return 'status-library-working';
+  if (label === 'Ready') return 'status-library-ready';
+  if (label === 'Checked') return 'status-library-checked';
+  return '';
 };
 
 const PREPARING_STAGE_LABELS: Record<string, string> = {
@@ -229,14 +237,18 @@ const formatUsd = (value: number) => {
   return `$${value.toFixed(2)}`;
 };
 
+const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
 
 export function ExamsPage() {
   const [exams, setExams] = useState<ExamRead[]>([]);
+  const [classLists, setClassLists] = useState<ClassListRead[]>([]);
   const [loading, setLoading] = useState(true);
   const [deletingExamId, setDeletingExamId] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalFiles, setModalFiles] = useState<File[]>([]);
+  const [selectedClassListId, setSelectedClassListId] = useState<string>('');
   const [isRunning, setIsRunning] = useState(false);
   const [step, setStep] = useState<WizardStep>('creating');
   const [wizardError, setWizardError] = useState<WizardError | null>(null);
@@ -251,6 +263,8 @@ export function ExamsPage() {
   const requestControllerRef = useRef<AbortController | null>(null);
   const currentStepRef = useRef<WizardStep>('creating');
   const openWizardButtonRef = useRef<HTMLButtonElement>(null);
+  const parseProgressRef = useRef(0);
+  const parseProgressTimerRef = useRef<number | null>(null);
 
   const { showError, showSuccess, showWarning } = useToast();
   const navigate = useNavigate();
@@ -266,7 +280,6 @@ export function ExamsPage() {
     () => sortedExams.filter((exam) => exam.name.toLowerCase().includes(searchTerm.toLowerCase().trim())),
     [sortedExams, searchTerm],
   );
-  const activeExamCount = exams.filter((exam) => !normalizeExamStatus(exam).label.toLowerCase().includes('complete')).length;
   const activeIntakeExamIds = useMemo(
     () => exams
       .filter((exam) => {
@@ -283,19 +296,24 @@ export function ExamsPage() {
     return params.get('debug') === 'cost';
   }, [location.search]);
 
-  const loadExams = async () => {
+  const loadHomeData = async () => {
     try {
       setLoading(true);
-      setExams(await api.getExams());
+      const [examRows, classListRows] = await Promise.all([
+        api.getExams(),
+        api.getClassLists(),
+      ]);
+      setExams(examRows);
+      setClassLists(classListRows);
     } catch (loadError) {
-      showError(loadError instanceof Error ? loadError.message : 'Failed to load exams');
+      showError(loadError instanceof Error ? loadError.message : 'Failed to load Home');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    void loadExams();
+    void loadHomeData();
   }, []);
 
   useEffect(() => {
@@ -336,7 +354,7 @@ export function ExamsPage() {
       }));
 
       if (shouldRefreshExams) {
-        void loadExams();
+        void loadHomeData();
       }
     };
 
@@ -370,6 +388,48 @@ export function ExamsPage() {
     setChecklistSteps((prev) => prev.map((item) => (item.id === id ? { ...item, status } : item)));
   };
 
+  const setProgressValue = (value: number) => {
+    parseProgressRef.current = value;
+    setParseProgress(value);
+  };
+
+  const stopProgressAnimation = () => {
+    if (parseProgressTimerRef.current !== null) {
+      window.clearInterval(parseProgressTimerRef.current);
+      parseProgressTimerRef.current = null;
+    }
+  };
+
+  const startProgressAnimation = (start: number, ceiling: number) => {
+    stopProgressAnimation();
+    setProgressValue(start);
+    parseProgressTimerRef.current = window.setInterval(() => {
+      setParseProgress((prev) => {
+        const next = Math.min(ceiling, prev + Math.max(1, Math.ceil((ceiling - prev) * 0.14)));
+        parseProgressRef.current = next;
+        if (next >= ceiling) {
+          stopProgressAnimation();
+        }
+        return next;
+      });
+    }, 140);
+  };
+
+  const animateProgressTo = async (target: number, durationMs = 650) => {
+    stopProgressAnimation();
+    const start = parseProgressRef.current;
+    if (target <= start) {
+      setProgressValue(target);
+      return;
+    }
+    const steps = Math.max(5, Math.round(durationMs / 75));
+    for (let index = 1; index <= steps; index += 1) {
+      await delay(Math.round(durationMs / steps));
+      const next = Math.round(start + ((target - start) * index) / steps);
+      setProgressValue(next);
+    }
+  };
+
   const updateCurrentStep = (nextStep: WizardStep) => {
     currentStepRef.current = nextStep;
     setStep(nextStep);
@@ -384,11 +444,12 @@ export function ExamsPage() {
   };
 
   const resetWizardProgress = () => {
+    stopProgressAnimation();
     setParsedQuestionCount(null);
     setWizardError(null);
     setCurrentExamId(null);
     setStep('creating');
-    setParseProgress(0);
+    setProgressValue(0);
     setFailedSummary(null);
     setParsePageCount(0);
     setChecklistSteps(initChecklist());
@@ -396,6 +457,7 @@ export function ExamsPage() {
 
   const resetWizardState = () => {
     setModalFiles([]);
+    setSelectedClassListId('');
     setAllowLargeUpload(false);
     setFrontPageThinkingLevel('low');
     resetWizardProgress();
@@ -410,6 +472,7 @@ export function ExamsPage() {
     if (isRunning) {
       requestControllerRef.current?.abort();
     }
+    stopProgressAnimation();
     dismissModal();
   };
 
@@ -424,18 +487,18 @@ export function ExamsPage() {
     const preview = await api.uploadBulkSubmissionsFile(examId, files, undefined, requestOptions);
     logStep();
     markChecklist('uploading_key', 'done');
-    setParseProgress(38);
+    setProgressValue(38);
 
     updateCurrentStep('building_pages');
     markChecklist('building_key_pages', 'active');
     setParsePageCount(preview.page_count);
     setParsedQuestionCount(preview.candidates.length);
     markChecklist('building_key_pages', 'done');
-    setParseProgress(56);
+    setProgressValue(56);
 
     updateCurrentStep('parsing');
     markChecklist('reading_questions', 'active');
-    setParseProgress(72);
+    setProgressValue(72);
 
     const finalized = await api.finalizeBulkSubmissions(
       examId,
@@ -452,7 +515,7 @@ export function ExamsPage() {
     markChecklist('detecting_marks', 'done');
     markChecklist('drafting_rubric', 'done');
     markChecklist('finalizing', 'done');
-    setParseProgress(100);
+    setProgressValue(100);
     updateCurrentStep('done');
 
     return {
@@ -486,25 +549,30 @@ export function ExamsPage() {
       setIsRunning(true);
       updateCurrentStep('creating');
       markChecklist('creating_exam', 'active');
-      const exam = await api.createExam('', requestOptions);
+      startProgressAnimation(14, 78);
+      const selectedId = selectedClassListId ? Number(selectedClassListId) : null;
+      const exam = await api.createExamWithIntake(
+        modalFiles,
+        frontPageThinkingLevel,
+        '',
+        Number.isFinite(selectedId) ? selectedId : null,
+        requestOptions,
+      );
       const activeExamId = exam.id;
       examId = activeExamId;
       setCurrentExamId(activeExamId);
       setExams((prev) => [exam, ...prev.filter((item) => item.id !== exam.id)]);
       logStep();
       markChecklist('creating_exam', 'done');
-      setParseProgress(14);
-      updateCurrentStep('uploading');
-      markChecklist('uploading_key', 'active');
-      const intakeJob = await api.startExamIntakeJob(activeExamId, modalFiles, frontPageThinkingLevel, requestOptions);
-      setExams((prev) => prev.map((item) => (item.id === activeExamId ? { ...item, intake_job: intakeJob, status: 'DRAFT' } : item)));
       markChecklist('uploading_key', 'done');
-      setParseProgress(100);
+      setExams((prev) => prev.map((item) => (item.id === activeExamId ? exam : item)));
+      await animateProgressTo(100, 720);
       updateCurrentStep('done');
+      await delay(260);
       showSuccess('Workspace created. Papers are preparing in Home.');
       requestControllerRef.current = null;
       dismissModal();
-      void loadExams();
+      void loadHomeData();
       return;
     } catch (err) {
       const stepName = currentStepRef.current;
@@ -565,6 +633,7 @@ export function ExamsPage() {
         showError(`${stepName} failed (status unknown)`);
       }
     } finally {
+      stopProgressAnimation();
       setIsRunning(false);
       requestControllerRef.current = null;
     }
@@ -577,74 +646,7 @@ export function ExamsPage() {
 
   const onRetryFailedStep = async () => {
     if (!wizardError) return;
-
-      if (wizardError.step === 'creating' || wizardError.step === 'uploading') {
-        await runCreateAndUpload();
-        return;
-      }
-
-    const activeExamId = currentExamId;
-    if (!activeExamId) {
-      showError('No active exam id for this wizard session');
-      return;
-    }
-
-    const controller = new AbortController();
-    requestControllerRef.current = controller;
-    const requestOptions = { signal: controller.signal };
-    const logStep = () => {};
-
-    try {
-      setIsRunning(true);
-      setWizardError(null);
-
-      if (modalFiles.length === 0) {
-        showWarning('Upload at least one PDF, PNG, or JPG paper file.');
-        return;
-      }
-
-      await ingestWizardTestBundle(activeExamId, modalFiles, requestOptions, logStep);
-      showSuccess('Intake step retried successfully.');
-    } catch (err) {
-      const stepName = currentStepRef.current;
-      const stepEndpoint = endpointForStep(stepName, currentExamId);
-      if (isNetworkFetchError(err) || isAbortError(err)) {
-        setWizardError({
-          step: stepName,
-          summary: `Step: ${stepName} | Status: network-error`,
-          details: err instanceof Error ? err.stack || err.message : String(err),
-          attemptedUrl: stepEndpoint,
-          method: 'UNKNOWN',
-          status: 'network-error',
-          bodySnippet: err instanceof Error ? err.message : String(err),
-          isAbort: isAbortError(err),
-        });
-      } else if (err instanceof ApiError) {
-        setWizardError({
-          step: stepName,
-          summary: `Step: ${stepName} | ${err.method} ${err.url} | Status: ${err.status}`,
-          details: JSON.stringify({ method: err.method, url: err.url, status: err.status, bodySnippet: err.responseBodySnippet || '<empty>' }, null, 2),
-          attemptedUrl: err.url,
-          method: err.method,
-          status: err.status,
-          contentType: undefined,
-          bodySnippet: err.responseBodySnippet,
-        });
-      } else {
-        setWizardError({
-          step: stepName,
-          summary: `Step: ${stepName} | Status: unknown`,
-          details: err instanceof Error ? err.message : 'Unknown error',
-          attemptedUrl: stepEndpoint,
-          method: 'UNKNOWN',
-          status: 'unknown',
-          bodySnippet: err instanceof Error ? err.message : String(err),
-        });
-      }
-    } finally {
-      setIsRunning(false);
-      requestControllerRef.current = null;
-    }
+    await runCreateAndUpload();
   };
 
   return (
@@ -670,19 +672,6 @@ export function ExamsPage() {
             </button>
           </div>
         </section>
-
-        <div className="metric-grid">
-          <article className="metric-card">
-            <p className="metric-label">Open workspaces</p>
-            <p className="metric-value">{exams.length}</p>
-            <p className="metric-meta">Saved workspaces.</p>
-          </article>
-          <article className="metric-card">
-            <p className="metric-label">Needs attention</p>
-            <p className="metric-value">{activeExamCount}</p>
-            <p className="metric-meta">Still in progress.</p>
-          </article>
-        </div>
       </section>
 
       <section className="card stack">
@@ -723,7 +712,8 @@ export function ExamsPage() {
               const status = normalizeExamStatus(exam);
               const isDeleting = deletingExamId === exam.id;
               const intakeJob = exam.intake_job;
-              const isPreparing = status.label === 'Preparing';
+              const isOrphanDraft = !intakeJob && exam.status?.trim().toLowerCase() === 'draft';
+              const isPreparing = status.tone === 'status-in-progress';
               const isFailed = status.label === 'Failed';
               const initialReviewReady = Boolean(intakeJob?.initial_review_ready || intakeJob?.review_ready);
               const fullyWarmed = Boolean(intakeJob?.fully_warmed);
@@ -741,14 +731,12 @@ export function ExamsPage() {
                 <article key={exam.id} className="workspace-card">
                   <div className="workspace-card-header">
                     <div>
-                      <p className="workspace-card-kicker">Exam workspace</p>
                       <Link className="workspace-card-title" to={`/exams/${exam.id}`}>{exam.name}</Link>
                     </div>
-                    <span className={`status-pill ${status.tone}`}>{status.label}</span>
+                    <span className={`status-pill ${status.tone}${status.label === 'Working' ? ' status-pill-working' : ''} ${libraryStatusClassName(status.label)}`.trim()}>{status.label}</span>
                   </div>
                   <div className="workspace-card-meta">
                     <span>Created {formatExamDate(exam.created_at)}</span>
-                    <span>Exam ID {exam.id}</span>
                   </div>
                   {(isPreparing || (canOpenWorkspace && intakeJob && !fullyWarmed)) && (
                     <div className="library-card-progress" aria-label="Preparing test">
@@ -771,6 +759,11 @@ export function ExamsPage() {
                       You can open the workspace now. Remaining papers will keep preparing in the background.
                     </p>
                   )}
+                  {isOrphanDraft && (
+                    <p className="warning-text" style={{ margin: 0 }}>
+                      This workspace was created, but the upload did not start. Delete it and upload again.
+                    </p>
+                  )}
                   {intakeJob?.status === 'failed' && exam.intake_job?.error_message && (
                     <p className="warning-text" style={{ margin: 0 }}>{exam.intake_job.error_message}</p>
                   )}
@@ -788,7 +781,7 @@ export function ExamsPage() {
                       </p>
                     </div>
                   )}
-                  <div className="actions-row" style={{ marginTop: 0 }}>
+                  <div className="actions-row workspace-card-actions" style={{ marginTop: 0 }}>
                     {canOpenWorkspace ? (
                       <Link className="btn btn-secondary btn-sm" to={`/exams/${exam.id}`}>Open workspace</Link>
                     ) : (
@@ -816,7 +809,7 @@ export function ExamsPage() {
                     )}
                     <button
                       type="button"
-                      className="btn btn-danger btn-sm"
+                      className="btn btn-secondary btn-sm"
                       onClick={() => void handleDeleteExam(exam)}
                       disabled={isDeleting}
                     >
@@ -863,6 +856,27 @@ export function ExamsPage() {
                 </label>
               )}
             </div>
+            <div className="stack" style={{ gap: '.6rem' }}>
+              <label htmlFor="class-list-select">Class list</label>
+              <select
+                id="class-list-select"
+                value={selectedClassListId}
+                onChange={(event) => setSelectedClassListId(event.target.value)}
+                disabled={isRunning}
+              >
+                <option value="">Skip</option>
+                {classLists.map((classList) => (
+                  <option key={classList.id ?? `${classList.name}-${classList.created_at}`} value={classList.id ?? ''}>
+                    {(classList.name || 'Untitled class list')} · {classList.entry_count} name{classList.entry_count === 1 ? '' : 's'}
+                  </option>
+                ))}
+              </select>
+              <p className="subtle-text" style={{ margin: 0 }}>
+                {classLists.length > 0 ? 'Optional. Use a saved class list to improve name reads.' : 'No saved class lists yet.'}
+                {' '}
+                <Link to="/class-lists">Manage class lists</Link>
+              </p>
+            </div>
             <div className="stack" style={{ gap: '.45rem' }}>
               <label>Thinking</label>
               <div className="actions-row" role="radiogroup" aria-label="Front-page thinking level" style={{ marginTop: 0 }}>
@@ -881,50 +895,29 @@ export function ExamsPage() {
                 ))}
               </div>
             </div>
-            {(isRunning || parseProgress > 0 || wizardError || step === 'done') && (
+            {(isRunning || wizardError) && (
               <div className="stack" style={{ gap: '.65rem' }}>
                 <div className="metric-card">
                   <div className="panel-title-row" style={{ marginBottom: '.45rem' }}>
-                    <strong>Exam entry progress</strong>
-                    <span className={`status-pill ${step === 'done' ? 'status-complete' : wizardError ? 'status-blocked' : 'status-in-progress'}`}>
-                      {wizardError ? 'Needs attention' : step === 'done' ? 'Queue ready' : step.replace(/_/g, ' ')}
+                    <strong>Creating workspace</strong>
+                    <span className={`status-pill ${wizardError ? 'status-blocked' : 'status-in-progress'}`}>
+                      {wizardError ? 'Needs attention' : 'Working'}
                     </span>
                   </div>
-                  <progress max={100} value={parseProgress} style={{ width: '100%' }} />
+                  {isRunning && <progress max={100} value={Math.max(parseProgress, 12)} style={{ width: '100%' }} />}
                   <p className="metric-meta" style={{ marginTop: '.5rem' }}>
-                    {wizardError ? wizardError.summary : step === 'done' ? `Prepared ${parsedQuestionCount ?? 0} paper${(parsedQuestionCount ?? 0) === 1 ? '' : 's'}.` : `Working on ${step.replace(/_/g, ' ')}.`}
+                    {wizardError
+                      ? wizardError.summary
+                      : parseProgress >= 100
+                        ? 'Workspace created. Moving this to Home.'
+                        : 'Creating the workspace and handing it off to Home.'}
                   </p>
-                </div>
-                <div className="stack" style={{ gap: '.45rem' }}>
-                  {checklistSteps.map((item) => (
-                    <div key={item.id} className="inline-stat-row">
-                      <span className={`status-pill ${item.status === 'done' ? 'status-complete' : item.status === 'failed' ? 'status-blocked' : item.status === 'active' ? 'status-in-progress' : 'status-neutral'}`}>
-                        {item.status}
-                      </span>
-                      <span>{item.label}</span>
-                    </div>
-                  ))}
                 </div>
                 {failedSummary && <p className="warning-text" style={{ margin: 0 }}>{failedSummary}</p>}
                 {wizardError && (
                   <div className="actions-row" style={{ marginTop: 0 }}>
                     <button type="button" className="btn btn-secondary" onClick={() => void onRetryFailedStep()} disabled={isRunning}>
                       Retry failed step
-                    </button>
-                  </div>
-                )}
-                {step === 'done' && currentExamId && (
-                  <div className="actions-row" style={{ marginTop: 0 }}>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() => {
-                        const examId = currentExamId;
-                        closeModal();
-                        navigate(`/exams/${examId}`);
-                      }}
-                    >
-                      Open workspace
                     </button>
                   </div>
                 )}

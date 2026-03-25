@@ -36,17 +36,19 @@ from app.ai.openai_vision import (
     ParseResult,
     SchemaBuildError,
     build_answer_key_response_schema,
+    extract_class_list_names_from_image,
     get_answer_key_parser,
     get_bulk_name_detector,
     get_front_page_totals_extractor,
 )
 from app import db as db_state
 from app.db import get_session
-from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
+from app.models import AnswerCrop, BulkUploadPage, ClassList, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
+from app.class_lists import build_class_list_payload, nearest_known_student_name, normalize_class_list_names, parse_class_list_names_json, parse_class_list_tabular_bytes
 from app.reporting import front_page_totals_read
 from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_gradebook_xlsx_artifact, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, invalidate_exam_reporting_cache, write_csv_export
 from app.name_utils import compose_student_name, normalize_student_name, split_student_name, submission_display_name, submission_name_parts
-from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ExamCreate, ExamDetail, ExamIntakeJobRead, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, FrontPageTotalsCandidateRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
+from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ClassListRead, ExamCreate, ExamDetail, ExamIntakeJobRead, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, FrontPageCandidateValue, FrontPageExtractionEvidence, FrontPageObjectiveScoreCandidate, FrontPageTotalsCandidateRead, FrontPageUsageEntryRead, FrontPageUsageReportRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.pipeline.pages import build_page_preview_image
 from app.storage import ensure_dir, reset_dir, relative_to_data
@@ -55,6 +57,7 @@ from app.blob_store import BlobUploadError, upload_bytes, upload_rendered_key_pa
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 public_router = APIRouter(prefix="/exams", tags=["exams-public"])
+class_lists_router = APIRouter(prefix="/class-lists", tags=["class-lists"])
 logger = logging.getLogger(__name__)
 _exam_question_locks: dict[int, threading.Lock] = {}
 _exam_question_locks_guard = threading.Lock()
@@ -92,14 +95,18 @@ def _front_page_candidate_worker_count(submission_count: int) -> int:
     return max(1, min(desired, max(submission_count, 1)))
 
 
+_FRONT_PAGE_EXTRACT_ATTEMPTS = max(1, int(os.getenv("SUPERMARKS_FRONT_PAGE_EXTRACT_ATTEMPTS", "3") or "3"))
+
+
 def _record_front_page_usage_metrics(metrics: dict[str, object], usage: dict[str, object] | None) -> None:
     if not usage:
         return
+    call_count = max(int(usage.get("call_count") or 1), 1)
     metrics["front_page_provider"] = str(usage.get("provider") or metrics.get("front_page_provider") or "")
     metrics["front_page_model"] = str(usage.get("model") or metrics.get("front_page_model") or "")
     metrics["front_page_thinking_level"] = str(usage.get("thinking_level") or metrics.get("front_page_thinking_level") or "")
     metrics["front_page_thinking_budget"] = int(usage.get("thinking_budget") or metrics.get("front_page_thinking_budget") or 0)
-    metrics["front_page_calls"] = int(metrics.get("front_page_calls") or 0) + 1
+    metrics["front_page_calls"] = int(metrics.get("front_page_calls") or 0) + call_count
     metrics["front_page_prompt_tokens"] = int(metrics.get("front_page_prompt_tokens") or 0) + int(usage.get("prompt_tokens") or 0)
     metrics["front_page_output_tokens"] = int(metrics.get("front_page_output_tokens") or 0) + int(usage.get("candidate_tokens") or 0)
     metrics["front_page_thought_tokens"] = int(metrics.get("front_page_thought_tokens") or 0) + int(usage.get("thought_tokens") or 0)
@@ -108,12 +115,266 @@ def _record_front_page_usage_metrics(metrics: dict[str, object], usage: dict[str
         float(metrics.get("front_page_estimated_cost_usd") or 0.0) + float(usage.get("estimated_cost_usd") or 0.0),
         6,
     )
-    metrics["front_page_image_bytes_total"] = int(metrics.get("front_page_image_bytes_total") or 0) + int(usage.get("normalized_image_bytes") or 0)
-    metrics["front_page_image_width_total"] = int(metrics.get("front_page_image_width_total") or 0) + int(usage.get("normalized_image_width") or 0)
-    metrics["front_page_image_height_total"] = int(metrics.get("front_page_image_height_total") or 0) + int(usage.get("normalized_image_height") or 0)
+    metrics["front_page_image_bytes_total"] = int(metrics.get("front_page_image_bytes_total") or 0) + int(
+        usage.get("normalized_image_bytes_total") or usage.get("normalized_image_bytes") or 0
+    )
+    metrics["front_page_image_width_total"] = int(metrics.get("front_page_image_width_total") or 0) + int(
+        usage.get("normalized_image_width_total") or usage.get("normalized_image_width") or 0
+    )
+    metrics["front_page_image_height_total"] = int(metrics.get("front_page_image_height_total") or 0) + int(
+        usage.get("normalized_image_height_total") or usage.get("normalized_image_height") or 0
+    )
     calls = max(int(metrics.get("front_page_calls") or 0), 1)
     metrics["front_page_avg_cost_per_page_usd"] = round(float(metrics["front_page_estimated_cost_usd"]) / calls, 6)
     metrics["front_page_avg_image_bytes"] = round(int(metrics["front_page_image_bytes_total"]) / calls, 1)
+
+
+def _job_metrics_payload(job: ExamIntakeJob | None, intake_metrics: dict[str, object]) -> str:
+    merged: dict[str, object] = {}
+    raw_metrics = ((job.metrics_json if job else None) or "").strip()
+    if raw_metrics:
+        try:
+            parsed = json.loads(raw_metrics)
+            if isinstance(parsed, dict):
+                merged.update(parsed)
+        except json.JSONDecodeError:
+            logger.warning("invalid intake metrics payload for job %s during metrics merge", getattr(job, "id", None))
+    merged.update(intake_metrics)
+    return json.dumps(merged)
+
+
+def _front_page_usage_payload(raw_payload: str | None) -> dict[str, object] | None:
+    if not raw_payload:
+        return None
+    payload = raw_payload.strip()
+    if not payload:
+        return None
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _build_class_list_read(
+    *,
+    raw_names: str | None,
+    raw_source: str | None,
+    fallback_name: str = "",
+    fallback_id: int | None = None,
+    fallback_created_at=None,
+) -> ClassListRead | None:
+    names = parse_class_list_names_json(raw_names)
+    if not names:
+        return None
+    source = ""
+    filenames: list[str] = []
+    class_list_id = fallback_id
+    class_list_name = fallback_name
+    created_at = fallback_created_at
+    source_payload = (raw_source or "").strip()
+    if source_payload:
+        try:
+            parsed_source = json.loads(source_payload)
+        except json.JSONDecodeError:
+            parsed_source = None
+        if isinstance(parsed_source, dict):
+            source = str(parsed_source.get("source") or "").strip()
+            filenames = [str(item).strip() for item in parsed_source.get("filenames", []) if str(item).strip()] if isinstance(parsed_source.get("filenames"), list) else []
+            parsed_class_list_id = parsed_source.get("class_list_id")
+            if isinstance(parsed_class_list_id, int):
+                class_list_id = parsed_class_list_id
+            class_list_name = str(parsed_source.get("class_list_name") or class_list_name or "").strip()
+            created_at_raw = str(parsed_source.get("created_at") or "").strip()
+            if created_at_raw:
+                try:
+                    from datetime import datetime
+                    created_at = datetime.fromisoformat(created_at_raw)
+                except ValueError:
+                    created_at = fallback_created_at
+    return ClassListRead(
+        id=class_list_id,
+        name=class_list_name,
+        created_at=created_at,
+        names=names,
+        source=source,
+        entry_count=len(names),
+        filenames=filenames,
+    )
+
+
+def _class_list_resource_read(class_list: ClassList) -> ClassListRead | None:
+    return _build_class_list_read(
+        raw_names=class_list.names_json,
+        raw_source=class_list.source_json,
+        fallback_name=class_list.name,
+        fallback_id=class_list.id,
+        fallback_created_at=class_list.created_at,
+    )
+
+
+def _class_list_read(exam: Exam) -> ClassListRead | None:
+    return _build_class_list_read(
+        raw_names=exam.class_list_json,
+        raw_source=exam.class_list_source_json,
+    )
+
+
+def _exam_known_student_names(exam: Exam) -> list[str]:
+    class_list = _class_list_read(exam)
+    return class_list.names if class_list else []
+
+
+def _normalized_class_list_name(value: str | None, *, filenames: list[str] | None = None, exam_name: str | None = None) -> str:
+    normalized = " ".join(str(value or "").strip().split())
+    if normalized:
+        return normalized
+    if exam_name and exam_name.strip():
+        return f"{exam_name.strip()} class list"
+    if filenames:
+        first = Path(filenames[0]).stem.replace("_", " ").replace("-", " ").strip()
+        if first:
+            return " ".join(first.split())
+    return f"Class list {utcnow().strftime('%Y-%m-%d %H:%M')}"
+
+
+def _extract_class_list_names_from_uploads(
+    *,
+    storage_dir: Path,
+    upload_files: list[UploadFile],
+) -> tuple[list[str], list[str]]:
+    if not upload_files:
+        return [], []
+
+    source_names: list[str] = []
+    filenames: list[str] = []
+    class_list_dir = reset_dir(storage_dir)
+
+    for index, upload in enumerate(upload_files, start=1):
+        filename = _sanitize_filename(upload.filename or f"class-list-{index}")
+        filenames.append(filename)
+        payload = upload.file.read()
+        suffix = Path(filename).suffix.lower()
+        if suffix in {".csv", ".xlsx", ".xlsm"}:
+            source_names.extend(parse_class_list_tabular_bytes(filename, payload))
+            continue
+
+        source_path = class_list_dir / filename
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_bytes(payload)
+        rendered_paths = _render_bulk_pages(source_path, class_list_dir / f"rendered_{index:04d}")
+        for rendered_path in rendered_paths:
+            source_names.extend(extract_class_list_names_from_image(rendered_path))
+
+    deduped_names = [nearest_known_student_name(name, source_names, minimum_ratio=1.0) for name in source_names]
+    return normalize_class_list_names(deduped_names), filenames
+
+
+def _persist_exam_class_list(
+    *,
+    exam: Exam,
+    names: list[str],
+    source: str,
+    filenames: list[str] | None = None,
+    class_list_id: int | None = None,
+    class_list_name: str | None = None,
+    created_at=None,
+    session: Session,
+) -> None:
+    class_list_json, class_list_source_json = build_class_list_payload(
+        names,
+        source=source,
+        filenames=filenames or [],
+        class_list_id=class_list_id,
+        class_list_name=class_list_name,
+        created_at=created_at,
+    )
+    exam.class_list_json = class_list_json
+    exam.class_list_source_json = class_list_source_json
+    session.add(exam)
+
+
+def _create_class_list_resource(
+    *,
+    name: str,
+    names: list[str],
+    source: str,
+    filenames: list[str] | None,
+    session: Session,
+) -> ClassList:
+    normalized_names = normalize_class_list_names(names)
+    class_list = ClassList(name=_normalized_class_list_name(name, filenames=filenames), names_json="[]", source_json=None)
+    session.add(class_list)
+    session.flush()
+    names_json, source_json = build_class_list_payload(
+        normalized_names,
+        source=source,
+        filenames=filenames or [],
+        class_list_id=class_list.id,
+        class_list_name=class_list.name,
+        created_at=class_list.created_at,
+    )
+    class_list.names_json = names_json
+    class_list.source_json = source_json
+    session.add(class_list)
+    session.flush()
+    return class_list
+
+
+def _update_class_list_resource_names(
+    *,
+    class_list: ClassList,
+    names: list[str],
+    source: str | None = None,
+    filenames: list[str] | None = None,
+    session: Session,
+) -> ClassList:
+    payload = _class_list_resource_read(class_list)
+    existing_names = payload.names if payload else []
+    merged_names = normalize_class_list_names([*existing_names, *names])
+    names_json, source_json = build_class_list_payload(
+        merged_names,
+        source=source or (payload.source if payload else "manual_update"),
+        filenames=filenames if filenames is not None else (payload.filenames if payload else []),
+        class_list_id=class_list.id,
+        class_list_name=class_list.name,
+        created_at=class_list.created_at,
+    )
+    class_list.names_json = names_json
+    class_list.source_json = source_json
+    session.add(class_list)
+    session.flush()
+    return class_list
+
+
+def _select_class_list_for_exam(*, exam: Exam, class_list: ClassList, session: Session) -> None:
+    class_list_read = _class_list_resource_read(class_list)
+    if not class_list_read:
+        return
+    _persist_exam_class_list(
+        exam=exam,
+        names=class_list_read.names,
+        source="selected_class_list",
+        filenames=class_list_read.filenames,
+        class_list_id=class_list.id,
+        class_list_name=class_list.name,
+        created_at=class_list.created_at,
+        session=session,
+    )
+
+
+def _invalidate_exam_front_page_candidate_cache_for_class_list(exam_id: int, session: Session) -> None:
+    submissions = session.exec(
+        select(Submission).where(
+            Submission.exam_id == exam_id,
+            Submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+            Submission.front_page_reviewed_at == None,  # noqa: E711
+        )
+    ).all()
+    for submission in submissions:
+        submission.front_page_candidates_json = None
+        submission.front_page_usage_json = None
+        session.add(submission)
 
 
 def _get_exam_question_lock(exam_id: int) -> threading.Lock:
@@ -357,8 +618,18 @@ def _front_page_review_readiness_failures(submission_ids: list[int], session: Se
     for submission in submissions:
         if not pages_by_submission_id.get(submission.id or 0):
             failures.append(f"Submission {submission.id} has no built pages.")
-        if submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS and not (submission.front_page_candidates_json or "").strip():
-            failures.append(f"Submission {submission.id} has no front-page candidate payload.")
+        if submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS:
+            raw_candidate_payload = (submission.front_page_candidates_json or "").strip()
+            if not raw_candidate_payload:
+                failures.append(f"Submission {submission.id} has no front-page candidate payload.")
+                continue
+            try:
+                candidate_payload = FrontPageTotalsCandidateRead.model_validate_json(raw_candidate_payload)
+            except Exception:
+                failures.append(f"Submission {submission.id} has an invalid front-page candidate payload.")
+                continue
+            if _front_page_candidate_is_retryable_failure(candidate_payload):
+                failures.append(f"Submission {submission.id} has a retryable front-page candidate failure.")
     return failures
 
 
@@ -503,6 +774,7 @@ def _detect_bulk_pages(
             row.detected_student_name = detection.student_name
             row.detection_confidence = detection.confidence
             row.detection_evidence_json = json.dumps(detection.evidence or {})
+            row.front_page_usage_json = json.dumps(usage) if usage else None
             session.add(row)
 
             processed_pages += 1
@@ -529,15 +801,87 @@ def _front_page_candidate_read_from_payload(
     payload: dict[str, object],
     *,
     source: str,
+    page_width: float | None = None,
+    page_height: float | None = None,
 ) -> FrontPageTotalsCandidateRead:
-    return FrontPageTotalsCandidateRead.model_validate({
-        "student_name": payload.get("student_name"),
-        "overall_marks_awarded": payload.get("overall_marks_awarded"),
-        "overall_max_marks": payload.get("overall_max_marks"),
-        "objective_scores": payload.get("objective_scores") or [],
-        "warnings": payload.get("warnings") or [],
-        "source": source,
-    })
+    def _normalize_front_page_coordinate(value: object, *, scale: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric < 0:
+            return None
+        if numeric <= 1:
+            return numeric
+        if numeric <= 1000:
+            normalized = numeric / 1000
+            if 0 <= normalized <= 1:
+                return normalized
+        if scale and scale > 1:
+            normalized = numeric / scale
+            if 0 <= normalized <= 1:
+                return normalized
+        return None
+
+    def _candidate_value(raw_value: object) -> FrontPageCandidateValue | None:
+        if not isinstance(raw_value, dict):
+            return None
+        evidence_rows: list[FrontPageExtractionEvidence] = []
+        raw_evidence = raw_value.get("evidence")
+        if isinstance(raw_evidence, list):
+            for item in raw_evidence:
+                if not isinstance(item, dict):
+                    continue
+                evidence_rows.append(
+                    FrontPageExtractionEvidence(
+                        page_number=int(item.get("page_number") or 1),
+                        quote=str(item.get("quote") or ""),
+                        x=_normalize_front_page_coordinate(item.get("x"), scale=page_width),
+                        y=_normalize_front_page_coordinate(item.get("y"), scale=page_height),
+                        w=_normalize_front_page_coordinate(item.get("w"), scale=page_width),
+                        h=_normalize_front_page_coordinate(item.get("h"), scale=page_height),
+                    )
+                )
+        return FrontPageCandidateValue(
+            value_text=str(raw_value.get("value_text") or ""),
+            confidence=float(raw_value.get("confidence") or 0),
+            evidence=evidence_rows,
+        )
+
+    objective_scores: list[FrontPageObjectiveScoreCandidate] = []
+    raw_objective_scores = payload.get("objective_scores")
+    if isinstance(raw_objective_scores, list):
+        for item in raw_objective_scores:
+            if not isinstance(item, dict):
+                continue
+            objective_code = _candidate_value(item.get("objective_code"))
+            marks_awarded = _candidate_value(item.get("marks_awarded"))
+            if objective_code is None or marks_awarded is None:
+                continue
+            objective_scores.append(
+                FrontPageObjectiveScoreCandidate(
+                    objective_code=objective_code,
+                    marks_awarded=marks_awarded,
+                    max_marks=_candidate_value(item.get("max_marks")),
+                )
+            )
+
+    return FrontPageTotalsCandidateRead(
+        student_name=_candidate_value(payload.get("student_name")),
+        overall_marks_awarded=_candidate_value(payload.get("overall_marks_awarded")),
+        overall_max_marks=_candidate_value(payload.get("overall_max_marks")),
+        objective_scores=objective_scores,
+        warnings=[str(item) for item in payload.get("warnings", [])] if isinstance(payload.get("warnings"), list) else [],
+        source=source,
+    )
+
+
+def _front_page_candidate_is_retryable_failure(candidate: FrontPageTotalsCandidateRead | None) -> bool:
+    if not candidate:
+        return False
+    return (candidate.source or "").startswith("extractor_unavailable")
 
 
 def _front_page_name_detection_from_candidate(
@@ -574,7 +918,7 @@ def _extract_image_upload_front_page_pages(
     rendered_paths: list[Path],
     session: Session,
     job: ExamIntakeJob | None = None,
-) -> tuple[list[BulkNameDetectionResult], dict[int, FrontPageTotalsCandidateRead]]:
+) -> tuple[list[BulkNameDetectionResult], dict[int, FrontPageTotalsCandidateRead], dict[int, dict[str, object]]]:
     exam_id = exam.id or 0
     existing_pages = session.exec(
         select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)
@@ -582,24 +926,116 @@ def _extract_image_upload_front_page_pages(
     page_rows_by_number = {row.page_number: row for row in existing_pages}
     detections: list[BulkNameDetectionResult | None] = [None] * len(rendered_paths)
     candidate_payloads: dict[int, FrontPageTotalsCandidateRead] = {}
+    usage_payloads: dict[int, dict[str, object]] = {}
     extractor = get_front_page_totals_extractor()
     detected_exam_titles: list[str] = []
+    grouped_template: dict[str, object] | None = None
+    known_student_names = _exam_known_student_names(exam)
+    template_sample_paths = rendered_paths[: min(3, len(rendered_paths))]
+    job_metrics: dict[str, object] | None = None
+    job_thinking_level = _normalize_front_page_gemini_thinking_level(job.thinking_level) if job else None
+    if job:
+        raw_metrics = (job.metrics_json or "").strip()
+        if raw_metrics:
+            try:
+                parsed_metrics = json.loads(raw_metrics)
+                if isinstance(parsed_metrics, dict):
+                    job_metrics = parsed_metrics
+            except json.JSONDecodeError:
+                logger.warning("invalid intake metrics payload for job %s during one-shot front-page extraction", job.id)
+        if job_metrics is None:
+            job_metrics = {}
+
+    if template_sample_paths and hasattr(extractor, "extract_template_group"):
+        try:
+            grouped_template_candidate = extractor.extract_template_group(  # type: ignore[attr-defined]
+                template_sample_paths,
+                model_override=_front_page_model(),
+                thinking_level_override=job_thinking_level,
+            )
+            if isinstance(grouped_template_candidate, dict) and grouped_template_candidate:
+                grouped_template = grouped_template_candidate
+                exam_name = str(grouped_template.get("exam_name") or "").strip()
+                if exam_name:
+                    exam.name = exam_name
+                exam.front_page_template_json = json.dumps(grouped_template)
+                session.add(exam)
+                session.commit()
+        except Exception:
+            logger.exception("grouped front-page template extraction failed for exam %s", exam_id)
 
     def extract_one(idx: int, page_path: Path) -> tuple[int, int, int, BulkNameDetectionResult, FrontPageTotalsCandidateRead, str, dict[str, object] | None]:
         with Image.open(page_path) as image:
             w, h = image.width, image.height
-        try:
-            result = extractor.extract(
-                image_path=page_path,
-                request_id=f"exam-{exam_id}-bulk-page-{idx}",
-                model_override=_front_page_model(),
-                template=None,
-                thinking_level_override=job.thinking_level if job else None,
+        def _run_extract():
+            try:
+                return extractor.extract(
+                    image_path=page_path,
+                    request_id=f"exam-{exam_id}-bulk-page-{idx}",
+                    model_override=_front_page_model(),
+                    template=grouped_template,
+                    thinking_level_override=job_thinking_level,
+                    known_student_names=known_student_names,
+                )
+            except TypeError:
+                try:
+                    return extractor.extract(
+                        image_path=page_path,
+                        request_id=f"exam-{exam_id}-bulk-page-{idx}",
+                        model_override=_front_page_model(),
+                        template=grouped_template,
+                        thinking_level_override=job_thinking_level,
+                    )
+                except TypeError:
+                    return extractor.extract(
+                        image_path=page_path,
+                        request_id=f"exam-{exam_id}-bulk-page-{idx}",
+                    )
+        result = None
+        for attempt in range(1, _FRONT_PAGE_EXTRACT_ATTEMPTS + 1):
+            try:
+                result = _run_extract()
+                break
+            except OpenAIRequestError as exc:
+                logger.warning(
+                    "front-page one-shot intake provider failure exam=%s page=%s attempt=%s/%s error=%s",
+                    exam_id,
+                    idx,
+                    attempt,
+                    _FRONT_PAGE_EXTRACT_ATTEMPTS,
+                    exc,
+                )
+                if attempt < _FRONT_PAGE_EXTRACT_ATTEMPTS:
+                    time.sleep(0.35 * attempt)
+            except Exception:
+                logger.exception(
+                    "front-page one-shot intake failed for exam %s page %s attempt %s/%s",
+                    exam_id,
+                    idx,
+                    attempt,
+                    _FRONT_PAGE_EXTRACT_ATTEMPTS,
+                )
+                if attempt < _FRONT_PAGE_EXTRACT_ATTEMPTS:
+                    time.sleep(0.35 * attempt)
+        if result is None:
+            candidate_payload = FrontPageTotalsCandidateRead(
+                objective_scores=[],
+                warnings=["Extractor unavailable for this paper right now. You can still confirm totals manually."],
+                source="extractor_unavailable:oneshot",
             )
+            detected_exam_title = ""
+            usage = None
+        else:
             candidate_payload = _front_page_candidate_read_from_payload(
                 result.payload,
                 source=f"{result.model}:oneshot" if result.model else "oneshot",
+                page_width=w,
+                page_height=h,
             )
+            if known_student_names and candidate_payload.student_name and candidate_payload.student_name.value_text.strip():
+                matched_name = nearest_known_student_name(candidate_payload.student_name.value_text, known_student_names)
+                if matched_name and matched_name != candidate_payload.student_name.value_text:
+                    candidate_payload.student_name.value_text = matched_name
             exam_name_payload = result.payload.get("exam_name")
             exam_name_value = None
             if isinstance(exam_name_payload, dict):
@@ -609,24 +1045,6 @@ def _extract_image_upload_front_page_pages(
                 detected_exam_title = normalized_exam_title
             else:
                 detected_exam_title = ""
-        except OpenAIRequestError:
-            candidate_payload = FrontPageTotalsCandidateRead(
-                objective_scores=[],
-                warnings=["Extractor unavailable for this paper right now. You can still confirm totals manually."],
-                source="extractor_unavailable:oneshot",
-            )
-            detected_exam_title = ""
-            usage = None
-        except Exception:
-            logger.exception("front-page one-shot intake failed for exam %s page %s", exam_id, idx)
-            candidate_payload = FrontPageTotalsCandidateRead(
-                objective_scores=[],
-                warnings=["Extractor failed for this paper. You can still confirm totals manually."],
-                source="extractor_unavailable:oneshot",
-            )
-            detected_exam_title = ""
-            usage = None
-        else:
             usage = result.usage
         detection = _front_page_name_detection_from_candidate(
             page_number=idx,
@@ -646,6 +1064,8 @@ def _extract_image_upload_front_page_pages(
             idx, width, height, detection, candidate_payload, detected_exam_title, usage = future.result()
             detections[idx - 1] = detection
             candidate_payloads[idx] = candidate_payload
+            if usage:
+                usage_payloads[idx] = dict(usage)
             if detected_exam_title:
                 detected_exam_titles.append(detected_exam_title)
 
@@ -669,15 +1089,7 @@ def _extract_image_upload_front_page_pages(
             processed_pages += 1
             if job:
                 now = utcnow()
-                current_metrics: dict[str, object] = {}
-                raw_metrics = (job.metrics_json or "").strip()
-                if raw_metrics:
-                    try:
-                        parsed_metrics = json.loads(raw_metrics)
-                        if isinstance(parsed_metrics, dict):
-                            current_metrics = parsed_metrics
-                    except json.JSONDecodeError:
-                        logger.warning("invalid intake metrics payload for job %s during one-shot front-page extraction", job.id)
+                current_metrics = job_metrics if job_metrics is not None else {}
                 _record_front_page_usage_metrics(current_metrics, usage)
                 job.pages_processed = processed_pages
                 job.updated_at = now
@@ -689,12 +1101,27 @@ def _extract_image_upload_front_page_pages(
             else:
                 session.flush()
 
-    if detected_exam_titles:
+    if candidate_payloads:
+        from app.routers.submissions import apply_front_page_template_fill, build_front_page_consensus_template_from_candidates
+
+        consensus_template = build_front_page_consensus_template_from_candidates(list(candidate_payloads.values()))
+        if consensus_template:
+            if grouped_template:
+                merged_template = {**grouped_template, **consensus_template}
+            else:
+                merged_template = consensus_template
+            exam.front_page_template_json = json.dumps(merged_template)
+            session.add(exam)
+            grouped_template = merged_template
+            for page_number, candidate_payload in list(candidate_payloads.items()):
+                candidate_payloads[page_number] = apply_front_page_template_fill(candidate_payload, grouped_template)
+
+    if detected_exam_titles and not grouped_template:
         exam.name = max(detected_exam_titles, key=len)
         session.add(exam)
     if not job:
         session.commit()
-    return [item for item in detections if item is not None], candidate_payloads
+    return [item for item in detections if item is not None], candidate_payloads, usage_payloads
 
 
 def _build_bulk_preview_from_detections(
@@ -728,6 +1155,7 @@ def _finalize_bulk_candidates(
     candidates: list[BulkUploadCandidate],
     session: Session,
     prefilled_candidate_payloads: dict[int, FrontPageTotalsCandidateRead] | None = None,
+    prefilled_usage_payloads: dict[int, dict[str, object]] | None = None,
 ) -> list[SubmissionRead]:
     pages = session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)).all()
     if not pages:
@@ -746,6 +1174,7 @@ def _finalize_bulk_candidates(
             used_pages.add(page_num)
 
     prefilled_candidate_payloads = prefilled_candidate_payloads or {}
+    prefilled_usage_payloads = prefilled_usage_payloads or {}
 
     for candidate in candidates:
         candidate_first_name, candidate_last_name = split_student_name(candidate.student_name)
@@ -761,9 +1190,12 @@ def _finalize_bulk_candidates(
         session.flush()
         if candidate.page_start == candidate.page_end:
             prefilled_candidate = prefilled_candidate_payloads.get(candidate.page_start)
-            if prefilled_candidate is not None:
+            if prefilled_candidate is not None and not _front_page_candidate_is_retryable_failure(prefilled_candidate):
                 submission.front_page_candidates_json = prefilled_candidate.model_dump_json()
-                session.add(submission)
+            prefilled_usage = prefilled_usage_payloads.get(candidate.page_start)
+            if prefilled_usage and prefilled_candidate is not None and not _front_page_candidate_is_retryable_failure(prefilled_candidate):
+                submission.front_page_usage_json = json.dumps(prefilled_usage)
+            session.add(submission)
 
         page_reads = []
         submission_files: list[SubmissionFileRead] = []
@@ -869,7 +1301,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 job.last_progress_at = job.updated_at
                 intake_metrics["failed_stage"] = "missing_bulk"
                 intake_metrics["total_ms"] = round((time.perf_counter() - overall_started) * 1000, 1)
-                job.metrics_json = json.dumps(intake_metrics)
+                job.metrics_json = _job_metrics_payload(job, intake_metrics)
                 job.runner_id = runner_id
                 job.lease_expires_at = None
                 job.finished_at = utcnow()
@@ -878,18 +1310,55 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 return
             intake_metrics["front_page_thinking_level"] = _normalize_front_page_gemini_thinking_level(job.thinking_level)
             job.status = "running"
-            job.stage = "detecting_names"
+            job.stage = "building_pages"
             job.updated_at = utcnow()
             job.last_progress_at = job.updated_at
             job.runner_id = runner_id
             job.lease_expires_at = _exam_intake_lease_deadline()
-            job.metrics_json = json.dumps(intake_metrics)
+            job.metrics_json = _job_metrics_payload(job, intake_metrics)
             session.add(job)
             session.commit()
 
-            rendered_paths = [Path(row.image_path) for row in session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)).all()]
-            intake_metrics["page_count"] = len(rendered_paths)
+            render_stage_started = time.perf_counter()
+            rendered_paths, rendered_page_count = _render_stored_bulk_upload_files(bulk, _bulk_pages_dir(exam_id, bulk.id or 0))
+            session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id))
+            for idx, page_path in enumerate(rendered_paths, start=1):
+                with Image.open(page_path) as image:
+                    w, h = image.width, image.height
+                session.add(
+                    BulkUploadPage(
+                        bulk_upload_id=bulk.id,
+                        page_number=idx,
+                        image_path=str(page_path),
+                        width=w,
+                        height=h,
+                        detected_student_name=None,
+                        detection_confidence=0.0,
+                        detection_evidence_json="{}",
+                    )
+                )
+            now = utcnow()
+            job.page_count = rendered_page_count
+            job.pages_built = rendered_page_count
+            job.updated_at = now
+            job.last_progress_at = now
+            job.lease_expires_at = _exam_intake_lease_deadline()
+            intake_metrics["render_upload_ms"] = round((time.perf_counter() - render_stage_started) * 1000, 1)
+            intake_metrics["page_count"] = rendered_page_count
+            job.metrics_json = _job_metrics_payload(job, intake_metrics)
+            session.add(job)
+            session.commit()
+
+            job.stage = "detecting_names"
+            job.updated_at = utcnow()
+            job.last_progress_at = job.updated_at
+            job.lease_expires_at = _exam_intake_lease_deadline()
+            job.metrics_json = _job_metrics_payload(job, intake_metrics)
+            session.add(job)
+            session.commit()
+
             prefilled_candidate_payloads: dict[int, FrontPageTotalsCandidateRead] = {}
+            prefilled_usage_payloads: dict[int, dict[str, object]] = {}
             if not bulk.stored_path:
                 job.stage = "extracting_front_pages"
                 job.updated_at = utcnow()
@@ -897,7 +1366,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 job.lease_expires_at = _exam_intake_lease_deadline()
                 session.add(job)
                 session.commit()
-                detections, prefilled_candidate_payloads = _extract_image_upload_front_page_pages(
+                detections, prefilled_candidate_payloads, prefilled_usage_payloads = _extract_image_upload_front_page_pages(
                     exam=exam,
                     bulk=bulk,
                     rendered_paths=rendered_paths,
@@ -912,7 +1381,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             job.updated_at = utcnow()
             job.lease_expires_at = _exam_intake_lease_deadline()
             stage_started = time.perf_counter()
-            job.metrics_json = json.dumps(intake_metrics)
+            job.metrics_json = _job_metrics_payload(job, intake_metrics)
             session.add(job)
             session.commit()
 
@@ -923,6 +1392,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 candidates=candidates,
                 session=session,
                 prefilled_candidate_payloads=prefilled_candidate_payloads,
+                prefilled_usage_payloads=prefilled_usage_payloads,
             )
             intake_metrics["creating_submissions_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
             intake_metrics["candidate_count"] = len(candidates)
@@ -934,7 +1404,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             job.last_progress_at = job.updated_at
             job.lease_expires_at = _exam_intake_lease_deadline()
             stage_started = time.perf_counter()
-            job.metrics_json = json.dumps(intake_metrics)
+            job.metrics_json = _job_metrics_payload(job, intake_metrics)
             session.add(job)
             exam.status = ExamStatus.DRAFT
             session.add(exam)
@@ -954,7 +1424,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 job.updated_at = now
                 job.last_progress_at = now
                 job.lease_expires_at = _exam_intake_lease_deadline()
-                job.metrics_json = json.dumps(intake_metrics)
+                job.metrics_json = _job_metrics_payload(job, intake_metrics)
                 session.add(job)
                 session.commit()
 
@@ -972,7 +1442,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 progress_job.updated_at = now
                 progress_job.last_progress_at = now
                 progress_job.lease_expires_at = _exam_intake_lease_deadline()
-                progress_job.metrics_json = json.dumps(intake_metrics)
+                progress_job.metrics_json = _job_metrics_payload(progress_job, intake_metrics)
                 progress_session.add(progress_job)
                 progress_session.commit()
 
@@ -1061,7 +1531,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 job.finished_at = utcnow()
                 if readiness_failures:
                     intake_metrics["failed_stage"] = "warming_remaining_review" if partial_ready else "review_not_ready"
-                job.metrics_json = json.dumps(intake_metrics)
+                job.metrics_json = _job_metrics_payload(job, intake_metrics)
                 job.error_message = "; ".join(readiness_failures) if readiness_failures else None
                 session.add(job)
             if exam and exam.status != ExamStatus.READY:
@@ -1088,7 +1558,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 job.finished_at = utcnow()
                 job.fully_warmed = False
                 job.review_ready = partial_ready
-                job.metrics_json = json.dumps(intake_metrics)
+                job.metrics_json = _job_metrics_payload(job, intake_metrics)
                 session.add(job)
             if exam and exam.status != ExamStatus.READY:
                 exam.status = ExamStatus.REVIEWING if (job and (job.initial_review_ready or job.review_ready)) else ExamStatus.FAILED
@@ -1246,6 +1716,63 @@ def _render_bulk_upload_files(files: list[UploadFile], output_dir: Path) -> tupl
 
     label = filenames[0] if len(filenames) == 1 else f"{len(filenames)} uploaded images"
     return rendered_paths, label, ""
+
+
+def _bulk_upload_sources_dir(exam_id: int, bulk_upload_id: int) -> Path:
+    return settings.data_path / "exams" / str(exam_id) / "bulk" / str(bulk_upload_id) / "source"
+
+
+def _store_bulk_upload_files(files: list[UploadFile], output_dir: Path) -> tuple[list[Path], str, str, int]:
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
+
+    filenames = [_sanitize_filename(file.filename or f"bulk-upload-{index + 1}") for index, file in enumerate(files)]
+    extensions = [Path(filename).suffix.lower() for filename in filenames]
+    if any(extension not in _ALLOWED_BULK_EXTENSIONS for extension in extensions):
+        raise HTTPException(status_code=400, detail="Bulk upload requires PDF, PNG, or JPG files")
+
+    output_dir = reset_dir(output_dir)
+    if any(extension == ".pdf" for extension in extensions):
+        if len(files) != 1:
+            raise HTTPException(status_code=400, detail="Upload one PDF or multiple images, not both")
+
+        source_path = output_dir / filenames[0]
+        payload = files[0].file.read()
+        source_path.write_bytes(payload)
+        return [source_path], filenames[0], source_path.name, 0
+
+    stored_paths: list[Path] = []
+    for index, (upload, filename) in enumerate(zip(files, filenames, strict=True), start=1):
+        source_path = output_dir / f"source_{index:04d}{Path(filename).suffix.lower()}"
+        source_path.write_bytes(upload.file.read())
+        stored_paths.append(source_path)
+
+    label = filenames[0] if len(filenames) == 1 else f"{len(filenames)} uploaded images"
+    return stored_paths, label, "", len(stored_paths)
+
+
+def _render_stored_bulk_upload_files(bulk: ExamBulkUploadFile, output_dir: Path) -> tuple[list[Path], int]:
+    source_dir = _bulk_upload_sources_dir(bulk.exam_id, bulk.id or 0)
+    if not source_dir.exists():
+        raise HTTPException(status_code=400, detail="Bulk upload source files are missing")
+
+    if bulk.stored_path:
+        source_path = source_dir / bulk.stored_path
+        if not source_path.exists():
+            raise HTTPException(status_code=400, detail="Bulk upload source file is missing")
+        rendered = _render_bulk_pages(source_path, reset_dir(output_dir))
+        return rendered, len(rendered)
+
+    source_paths = sorted(path for path in source_dir.iterdir() if path.is_file())
+    if not source_paths:
+        raise HTTPException(status_code=400, detail="Bulk upload source files are missing")
+    output_dir = reset_dir(output_dir)
+    rendered_paths: list[Path] = []
+    for index, source_path in enumerate(source_paths, start=1):
+        output_path = output_dir / f"page_{index:04d}.png"
+        _normalize_to_png(source_path, output_path)
+        rendered_paths.append(output_path)
+    return rendered_paths, len(rendered_paths)
 
 
 def _remove_tree(path: Path) -> None:
@@ -1515,11 +2042,140 @@ def create_exam(payload: ExamCreate, session: Session = Depends(get_session)) ->
     return exam
 
 
+def _normalized_exam_name(value: str | None) -> str:
+    normalized_name = " ".join(str(value or "").strip().split())
+    return normalized_name or "Untitled Test"
+
+
+def _enqueue_intake_job_for_exam(
+    *,
+    exam: Exam,
+    upload_files: list[UploadFile],
+    selected_class_list_id: int | None,
+    class_list_upload_files: list[UploadFile] | None,
+    front_page_thinking_level: str | None,
+    session: Session,
+    cleanup_root: Path | None = None,
+) -> ExamIntakeJob:
+    if not upload_files:
+        raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
+
+    normalized_thinking_level = _normalize_front_page_gemini_thinking_level(front_page_thinking_level)
+    session.add(exam)
+    session.flush()
+
+    if selected_class_list_id:
+        class_list = session.get(ClassList, selected_class_list_id)
+        if not class_list:
+            raise HTTPException(status_code=400, detail="Selected class list was not found")
+        _select_class_list_for_exam(exam=exam, class_list=class_list, session=session)
+    elif class_list_upload_files:
+        class_list_names, class_list_filenames = _extract_class_list_names_from_uploads(
+            storage_dir=settings.data_path / "exams" / str(exam.id or 0) / "class-lists" / uuid.uuid4().hex,
+            upload_files=class_list_upload_files,
+        )
+        if class_list_names:
+            _persist_exam_class_list(
+                exam=exam,
+                names=class_list_names,
+                source="uploaded_files",
+                filenames=class_list_filenames,
+                session=session,
+            )
+
+    bulk = ExamBulkUploadFile(exam_id=exam.id or 0, original_filename="bulk-upload", stored_path="")
+    session.add(bulk)
+    session.flush()
+
+    source_dir = _bulk_upload_sources_dir(exam.id or 0, bulk.id or 0)
+    try:
+        store_started = time.perf_counter()
+        _stored_paths, filename, stored_path, page_count = _store_bulk_upload_files(upload_files, source_dir)
+        store_upload_ms = round((time.perf_counter() - store_started) * 1000, 1)
+
+        bulk.original_filename = filename
+        bulk.stored_path = stored_path
+        session.add(bulk)
+
+        exam.status = ExamStatus.DRAFT
+        session.add(exam)
+
+        job = ExamIntakeJob(
+            exam_id=exam.id or 0,
+            bulk_upload_id=bulk.id,
+            status="queued",
+            stage="queued",
+            page_count=page_count,
+            pages_built=0,
+            pages_processed=0,
+            submissions_created=0,
+            candidates_ready=0,
+            review_open_threshold=0,
+            initial_review_ready=False,
+            fully_warmed=False,
+            review_ready=False,
+            thinking_level=normalized_thinking_level,
+            last_progress_at=utcnow(),
+            metrics_json=json.dumps({
+                "store_upload_ms": store_upload_ms,
+                "page_count": page_count,
+                "front_page_thinking_level": normalized_thinking_level,
+                "class_list_count": len(_exam_known_student_names(exam)),
+            }),
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(exam)
+        session.refresh(job)
+        return job
+    except Exception:
+        session.rollback()
+        if cleanup_root is not None:
+            _remove_tree(cleanup_root)
+        raise
+
+
+@router.post("/intake", response_model=ExamRead, status_code=status.HTTP_201_CREATED)
+def create_exam_with_intake(
+    name: str | None = Form(default=""),
+    files: list[UploadFile] | None = File(default=None),
+    file: UploadFile | None = File(default=None),
+    class_list_id: int | None = Form(default=None),
+    class_list_files: list[UploadFile] | None = File(default=None),
+    class_list_file: UploadFile | None = File(default=None),
+    front_page_thinking_level: str | None = Form(default=None),
+    session: Session = Depends(get_session),
+) -> ExamRead:
+    upload_files = list(files or [])
+    if file is not None:
+        upload_files.append(file)
+    class_list_upload_files = list(class_list_files or [])
+    if class_list_file is not None:
+        class_list_upload_files.append(class_list_file)
+
+    exam = Exam(name=_normalized_exam_name(name))
+    job = _enqueue_intake_job_for_exam(
+        exam=exam,
+        upload_files=upload_files,
+        selected_class_list_id=class_list_id,
+        class_list_upload_files=class_list_upload_files,
+        front_page_thinking_level=front_page_thinking_level,
+        session=session,
+        cleanup_root=settings.data_path / "exams" / str(exam.id or 0),
+    )
+    if job.id is not None:
+        _spawn_exam_intake_job_thread(job.id)
+    return _exam_read(exam, latest_intake_job=job)
+
+
 @router.post("/{exam_id}/intake-jobs/start", response_model=ExamIntakeJobRead, status_code=status.HTTP_202_ACCEPTED)
 def start_exam_intake_job(
     exam_id: int,
     files: list[UploadFile] | None = File(default=None),
     file: UploadFile | None = File(default=None),
+    class_list_id: int | None = Form(default=None),
+    class_list_files: list[UploadFile] | None = File(default=None),
+    class_list_file: UploadFile | None = File(default=None),
     front_page_thinking_level: str | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> ExamIntakeJobRead:
@@ -1534,68 +2190,22 @@ def start_exam_intake_job(
     upload_files = list(files or [])
     if file is not None:
         upload_files.append(file)
+    class_list_upload_files = list(class_list_files or [])
+    if class_list_file is not None:
+        class_list_upload_files.append(class_list_file)
     if not upload_files:
         raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
-    normalized_thinking_level = _normalize_front_page_gemini_thinking_level(front_page_thinking_level)
-
-    bulk = ExamBulkUploadFile(exam_id=exam_id, original_filename="bulk-upload", stored_path="")
-    session.add(bulk)
-    session.commit()
-    session.refresh(bulk)
-
-    render_started = time.perf_counter()
-    output_dir = reset_dir(_bulk_pages_dir(exam_id, bulk.id))
-    rendered_paths, filename, stored_path = _render_bulk_upload_files(upload_files, output_dir)
-    render_upload_ms = round((time.perf_counter() - render_started) * 1000, 1)
-    bulk.original_filename = filename
-    bulk.stored_path = stored_path
-    session.add(bulk)
-    session.commit()
-    session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id))
-    for idx, page_path in enumerate(rendered_paths, start=1):
-        with Image.open(page_path) as image:
-            w, h = image.width, image.height
-        session.add(
-            BulkUploadPage(
-                bulk_upload_id=bulk.id,
-                page_number=idx,
-                image_path=str(page_path),
-                width=w,
-                height=h,
-                detected_student_name=None,
-                detection_confidence=0.0,
-                detection_evidence_json="{}",
-            )
-        )
-    exam.status = ExamStatus.DRAFT
-    session.add(exam)
-    session.commit()
-
-    job = ExamIntakeJob(
-        exam_id=exam_id,
-        bulk_upload_id=bulk.id,
-        status="queued",
-        stage="queued",
-        page_count=len(rendered_paths),
-        pages_built=len(rendered_paths),
-        pages_processed=0,
-        submissions_created=0,
-        candidates_ready=0,
-        review_open_threshold=0,
-        initial_review_ready=False,
-        fully_warmed=False,
-        review_ready=False,
-        thinking_level=normalized_thinking_level,
-        last_progress_at=utcnow(),
-        metrics_json=json.dumps({
-            "render_upload_ms": render_upload_ms,
-            "page_count": len(rendered_paths),
-            "front_page_thinking_level": normalized_thinking_level,
-        }),
+    _remove_tree(settings.data_path / "exams" / str(exam_id) / "bulk")
+    _remove_tree(settings.data_path / "uploads" / str(exam_id))
+    job = _enqueue_intake_job_for_exam(
+        exam=exam,
+        upload_files=upload_files,
+        selected_class_list_id=class_list_id,
+        class_list_upload_files=class_list_upload_files,
+        front_page_thinking_level=front_page_thinking_level,
+        session=session,
+        cleanup_root=settings.data_path / "exams" / str(exam_id) / "bulk",
     )
-    session.add(job)
-    session.commit()
-    session.refresh(job)
 
     if job.id is not None:
         _spawn_exam_intake_job_thread(job.id)
@@ -1608,6 +2218,215 @@ def get_latest_exam_intake_job(exam_id: int, session: Session = Depends(get_sess
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     return _exam_intake_job_read(_latest_exam_intake_job(exam_id, session))
+
+
+@router.post("/{exam_id}/class-list/upload", response_model=ExamRead)
+def upload_exam_class_list(
+    exam_id: int,
+    files: list[UploadFile] | None = File(default=None),
+    file: UploadFile | None = File(default=None),
+    session: Session = Depends(get_session),
+) -> ExamRead:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    upload_files = list(files or [])
+    if file is not None:
+        upload_files.append(file)
+    if not upload_files:
+        raise HTTPException(status_code=400, detail="At least one class list file is required")
+
+    names, filenames = _extract_class_list_names_from_uploads(
+        storage_dir=settings.data_path / "exams" / str(exam_id) / "class-lists" / uuid.uuid4().hex,
+        upload_files=upload_files,
+    )
+    if not names:
+        raise HTTPException(status_code=400, detail="No student names could be extracted from the class list files")
+    _persist_exam_class_list(exam=exam, names=names, source="uploaded_files", filenames=filenames, session=session)
+    _invalidate_exam_front_page_candidate_cache_for_class_list(exam_id, session)
+    session.commit()
+    session.refresh(exam)
+    return _exam_read(exam)
+
+
+@router.post("/{exam_id}/class-list/from-confirmed", response_model=ExamRead)
+def create_exam_class_list_from_confirmed_names(exam_id: int, session: Session = Depends(get_session)) -> ExamRead:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    submissions = session.exec(
+        select(Submission)
+        .where(Submission.exam_id == exam_id)
+        .order_by(Submission.id.asc())
+    ).all()
+    names = [
+        submission_display_name(submission.first_name, submission.last_name, submission.student_name)
+        for submission in submissions
+        if front_page_totals_read(submission)
+        and front_page_totals_read(submission).confirmed
+        and submission_display_name(submission.first_name, submission.last_name, submission.student_name).strip()
+    ]
+    if not names:
+        raise HTTPException(status_code=400, detail="No confirmed student names are available yet")
+    _persist_exam_class_list(exam=exam, names=names, source="confirmed_names", filenames=[], session=session)
+    _invalidate_exam_front_page_candidate_cache_for_class_list(exam_id, session)
+    session.commit()
+    session.refresh(exam)
+    return _exam_read(exam)
+
+
+@class_lists_router.get("", response_model=list[ClassListRead])
+def list_class_lists(session: Session = Depends(get_session)) -> list[ClassListRead]:
+    class_lists = session.exec(select(ClassList).order_by(ClassList.created_at.desc(), ClassList.id.desc())).all()
+    return [payload for item in class_lists if (payload := _class_list_resource_read(item)) is not None]
+
+
+@class_lists_router.post("/upload", response_model=ClassListRead, status_code=status.HTTP_201_CREATED)
+def create_class_list_from_uploads(
+    name: str | None = Form(default=""),
+    files: list[UploadFile] | None = File(default=None),
+    file: UploadFile | None = File(default=None),
+    session: Session = Depends(get_session),
+) -> ClassListRead:
+    upload_files = list(files or [])
+    if file is not None:
+        upload_files.append(file)
+    if not upload_files:
+        raise HTTPException(status_code=400, detail="At least one class list file is required")
+
+    names, filenames = _extract_class_list_names_from_uploads(
+        storage_dir=settings.data_path / "class-lists" / uuid.uuid4().hex,
+        upload_files=upload_files,
+    )
+    if not names:
+        raise HTTPException(status_code=400, detail="No student names could be extracted from the class list files")
+    class_list = _create_class_list_resource(
+        name=_normalized_class_list_name(name, filenames=filenames),
+        names=names,
+        source="uploaded_files",
+        filenames=filenames,
+        session=session,
+    )
+    session.commit()
+    session.refresh(class_list)
+    payload = _class_list_resource_read(class_list)
+    if not payload:
+        raise HTTPException(status_code=500, detail="Class list could not be read after save")
+    return payload
+
+
+@class_lists_router.post("/from-exam/{exam_id}", response_model=ClassListRead, status_code=status.HTTP_201_CREATED)
+def create_class_list_from_exam(
+    exam_id: int,
+    name: str | None = Form(default=""),
+    names_json: str | None = Form(default=""),
+    session: Session = Depends(get_session),
+) -> ClassListRead:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    submissions = session.exec(
+        select(Submission)
+        .where(Submission.exam_id == exam_id)
+        .order_by(Submission.id.asc())
+    ).all()
+    names = [
+        submission_display_name(submission.first_name, submission.last_name, submission.student_name)
+        for submission in submissions
+        if front_page_totals_read(submission)
+        and front_page_totals_read(submission).confirmed
+        and submission_display_name(submission.first_name, submission.last_name, submission.student_name).strip()
+    ]
+    normalized_names = normalize_class_list_names(names)
+    provided_names_payload = (names_json or "").strip()
+    if provided_names_payload:
+        try:
+            parsed_names = json.loads(provided_names_payload)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Edited class list names were invalid") from exc
+        if not isinstance(parsed_names, list):
+            raise HTTPException(status_code=400, detail="Edited class list names must be a list")
+        normalized_names = normalize_class_list_names([str(item).strip() for item in parsed_names if str(item).strip()])
+    if not normalized_names:
+        raise HTTPException(status_code=400, detail="No checked student names are available yet")
+
+    class_list = _create_class_list_resource(
+        name=_normalized_class_list_name(name, exam_name=exam.name),
+        names=normalized_names,
+        source="confirmed_names_reviewed" if provided_names_payload else "confirmed_names",
+        filenames=[],
+        session=session,
+    )
+    _select_class_list_for_exam(exam=exam, class_list=class_list, session=session)
+    session.commit()
+    session.refresh(class_list)
+    session.refresh(exam)
+    payload = _class_list_resource_read(class_list)
+    if not payload:
+        raise HTTPException(status_code=500, detail="Class list could not be read after save")
+    return payload
+
+
+@class_lists_router.post("/{class_list_id}/append-names", response_model=ClassListRead)
+def append_names_to_class_list(
+    class_list_id: int,
+    names_json: str | None = Form(default=""),
+    exam_id: int | None = Form(default=None),
+    session: Session = Depends(get_session),
+) -> ClassListRead:
+    class_list = session.get(ClassList, class_list_id)
+    if not class_list:
+        raise HTTPException(status_code=404, detail="Class list not found")
+
+    payload = (names_json or "").strip()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Student names are required")
+    try:
+        parsed_names = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Student names were invalid") from exc
+    if not isinstance(parsed_names, list):
+        raise HTTPException(status_code=400, detail="Student names must be a list")
+
+    normalized_names = normalize_class_list_names([str(item).strip() for item in parsed_names if str(item).strip()])
+    if not normalized_names:
+        raise HTTPException(status_code=400, detail="No student names were provided")
+
+    _update_class_list_resource_names(
+        class_list=class_list,
+        names=normalized_names,
+        source="manual_update",
+        session=session,
+    )
+
+    if exam_id is not None:
+        exam = session.get(Exam, exam_id)
+        if not exam:
+            raise HTTPException(status_code=404, detail="Exam not found")
+        exam_class_list = _class_list_read(exam)
+        if not exam_class_list or exam_class_list.id != class_list_id:
+            raise HTTPException(status_code=400, detail="This exam is not using the selected class list")
+        _select_class_list_for_exam(exam=exam, class_list=class_list, session=session)
+        _invalidate_exam_front_page_candidate_cache_for_class_list(exam_id, session)
+
+    session.commit()
+    session.refresh(class_list)
+    updated_payload = _class_list_resource_read(class_list)
+    if not updated_payload:
+        raise HTTPException(status_code=500, detail="Class list could not be read after update")
+    return updated_payload
+
+
+@class_lists_router.delete("/{class_list_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_class_list(class_list_id: int, session: Session = Depends(get_session)) -> Response:
+    class_list = session.get(ClassList, class_list_id)
+    if not class_list:
+        raise HTTPException(status_code=404, detail="Class list not found")
+    session.delete(class_list)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{exam_id}/intake-jobs/retry", response_model=ExamIntakeJobRead, status_code=status.HTTP_202_ACCEPTED)
@@ -1668,6 +2487,7 @@ def _exam_read(exam: Exam, latest_intake_job: ExamIntakeJob | None = None) -> Ex
         created_at=exam.created_at,
         teacher_style_profile_json=exam.teacher_style_profile_json,
         status=effective_status,
+        class_list=_class_list_read(exam),
         intake_job=_exam_intake_job_read(latest_intake_job),
     )
 
@@ -1790,6 +2610,76 @@ def list_exam_submissions(exam_id: int, session: Session = Depends(get_session))
         raise HTTPException(status_code=404, detail="Exam not found")
 
     return _list_exam_submissions_read(exam_id, session)
+
+
+@router.get("/{exam_id}/front-page-usage", response_model=FrontPageUsageReportRead)
+def get_exam_front_page_usage(exam_id: int, session: Session = Depends(get_session)) -> FrontPageUsageReportRead:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    submissions = session.exec(
+        select(Submission)
+        .where(Submission.exam_id == exam_id, Submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS)
+        .order_by(Submission.id)
+    ).all()
+
+    entries: list[FrontPageUsageEntryRead] = []
+    prompt_tokens = 0
+    output_tokens = 0
+    thought_tokens = 0
+    total_tokens = 0
+    estimated_cost_usd = 0.0
+
+    for submission in submissions:
+        usage = _front_page_usage_payload(submission.front_page_usage_json)
+        if not usage or submission.id is None:
+            continue
+        prompt_value = int(usage.get("prompt_tokens") or 0)
+        output_value = int(usage.get("candidate_tokens") or 0)
+        thought_value = int(usage.get("thought_tokens") or 0)
+        total_value = int(usage.get("total_tokens") or 0)
+        cost_value = float(usage.get("estimated_cost_usd") or 0.0)
+
+        prompt_tokens += prompt_value
+        output_tokens += output_value
+        thought_tokens += thought_value
+        total_tokens += total_value
+        estimated_cost_usd += cost_value
+
+        entries.append(
+            FrontPageUsageEntryRead(
+                submission_id=submission.id,
+                student_name=submission_display_name(submission.first_name, submission.last_name, submission.student_name),
+                provider=str(usage.get("provider") or ""),
+                model=str(usage.get("model") or ""),
+                thinking_level=str(usage.get("thinking_level") or ""),
+                thinking_budget=int(usage.get("thinking_budget") or 0),
+                prompt_tokens=prompt_value,
+                output_tokens=output_value,
+                thought_tokens=thought_value,
+                total_tokens=total_value,
+                estimated_cost_usd=round(cost_value, 6),
+                normalized_image_width=int(usage.get("normalized_image_width") or 0),
+                normalized_image_height=int(usage.get("normalized_image_height") or 0),
+                normalized_image_bytes=int(usage.get("normalized_image_bytes") or 0),
+            )
+        )
+
+    entry_count = len(entries)
+    return FrontPageUsageReportRead(
+        exam_id=exam_id,
+        exam_name=exam.name,
+        entry_count=entry_count,
+        prompt_tokens=prompt_tokens,
+        output_tokens=output_tokens,
+        thought_tokens=thought_tokens,
+        total_tokens=total_tokens,
+        estimated_cost_usd=round(estimated_cost_usd, 6),
+        avg_tokens_per_image=round(total_tokens / entry_count, 1) if entry_count else 0.0,
+        avg_cost_per_image_usd=round(estimated_cost_usd / entry_count, 6) if entry_count else 0.0,
+        entries=entries,
+    )
 
 @router.get("/{exam_id}/workspace-bootstrap", response_model=ExamWorkspaceBootstrapResponse)
 def get_exam_workspace_bootstrap(exam_id: int, session: Session = Depends(get_session)) -> ExamWorkspaceBootstrapResponse:

@@ -2,10 +2,12 @@ import type {
   BulkFinalizePayloadCandidate,
   BulkFinalizeResponse,
   BulkUploadPreview,
+  ClassListRead,
   ExamDetail,
   ExamIntakeJobRead,
   ExamMarkingDashboardResponse,
   ExamRead,
+  FrontPageUsageReport,
   ExamWorkspaceBootstrapResponse,
   FrontPageTotals,
   FrontPageTotalsCandidate,
@@ -456,10 +458,66 @@ export const api = {
     body: JSON.stringify({ name }),
     ...options,
   }, EXAM_CREATE_TIMEOUT_MS),
-  startExamIntakeJob: async (examId: number, files: File[], thinkingLevel = 'low', options?: RequestInit) => {
+  getClassLists: (options?: RequestInit) => request<ClassListRead[]>('class-lists', options, EXAM_READ_TIMEOUT_MS),
+  createClassListFromUploads: async (files: File[], name = '', options?: RequestInit) => {
+    const formData = new FormData();
+    formData.append('name', name);
+    files.forEach((file) => formData.append('files', file));
+    return request<ClassListRead>('class-lists/upload', {
+      method: 'POST',
+      body: formData,
+      ...options,
+    }, BUILD_PAGES_TIMEOUT_MS);
+  },
+  createClassListFromExam: async (examId: number, name = '', names: string[] = [], options?: RequestInit) => {
+    const formData = new FormData();
+    formData.append('name', name);
+    if (names.length > 0) {
+      formData.append('names_json', JSON.stringify(names));
+    }
+    return request<ClassListRead>(`class-lists/from-exam/${examId}`, {
+      method: 'POST',
+      body: formData,
+      ...options,
+    }, EXAM_CREATE_TIMEOUT_MS);
+  },
+  appendNamesToClassList: async (classListId: number, names: string[], examId?: number | null, options?: RequestInit) => {
+    const formData = new FormData();
+    formData.append('names_json', JSON.stringify(names));
+    if (typeof examId === 'number' && Number.isFinite(examId)) {
+      formData.append('exam_id', String(examId));
+    }
+    return request<ClassListRead>(`class-lists/${classListId}/append-names`, {
+      method: 'POST',
+      body: formData,
+      ...options,
+    }, EXAM_CREATE_TIMEOUT_MS);
+  },
+  deleteClassList: (classListId: number, options?: RequestInit) => request(`class-lists/${classListId}`, {
+    method: 'DELETE',
+    ...options,
+  }, EXAM_CREATE_TIMEOUT_MS),
+  createExamWithIntake: async (files: File[], thinkingLevel = 'low', name = '', classListId?: number | null, options?: RequestInit) => {
+    const formData = new FormData();
+    formData.append('name', name);
+    formData.append('front_page_thinking_level', thinkingLevel);
+    files.forEach((file) => formData.append('files', file));
+    if (typeof classListId === 'number' && Number.isFinite(classListId)) {
+      formData.append('class_list_id', String(classListId));
+    }
+    return request<ExamRead>('exams/intake', {
+      method: 'POST',
+      body: formData,
+      ...options,
+    }, BUILD_PAGES_TIMEOUT_MS);
+  },
+  startExamIntakeJob: async (examId: number, files: File[], thinkingLevel = 'low', classListId?: number | null, options?: RequestInit) => {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
     formData.append('front_page_thinking_level', thinkingLevel);
+    if (typeof classListId === 'number' && Number.isFinite(classListId)) {
+      formData.append('class_list_id', String(classListId));
+    }
     return request<ExamIntakeJobRead>(`exams/${examId}/intake-jobs/start`, {
       method: 'POST',
       body: formData,
@@ -467,6 +525,7 @@ export const api = {
     }, BUILD_PAGES_TIMEOUT_MS);
   },
   getLatestExamIntakeJob: (examId: number, options?: RequestInit) => request<ExamIntakeJobRead | null>(`exams/${examId}/intake-jobs/latest`, options, EXAM_READ_TIMEOUT_MS),
+  getExamFrontPageUsage: (examId: number, options?: RequestInit) => request<FrontPageUsageReport>(`exams/${examId}/front-page-usage`, options, EXAM_READ_TIMEOUT_MS),
   retryExamIntakeJob: (examId: number, options?: RequestInit) => request<ExamIntakeJobRead>(`exams/${examId}/intake-jobs/retry`, {
     method: 'POST',
     ...options,

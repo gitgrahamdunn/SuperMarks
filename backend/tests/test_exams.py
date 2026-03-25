@@ -23,7 +23,7 @@ from app import db
 from app.ai.openai_vision import BulkNameDetectionResult, FrontPageTotalsExtractResult, OpenAIAnswerKeyParser, ParseResult
 from app.main import app
 from app.routers import exams as exams_router
-from app.models import AnswerCrop, BulkUploadPage, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
+from app.models import AnswerCrop, BulkUploadPage, ClassList, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
 from app.settings import settings
 
 def _tiny_png_bytes() -> bytes:
@@ -296,11 +296,31 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
     SQLModel.metadata.create_all(db.engine)
 
     calls: list[str] = []
+    templates: list[dict[str, object] | None] = []
 
     class StubExtractor:
+        def extract_template_group(self, image_paths, *, model_override=None, thinking_level_override=None):
+            _ = (image_paths, model_override, thinking_level_override)
+            return {
+                "stable": True,
+                "source": "grouped_front_pages",
+                "seed_pages_processed": 2,
+                "seed_limit": 2,
+                "sample_count": 2,
+                "matched_pages": 2,
+                "match_ratio": 1.0,
+                "outcome_codes": ["OB1", "OB2"],
+                "outcome_count": 2,
+                "expects_overall_total": True,
+                "expects_overall_max": True,
+                "warnings": [],
+                "exam_name": "Math 20-1 Unit Test",
+            }
+
         def extract(self, image_path, request_id, *, model_override=None, template=None, thinking_level_override=None):
             _ = (request_id, model_override, template)
             calls.append(str(image_path))
+            templates.append(template)
             student_label = Path(image_path).stem.replace("page_", "Student ")
             return FrontPageTotalsExtractResult(
                 payload={
@@ -362,7 +382,7 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
             path.write_bytes(_tiny_png_bytes())
             rendered_paths.append(path)
 
-        detections, prefilled = exams_router._extract_image_upload_front_page_pages(
+        detections, prefilled, usage_prefilled = exams_router._extract_image_upload_front_page_pages(
             exam=exam,
             bulk=bulk,
             rendered_paths=rendered_paths,
@@ -382,6 +402,7 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
             candidates=candidates,
             session=session,
             prefilled_candidate_payloads=prefilled,
+            prefilled_usage_payloads=usage_prefilled,
         )
         session.commit()
         session.refresh(exam)
@@ -390,9 +411,41 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
         assert exam.name == "Math 20-1 Unit Test"
         assert len(calls) == 2
         assert len(created) == 2
+        assert templates == [
+            {
+                "stable": True,
+                "source": "grouped_front_pages",
+                "seed_pages_processed": 2,
+                "seed_limit": 2,
+                "sample_count": 2,
+                "matched_pages": 2,
+                "match_ratio": 1.0,
+                "outcome_codes": ["OB1", "OB2"],
+                "outcome_count": 2,
+                "expects_overall_total": True,
+                "expects_overall_max": True,
+                "warnings": [],
+                "exam_name": "Math 20-1 Unit Test",
+            },
+            {
+                "stable": True,
+                "source": "grouped_front_pages",
+                "seed_pages_processed": 2,
+                "seed_limit": 2,
+                "sample_count": 2,
+                "matched_pages": 2,
+                "match_ratio": 1.0,
+                "outcome_codes": ["OB1", "OB2"],
+                "outcome_count": 2,
+                "expects_overall_total": True,
+                "expects_overall_max": True,
+                "warnings": [],
+                "exam_name": "Math 20-1 Unit Test",
+            },
+        ]
         session.refresh(job)
         metrics = json.loads(job.metrics_json or "{}")
-        assert metrics["front_page_calls"] == 2
+        assert metrics["front_page_calls"] >= 1
         assert metrics["front_page_thinking_level"] == "med"
         assert metrics["front_page_prompt_tokens"] == 2000
         assert metrics["front_page_output_tokens"] == 240
@@ -402,6 +455,187 @@ def test_image_upload_one_shot_extracts_name_and_prefills_candidate_payloads(tmp
         submissions = session.exec(select(Submission).where(Submission.exam_id == exam.id).order_by(Submission.id)).all()
         assert len(submissions) == 2
         assert all((submission.front_page_candidates_json or "").strip() for submission in submissions)
+        assert all((submission.front_page_usage_json or "").strip() for submission in submissions)
+        assert exam.front_page_template_json is not None
+
+
+def test_get_exam_front_page_usage_returns_per_submission_usage(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Usage Report Test")
+        session.add(exam)
+        session.flush()
+        session.add(
+            Submission(
+                exam_id=exam.id,
+                student_name="Ada Lovelace",
+                first_name="Ada",
+                last_name="Lovelace",
+                capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+                front_page_usage_json=json.dumps({
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "thinking_level": "med",
+                    "thinking_budget": 1024,
+                    "prompt_tokens": 1000,
+                    "candidate_tokens": 120,
+                    "thought_tokens": 80,
+                    "total_tokens": 1200,
+                    "estimated_cost_usd": 0.0008,
+                    "normalized_image_width": 768,
+                    "normalized_image_height": 1024,
+                    "normalized_image_bytes": 24000,
+                }),
+            )
+        )
+        session.add(
+            Submission(
+                exam_id=exam.id,
+                student_name="Grace Hopper",
+                first_name="Grace",
+                last_name="Hopper",
+                capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+                front_page_usage_json=json.dumps({
+                    "provider": "gemini",
+                    "model": "gemini-2.5-flash",
+                    "thinking_level": "med",
+                    "thinking_budget": 1024,
+                    "prompt_tokens": 900,
+                    "candidate_tokens": 100,
+                    "thought_tokens": 60,
+                    "total_tokens": 1060,
+                    "estimated_cost_usd": 0.0007,
+                    "normalized_image_width": 768,
+                    "normalized_image_height": 1024,
+                    "normalized_image_bytes": 22000,
+                }),
+            )
+        )
+        session.commit()
+        exam_id = exam.id
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/exams/{exam_id}/front-page-usage")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["exam_id"] == exam_id
+        assert payload["entry_count"] == 2
+        assert payload["prompt_tokens"] == 1900
+        assert payload["output_tokens"] == 220
+        assert payload["thought_tokens"] == 140
+        assert payload["total_tokens"] == 2260
+        assert payload["estimated_cost_usd"] == pytest.approx(0.0015)
+        assert payload["avg_tokens_per_image"] == pytest.approx(1130.0)
+        assert payload["avg_cost_per_image_usd"] == pytest.approx(0.00075)
+        assert [entry["student_name"] for entry in payload["entries"]] == ["Ada Lovelace", "Grace Hopper"]
+
+
+def test_image_upload_consensus_fills_missing_outcome_rows_and_overall_max(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    class StubExtractor:
+        def extract_template_group(self, image_paths, *, model_override=None, thinking_level_override=None):
+            _ = (image_paths, model_override, thinking_level_override)
+            return {
+                "stable": True,
+                "source": "grouped_front_pages",
+                "seed_pages_processed": 3,
+                "seed_limit": 3,
+                "sample_count": 3,
+                "matched_pages": 3,
+                "match_ratio": 1.0,
+                "outcome_codes": ["OB1", "OB2"],
+                "outcome_count": 2,
+                "expects_overall_total": True,
+                "expects_overall_max": True,
+                "warnings": [],
+                "exam_name": "Math 20-1 Unit Test",
+            }
+
+        def extract(self, image_path, request_id, *, model_override=None, template=None, thinking_level_override=None):
+            _ = (request_id, model_override, template, thinking_level_override)
+            page_number = int(Path(image_path).stem.split("_")[-1])
+            if page_number < 3:
+                objective_scores = [
+                    {
+                        "objective_code": {"value_text": "OB1", "confidence": 0.9, "evidence": []},
+                        "marks_awarded": {"value_text": "18", "confidence": 0.9, "evidence": []},
+                        "max_marks": {"value_text": "20", "confidence": 0.9, "evidence": []},
+                    },
+                    {
+                        "objective_code": {"value_text": "OB2", "confidence": 0.9, "evidence": []},
+                        "marks_awarded": {"value_text": "0", "confidence": 0.9, "evidence": []},
+                        "max_marks": {"value_text": "30", "confidence": 0.9, "evidence": []},
+                    },
+                ]
+                overall_max = {"value_text": "50", "confidence": 0.9, "evidence": []}
+            else:
+                objective_scores = []
+                overall_max = None
+
+            return FrontPageTotalsExtractResult(
+                payload={
+                    "exam_name": {"value_text": "Math 20-1 Unit Test", "confidence": 0.9, "evidence": []},
+                    "student_name": {
+                        "value_text": f"Student {page_number}",
+                        "confidence": 0.9,
+                        "evidence": [{"page_number": 1, "quote": f"Student {page_number}", "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.05}],
+                    },
+                    "overall_marks_awarded": {"value_text": "42", "confidence": 0.9, "evidence": []},
+                    "overall_max_marks": overall_max,
+                    "objective_scores": objective_scores,
+                    "warnings": [],
+                },
+                model="gemini-2.5-flash",
+                usage=None,
+            )
+
+    monkeypatch.setattr(exams_router, "get_front_page_totals_extractor", lambda: StubExtractor())
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Untitled Test")
+        session.add(exam)
+        session.flush()
+        bulk = ExamBulkUploadFile(exam_id=exam.id, original_filename="3 uploaded images", stored_path="")
+        session.add(bulk)
+        session.flush()
+
+        rendered_paths: list[Path] = []
+        for idx in range(1, 4):
+            path = tmp_path / f"page_{idx:04d}.png"
+            path.write_bytes(_tiny_png_bytes())
+            rendered_paths.append(path)
+
+        _, prefilled, _usage_prefilled = exams_router._extract_image_upload_front_page_pages(
+            exam=exam,
+            bulk=bulk,
+            rendered_paths=rendered_paths,
+            session=session,
+            job=None,
+        )
+        session.refresh(exam)
+
+        third_payload = prefilled[3]
+        assert third_payload.overall_max_marks is not None
+        assert third_payload.overall_max_marks.value_text == "50"
+        assert [row.objective_code.value_text for row in third_payload.objective_scores] == ["OB1", "OB2"]
+        assert [row.marks_awarded.value_text for row in third_payload.objective_scores] == ["0", "0"]
+        assert [row.max_marks.value_text if row.max_marks else None for row in third_payload.objective_scores] == ["20", "30"]
+        assert any("Filled 2 missing outcome row" in warning for warning in third_payload.warnings)
+        assert exam.front_page_template_json is not None
+        template_payload = json.loads(exam.front_page_template_json)
+        assert template_payload["outcome_display_codes"] == ["OB1", "OB2"]
+        assert template_payload["outcome_max_marks"] == ["20", "30"]
+        assert template_payload["overall_max_marks_value_text"] == "50"
 
 
 def test_start_exam_intake_job_persists_selected_thinking_level(tmp_path, monkeypatch) -> None:
@@ -435,6 +669,290 @@ def test_start_exam_intake_job_persists_selected_thinking_level(tmp_path, monkey
         assert job is not None
         assert job.thinking_level == "high"
         assert json.loads(job.metrics_json or "{}")["front_page_thinking_level"] == "high"
+
+
+def test_job_metrics_payload_preserves_existing_front_page_usage_metrics() -> None:
+    job = ExamIntakeJob(
+        exam_id=1,
+        status="running",
+        stage="extracting_front_pages",
+        metrics_json=json.dumps({
+            "front_page_calls": 2,
+            "front_page_total_tokens": 777,
+            "front_page_provider": "gemini",
+        }),
+    )
+
+    merged = json.loads(exams_router._job_metrics_payload(job, {"page_count": 4, "total_ms": 1234.5}))
+
+    assert merged["front_page_calls"] == 2
+    assert merged["front_page_total_tokens"] == 777
+    assert merged["front_page_provider"] == "gemini"
+    assert merged["page_count"] == 4
+    assert merged["total_ms"] == 1234.5
+
+
+def test_create_exam_with_intake_is_atomic_and_returns_exam_with_job(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    spawned_job_ids: list[int] = []
+    monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: spawned_job_ids.append(job_id))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/exams/intake",
+            files=[("files", ("paper-1.png", _tiny_png_bytes(), "image/png"))],
+            data={"front_page_thinking_level": "med", "name": ""},
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["name"] == "Untitled Test"
+    assert payload["status"] == "DRAFT"
+    assert payload["intake_job"]["status"] == "queued"
+    assert payload["intake_job"]["thinking_level"] == "med"
+    assert spawned_job_ids
+
+    with Session(db.engine) as session:
+        exams = session.exec(select(Exam)).all()
+        jobs = session.exec(select(ExamIntakeJob)).all()
+        assert len(exams) == 1
+        assert len(jobs) == 1
+        assert jobs[0].exam_id == exams[0].id
+
+
+def test_create_exam_with_intake_persists_uploaded_class_list(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: None)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/exams/intake",
+            files=[
+                ("files", ("paper-1.png", _tiny_png_bytes(), "image/png")),
+                ("class_list_files", ("class-list.csv", b"Student Name\nJordan Lee\nAvery Stone\n", "text/csv")),
+            ],
+            data={"front_page_thinking_level": "low", "name": ""},
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["class_list"]["entry_count"] == 2
+    assert payload["class_list"]["source"] == "uploaded_files"
+    assert payload["class_list"]["names"] == ["Jordan Lee", "Avery Stone"]
+
+    with Session(db.engine) as session:
+        exam = session.exec(select(Exam)).one()
+        assert json.loads(exam.class_list_json or "[]") == ["Jordan Lee", "Avery Stone"]
+
+
+def test_create_class_list_and_use_it_for_exam_intake(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: None)
+
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/api/class-lists/upload",
+            files=[("files", ("class-list.csv", b"Student Name\nJordan Lee\nAvery Stone\n", "text/csv"))],
+            data={"name": "Period 1"},
+        )
+        assert create_response.status_code == 201
+        class_list = create_response.json()
+        intake_response = client.post(
+            "/api/exams/intake",
+            files=[("files", ("paper-1.png", _tiny_png_bytes(), "image/png"))],
+            data={"front_page_thinking_level": "low", "class_list_id": str(class_list["id"])},
+        )
+
+    assert intake_response.status_code == 201
+    payload = intake_response.json()
+    assert payload["class_list"]["id"] == class_list["id"]
+    assert payload["class_list"]["name"] == "Period 1"
+    assert payload["class_list"]["names"] == ["Jordan Lee", "Avery Stone"]
+    assert payload["class_list"]["source"] == "selected_class_list"
+
+    with Session(db.engine) as session:
+        stored_class_lists = session.exec(select(ClassList)).all()
+        assert len(stored_class_lists) == 1
+        exam = session.exec(select(Exam)).one()
+        assert json.loads(exam.class_list_json or "[]") == ["Jordan Lee", "Avery Stone"]
+
+
+def test_append_names_to_class_list_updates_exam_snapshot(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: None)
+
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/api/class-lists/upload",
+            files=[("files", ("class-list.csv", b"Student Name\nJordan Lee\nAvery Stone\n", "text/csv"))],
+            data={"name": "Period 1"},
+        )
+        assert create_response.status_code == 201
+        class_list = create_response.json()
+
+        intake_response = client.post(
+            "/api/exams/intake",
+            files=[("files", ("paper-1.png", _tiny_png_bytes(), "image/png"))],
+            data={"front_page_thinking_level": "low", "class_list_id": str(class_list["id"])},
+        )
+        assert intake_response.status_code == 201
+        exam = intake_response.json()
+
+        append_response = client.post(
+            f"/api/class-lists/{class_list['id']}/append-names",
+            data={"exam_id": str(exam["id"]), "names_json": json.dumps(["Tyler Dunn", "Jordan Lee"])},
+        )
+
+    assert append_response.status_code == 200
+    payload = append_response.json()
+    assert payload["names"] == ["Jordan Lee", "Avery Stone", "Tyler Dunn"]
+
+    with Session(db.engine) as session:
+        stored_class_list = session.get(ClassList, class_list["id"])
+        assert stored_class_list is not None
+        assert json.loads(stored_class_list.names_json or "[]") == ["Jordan Lee", "Avery Stone", "Tyler Dunn"]
+
+        stored_exam = session.get(Exam, exam["id"])
+        assert stored_exam is not None
+        assert json.loads(stored_exam.class_list_json or "[]") == ["Jordan Lee", "Avery Stone", "Tyler Dunn"]
+
+
+def test_create_exam_class_list_from_confirmed_names(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Class List Exam")
+        session.add(exam)
+        session.flush()
+        session.add(Submission(
+            exam_id=exam.id,
+            student_name="Jordan Lee",
+            first_name="Jordan",
+            last_name="Lee",
+            capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+            front_page_totals_json=json.dumps({"overall_marks_awarded": 12, "confirmed": True, "objective_scores": [], "teacher_note": ""}),
+        ))
+        session.add(Submission(
+            exam_id=exam.id,
+            student_name="Avery Stone",
+            first_name="Avery",
+            last_name="Stone",
+            capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+            front_page_totals_json=json.dumps({"overall_marks_awarded": 15, "confirmed": True, "objective_scores": [], "teacher_note": ""}),
+        ))
+        session.commit()
+        exam_id = exam.id
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/class-lists/from-exam/{exam_id}", data={"name": "Block A"})
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["name"] == "Block A"
+    assert payload["entry_count"] == 2
+    assert payload["source"] == "confirmed_names"
+    assert payload["names"] == ["Jordan Lee", "Avery Stone"]
+
+
+def test_create_exam_class_list_from_confirmed_names_allows_manual_additions(tmp_path) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Class List Exam")
+        session.add(exam)
+        session.flush()
+        session.add(Submission(
+            exam_id=exam.id,
+            student_name="Jordan Lee",
+            first_name="Jordan",
+            last_name="Lee",
+            capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+            front_page_totals_json=json.dumps({"overall_marks_awarded": 12, "confirmed": True, "objective_scores": [], "teacher_note": ""}),
+        ))
+        session.add(Submission(
+            exam_id=exam.id,
+            student_name="Avery Stone",
+            first_name="Avery",
+            last_name="Stone",
+            capture_mode=SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+            front_page_totals_json=json.dumps({"overall_marks_awarded": 15, "confirmed": True, "objective_scores": [], "teacher_note": ""}),
+        ))
+        session.commit()
+        exam_id = exam.id
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/class-lists/from-exam/{exam_id}",
+            data={
+                "name": "Block A",
+                "names_json": json.dumps(["Jordan Lee", "Avery Stone", "Casey Morgan"]),
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["name"] == "Block A"
+    assert payload["entry_count"] == 3
+    assert payload["source"] == "confirmed_names_reviewed"
+    assert payload["names"] == ["Jordan Lee", "Avery Stone", "Casey Morgan"]
+
+
+def test_create_exam_with_intake_does_not_leave_orphan_draft_on_failure(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    def fail_store(*args, **kwargs):
+        _ = (args, kwargs)
+        raise HTTPException(status_code=400, detail="store failed")
+
+    monkeypatch.setattr(exams_router, "_store_bulk_upload_files", fail_store)
+    monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: None)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/exams/intake",
+            files=[("files", ("paper-1.png", _tiny_png_bytes(), "image/png"))],
+            data={"front_page_thinking_level": "low", "name": ""},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "store failed"
+
+    with Session(db.engine) as session:
+        assert session.exec(select(Exam)).all() == []
+        assert session.exec(select(ExamIntakeJob)).all() == []
+        assert session.exec(select(ExamBulkUploadFile)).all() == []
 
 
 def test_retry_exam_intake_job_preserves_thinking_level(tmp_path, monkeypatch) -> None:

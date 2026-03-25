@@ -1,18 +1,32 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import { uploadToBlob } from '../blob/upload';
 import { compareStudentNamesByLastName, formatStudentName } from '../lib/nameFormat';
 import { useToast } from '../components/ToastProvider';
-import type { BulkUploadPreview, ExamDetail, ExamMarkingDashboardResponse, ExamObjectiveRead, ParseLatestResponse, QuestionRead, StoredFileRead, SubmissionDashboardRow, SubmissionRead } from '../types/api';
+import type { BulkUploadPreview, ExamDetail, ExamIntakeJobRead, ExamMarkingDashboardResponse, ExamObjectiveRead, FrontPageUsageReport, ParseLatestResponse, QuestionRead, StoredFileRead, SubmissionDashboardRow, SubmissionRead } from '../types/api';
 
 const PARSE_BATCH_SIZE = 3;
+const formatUsd = (value: number) => {
+  if (!Number.isFinite(value)) return '$0.00';
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
+};
+
+const formatBytes = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${Math.round(value)} B`;
+};
 
 export function ExamDetailPage() {
   const params = useParams();
   const examId = Number(params.examId);
   const navigate = useNavigate();
+  const location = useLocation();
   const [detail, setDetail] = useState<ExamDetail | null>(null);
+  const [latestIntakeJob, setLatestIntakeJob] = useState<ExamIntakeJobRead | null>(null);
   const [questions, setQuestions] = useState<QuestionRead[]>([]);
   const [submissions, setSubmissions] = useState<SubmissionRead[]>([]);
   const [markingDashboard, setMarkingDashboard] = useState<ExamMarkingDashboardResponse | null>(null);
@@ -21,9 +35,13 @@ export function ExamDetailPage() {
   const [keyFiles, setKeyFiles] = useState<StoredFileRead[]>([]);
   const [latestParse, setLatestParse] = useState<ParseLatestResponse['job'] | null>(null);
   const [latestParseStatus, setLatestParseStatus] = useState<Awaited<ReturnType<typeof api.getExamKeyParseStatus>> | null>(null);
+  const [frontPageUsageReport, setFrontPageUsageReport] = useState<FrontPageUsageReport | null>(null);
   const [isProcessingParse, setIsProcessingParse] = useState(false);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [rosterText, setRosterText] = useState('');
+  const [newClassListName, setNewClassListName] = useState('');
+  const [newClassListNamesText, setNewClassListNamesText] = useState('');
+  const [missingClassListNamesText, setMissingClassListNamesText] = useState('');
   const [preview, setPreview] = useState<BulkUploadPreview | null>(null);
   const [activeCandidateId, setActiveCandidateId] = useState<string>('');
   const [isUploading, setIsUploading] = useState(false);
@@ -32,15 +50,28 @@ export function ExamDetailPage() {
   const [isExportingSummary, setIsExportingSummary] = useState(false);
   const [isExportingObjectivesSummary, setIsExportingObjectivesSummary] = useState(false);
   const [isExportingStudentSummaries, setIsExportingStudentSummaries] = useState(false);
+  const [isCreatingClassList, setIsCreatingClassList] = useState(false);
+  const [isUpdatingClassList, setIsUpdatingClassList] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const { showError, showSuccess, showWarning } = useToast();
+  const showCostDebug = useMemo(() => {
+    if (import.meta.env.VITE_ENABLE_COST_DEBUG !== '1') return false;
+    const params = new URLSearchParams(location.search);
+    return params.get('debug') === 'cost';
+  }, [location.search]);
 
   const loadDetail = async () => {
     setIsLoading(true);
     try {
-      const bootstrap = await api.getExamWorkspaceBootstrap(examId);
+      const [bootstrap, intakeJob, usageReport] = await Promise.all([
+        api.getExamWorkspaceBootstrap(examId),
+        api.getLatestExamIntakeJob(examId).catch(() => null),
+        api.getExamFrontPageUsage(examId).catch(() => null),
+      ]);
       setDetail({ exam: bootstrap.exam, key_files: bootstrap.key_files, submissions: bootstrap.submissions, parse_jobs: [] });
+      setLatestIntakeJob(intakeJob);
+      setFrontPageUsageReport(usageReport);
       setQuestions(bootstrap.questions);
       setKeyFiles(bootstrap.key_files);
       setSubmissions(bootstrap.submissions);
@@ -99,10 +130,46 @@ export function ExamDetailPage() {
     return () => window.clearInterval(id);
   }, [examId, latestParse?.job_id, latestParse?.status]);
 
+  useEffect(() => {
+    const confirmedCheckedNames = submissions
+      .filter((submission) => submission.capture_mode === 'front_page_totals' && submission.front_page_totals?.confirmed)
+      .map((submission) => formatStudentName(submission.student_name))
+      .filter((name, index, all) => Boolean(name.trim()) && all.indexOf(name) === index)
+      .sort(compareStudentNamesByLastName);
+    const hasCompletedFrontPageQueue = submissions.some((submission) => submission.capture_mode === 'front_page_totals')
+      && submissions
+        .filter((submission) => submission.capture_mode === 'front_page_totals')
+        .every((submission) => submission.front_page_totals?.confirmed);
+    if (!hasCompletedFrontPageQueue || detail?.exam.class_list || newClassListNamesText.trim()) return;
+    setNewClassListNamesText(confirmedCheckedNames.join('\n'));
+  }, [detail?.exam.class_list, newClassListNamesText, submissions]);
+
   const activeCandidate = useMemo(
     () => preview?.candidates.find((candidate) => candidate.candidate_id === activeCandidateId) ?? preview?.candidates[0] ?? null,
     [preview, activeCandidateId],
   );
+  const confirmedCheckedNames = useMemo(
+    () => submissions
+      .filter((submission) => submission.capture_mode === 'front_page_totals' && submission.front_page_totals?.confirmed)
+      .map((submission) => formatStudentName(submission.student_name))
+      .filter((name, index, all) => Boolean(name.trim()) && all.indexOf(name) === index)
+      .sort(compareStudentNamesByLastName),
+    [submissions],
+  );
+  const missingClassListNames = useMemo(() => {
+    const selectedClassList = detail?.exam.class_list ?? null;
+    if (!selectedClassList) return [];
+    const knownNames = new Set(selectedClassList.names.map((name) => name.trim().toLocaleLowerCase()).filter(Boolean));
+    return confirmedCheckedNames.filter((name) => !knownNames.has(name.trim().toLocaleLowerCase()));
+  }, [confirmedCheckedNames, detail?.exam.class_list]);
+
+  useEffect(() => {
+    if (missingClassListNames.length === 0) {
+      setMissingClassListNamesText('');
+      return;
+    }
+    setMissingClassListNamesText(missingClassListNames.join('\n'));
+  }, [missingClassListNames]);
 
   const hasQuestions = questions.length > 0;
   const parseDone = latestParse?.status === 'done';
@@ -542,6 +609,54 @@ export function ExamDetailPage() {
     }
   };
 
+  const onCreateClassListFromCheckedNames = async () => {
+    const editedNames = newClassListNamesText
+      .split('\n')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (editedNames.length === 0) {
+      showError('Add at least one student name.');
+      return;
+    }
+    try {
+      setIsCreatingClassList(true);
+      const classList = await api.createClassListFromExam(examId, newClassListName, editedNames);
+      await loadDetail();
+      setNewClassListName('');
+      setNewClassListNamesText('');
+      showSuccess(`Saved ${classList.name || 'class list'}.`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to create class list');
+    } finally {
+      setIsCreatingClassList(false);
+    }
+  };
+
+  const onAppendMissingStudentsToClassList = async () => {
+    if (!classList?.id) {
+      showError('No saved class list is attached to this test.');
+      return;
+    }
+    const editedNames = missingClassListNamesText
+      .split('\n')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (editedNames.length === 0) {
+      showError('Add at least one student name.');
+      return;
+    }
+    try {
+      setIsUpdatingClassList(true);
+      await api.appendNamesToClassList(classList.id, editedNames, examId);
+      await loadDetail();
+      showSuccess(`Added ${editedNames.length} student${editedNames.length === 1 ? '' : 's'} to ${classList.name || 'the class list'}.`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Failed to update class list');
+    } finally {
+      setIsUpdatingClassList(false);
+    }
+  };
+
   if (isLoading) return <p>Loading exam details…</p>;
 
   if (notFound) {
@@ -572,7 +687,23 @@ export function ExamDetailPage() {
     ? buildSubmissionWorkflowLink(nextTotalsRow.submission_id, nextTotalsRow.capture_mode, nextTotalsRow.next_question_id)
     : (nextTotalsSubmission ? buildSubmissionWorkflowLink(nextTotalsSubmission.id, nextTotalsSubmission.capture_mode) : null);
   const intakeJob = detail.exam.intake_job ?? null;
-  const reviewWarmInBackground = Boolean(intakeJob && (intakeJob.initial_review_ready || intakeJob.review_ready) && !intakeJob.fully_warmed);
+  const effectiveIntakeJob = latestIntakeJob ?? intakeJob;
+  const reviewWarmInBackground = Boolean(effectiveIntakeJob && (effectiveIntakeJob.initial_review_ready || effectiveIntakeJob.review_ready) && !effectiveIntakeJob.fully_warmed);
+  const frontPageMetrics = effectiveIntakeJob?.metrics ?? null;
+  const usageEntryCount = Number(frontPageUsageReport?.entry_count ?? 0);
+  const averageTokensPerPage = Number(frontPageUsageReport?.avg_tokens_per_image ?? 0);
+  const parseCostProvider = frontPageUsageReport?.entries[0]?.provider?.trim() || String(frontPageMetrics?.front_page_provider ?? '').trim();
+  const parseCostModel = frontPageUsageReport?.entries[0]?.model?.trim() || String(frontPageMetrics?.front_page_model ?? '').trim();
+  const parseCostThinkingLevel = (
+    frontPageUsageReport?.entries[0]?.thinking_level
+    || effectiveIntakeJob?.thinking_level
+    || String(frontPageMetrics?.front_page_thinking_level ?? '')
+  ).trim().toUpperCase();
+  const averageImageBytes = usageEntryCount > 0
+    ? Math.round(frontPageUsageReport!.entries.reduce((total, entry) => total + (entry.normalized_image_bytes || 0), 0) / usageEntryCount)
+    : 0;
+  const classList = detail.exam.class_list ?? null;
+  const canBuildClassListFromCheckedNames = frontPageRows.length > 0 && confirmedTotalsCount === frontPageRows.length;
 
   return (
     <div className="page-stack">
@@ -588,6 +719,36 @@ export function ExamDetailPage() {
 
       {!preview && (
         <>
+          {showCostDebug && usageEntryCount > 0 && (
+            <section className="card stack">
+              <details className="review-readonly-block surface-muted" style={{ margin: 0 }}>
+                <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
+                  {Math.round(averageTokensPerPage).toLocaleString()} tokens/image
+                </summary>
+                <p className="subtle-text" style={{ margin: '.35rem 0 0' }}>
+                  {parseCostProvider || parseCostModel ? [parseCostProvider, parseCostModel, parseCostThinkingLevel].filter(Boolean).join(' · ') : 'Front-page usage'}
+                </p>
+                <p className="subtle-text" style={{ margin: '.2rem 0 0' }}>
+                  {usageEntryCount} image{usageEntryCount === 1 ? '' : 's'} · {formatUsd(frontPageUsageReport?.avg_cost_per_image_usd ?? 0)}/image · {formatBytes(averageImageBytes)} avg image
+                </p>
+                <p className="subtle-text" style={{ margin: '.2rem 0 0' }}>
+                  {Number(frontPageUsageReport?.prompt_tokens ?? 0).toLocaleString()} prompt · {Number(frontPageUsageReport?.output_tokens ?? 0).toLocaleString()} output · {Number(frontPageUsageReport?.thought_tokens ?? 0).toLocaleString()} thought
+                </p>
+                <div className="stack" style={{ gap: '.3rem', marginTop: '.55rem' }}>
+                  {frontPageUsageReport?.entries.map((entry) => (
+                    <div key={entry.submission_id} className="subtle-text" style={{ margin: 0 }}>
+                      <strong style={{ color: 'var(--text)' }}>{formatStudentName(entry.student_name)}</strong>{' '}
+                      · {entry.total_tokens.toLocaleString()} tokens
+                      {' '}· {formatUsd(entry.estimated_cost_usd)}
+                      {' '}· {entry.normalized_image_width}×{entry.normalized_image_height}
+                      {' '}· {formatBytes(entry.normalized_image_bytes)}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            </section>
+          )}
+
           <section className="card stack">
             <div className="panel-title-row">
               <div>
@@ -620,21 +781,6 @@ export function ExamDetailPage() {
           </section>
 
           <section className="card stack">
-            <div className="metric-grid">
-              <article className="metric-card">
-                <p className="metric-label">Parsed papers</p>
-                <p className="metric-value">{submissions.length}</p>
-                <p className="metric-meta">Ready to review</p>
-              </article>
-              <article className="metric-card">
-                <p className="metric-label">Need confirmation</p>
-                <p className="metric-value">{frontPagePendingRows.length}</p>
-                <p className="metric-meta">Still waiting</p>
-              </article>
-            </div>
-          </section>
-
-          <section className="card stack">
             <div className="panel-title-row">
               <div>
                 <h2 className="section-title">2. Export class table</h2>
@@ -649,6 +795,103 @@ export function ExamDetailPage() {
                 {isExporting ? 'Exporting…' : 'Export grades Excel'}
               </button>
             </div>
+          </section>
+
+          <section className="card stack">
+            <div className="panel-title-row">
+              <div>
+                <h2 className="section-title">Class list</h2>
+                <p className="subtle-text">Reusable class lists help with name reads on future tests.</p>
+              </div>
+              {classList && (
+                <span className="status-pill status-neutral">
+                  {classList.entry_count} name{classList.entry_count === 1 ? '' : 's'}
+                </span>
+              )}
+            </div>
+            {classList ? (
+              <>
+                <p className="subtle-text" style={{ margin: 0 }}>
+                  Using {classList.name || 'a class list'} for this test.
+                </p>
+                {(classList.filenames?.length || 0) > 0 && (
+                  <p className="subtle-text" style={{ margin: 0 }}>
+                    {classList.filenames.join(', ')}
+                  </p>
+                )}
+                {missingClassListNames.length > 0 && (
+                  <>
+                    <p className="subtle-text" style={{ margin: 0 }}>
+                      This checked test includes {missingClassListNames.length} student{missingClassListNames.length === 1 ? '' : 's'} not yet in the saved class list. Add them now?
+                    </p>
+                    <div className="stack" style={{ gap: '.55rem' }}>
+                      <label htmlFor="missing-class-list-names">New students</label>
+                      <textarea
+                        id="missing-class-list-names"
+                        value={missingClassListNamesText}
+                        onChange={(event) => setMissingClassListNamesText(event.target.value)}
+                        rows={Math.max(4, Math.min(10, missingClassListNamesText.split('\n').filter(Boolean).length + 1))}
+                        placeholder="One student per line"
+                        disabled={isUpdatingClassList}
+                      />
+                    </div>
+                    <div className="actions-row" style={{ marginTop: 0 }}>
+                      <button type="button" className="btn btn-secondary" onClick={() => void onAppendMissingStudentsToClassList()} disabled={isUpdatingClassList}>
+                        {isUpdatingClassList ? 'Saving…' : 'Add missing students'}
+                      </button>
+                    </div>
+                  </>
+                )}
+                <div className="actions-row" style={{ marginTop: 0 }}>
+                  <Link className="btn btn-secondary" to="/class-lists">View class lists</Link>
+                </div>
+              </>
+            ) : canBuildClassListFromCheckedNames ? (
+              <>
+                <p className="subtle-text" style={{ margin: 0 }}>
+                  Create a class list from the checked names, then add anyone who missed this test before saving.
+                </p>
+                <div className="stack" style={{ gap: '.55rem' }}>
+                  <label htmlFor="new-class-list-name">Class list name</label>
+                  <input
+                    id="new-class-list-name"
+                    value={newClassListName}
+                    onChange={(event) => setNewClassListName(event.target.value)}
+                    placeholder={`${detail.exam.name} class list`}
+                    disabled={isCreatingClassList}
+                  />
+                </div>
+                <div className="stack" style={{ gap: '.55rem' }}>
+                  <label htmlFor="new-class-list-names">Student names</label>
+                  <textarea
+                    id="new-class-list-names"
+                    value={newClassListNamesText}
+                    onChange={(event) => setNewClassListNamesText(event.target.value)}
+                    rows={Math.max(6, Math.min(12, newClassListNamesText.split('\n').filter(Boolean).length + 1))}
+                    placeholder="One student per line"
+                    disabled={isCreatingClassList}
+                  />
+                  <p className="subtle-text" style={{ margin: 0 }}>
+                    One student per line. Add missing students before you save.
+                  </p>
+                </div>
+                <div className="actions-row" style={{ marginTop: 0 }}>
+                  <button type="button" className="btn btn-secondary" onClick={() => void onCreateClassListFromCheckedNames()} disabled={isCreatingClassList}>
+                    {isCreatingClassList ? 'Saving…' : 'Create new class list'}
+                  </button>
+                  <Link className="btn btn-secondary" to="/class-lists">Go to class lists</Link>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="subtle-text" style={{ margin: 0 }}>
+                  No class list selected for this test.
+                </p>
+                <div className="actions-row" style={{ marginTop: 0 }}>
+                  <Link className="btn btn-secondary" to="/class-lists">Go to class lists</Link>
+                </div>
+              </>
+            )}
           </section>
         </>
       )}
