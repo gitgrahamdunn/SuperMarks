@@ -936,7 +936,7 @@ def test_create_exam_with_intake_does_not_leave_orphan_draft_on_failure(tmp_path
         _ = (args, kwargs)
         raise HTTPException(status_code=400, detail="store failed")
 
-    monkeypatch.setattr(exams_router, "_store_bulk_upload_files", fail_store)
+    monkeypatch.setattr(exams_router, "_persist_bulk_upload_sources", fail_store)
     monkeypatch.setattr(exams_router, "_spawn_exam_intake_job_thread", lambda job_id: None)
 
     with TestClient(app) as client:

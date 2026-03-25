@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import { AutoGrowTextarea } from '../components/AutoGrowTextarea';
 import { formatStudentName, formatStudentNameParts, splitStudentName } from '../lib/nameFormat';
 import { useToast } from '../components/ToastProvider';
 import type {
@@ -1027,15 +1026,6 @@ export function SubmissionFrontPageTotalsPage() {
                   </div>
                 ))}
               </div>
-
-              <AutoGrowTextarea
-                id="front-page-teacher-note"
-                label="Teacher note"
-                className="textarea-large"
-                value={teacherNote}
-                onChange={(event) => setTeacherNote(event.target.value)}
-              />
-
               <div className="actions-row" style={{ marginTop: 0 }}>
                 <button type="button" className="btn btn-secondary" onClick={() => void save(false)} disabled={saving}>
                   {saving ? 'Saving…' : 'Save correction'}

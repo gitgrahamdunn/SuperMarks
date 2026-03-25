@@ -22,6 +22,7 @@ from app.ai.openai_vision import (
 from app.db import create_db_and_tables, get_database_backend_name, get_redacted_database_url
 from app.routers.exams import public_router as public_exams_router
 from app.routers.exams import _resume_pending_exam_intake_jobs
+from app.routers.exams import class_lists_router
 from app.routers.exams import router as exams_router
 from app.routers.questions import router as questions_router
 from app.routers.submissions import router as submissions_router
@@ -67,6 +68,7 @@ async def seed_api_session_cookie(request: Request, call_next):
 
 app.include_router(public_exams_router, prefix="/api")
 app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_api_key)])
+app.include_router(class_lists_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(questions_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(submissions_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(files_router, prefix="/api", dependencies=[Depends(require_api_key)])

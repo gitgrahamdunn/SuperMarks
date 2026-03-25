@@ -226,6 +226,45 @@ def test_upload_bytes_uses_sdk_put_signature(monkeypatch) -> None:
     }
 
 
+def test_upload_bytes_accepts_sdk_result_object_shape(monkeypatch) -> None:
+    monkeypatch.setenv("BLOB_MOCK", "")
+    monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "test-token")
+    monkeypatch.setenv("BLOB_PUBLIC_ACCESS", "private")
+
+    import sys
+    import types
+    from app import blob_store
+
+    class _PutBlobResult:
+        url = "https://blob.vercel-storage.com/exams/1/key/object.png"
+        pathname = "exams/1/key/object.png"
+        content_type = "image/png"
+        download_url = "https://blob.vercel-storage.com/exams/1/key/object.png?download=1"
+
+    def _fake_put(path: str, body: bytes, *, access: str, content_type: str | None = None, add_random_suffix: bool = False, token: str | None = None):
+        assert path == "exams/1/key/object.png"
+        assert body == b"png-data"
+        assert access == "private"
+        assert content_type == "image/png"
+        assert add_random_suffix is False
+        assert token == "test-token"
+        return _PutBlobResult()
+
+    fake_blob_module = types.ModuleType("vercel.blob")
+    fake_blob_module.put = _fake_put  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "vercel.blob", fake_blob_module)
+
+    result = blob_store.upload_bytes("exams/1/key/object.png", b"png-data", "image/png")
+
+    assert result == {
+        "url": "https://blob.vercel-storage.com/exams/1/key/object.png",
+        "pathname": "exams/1/key/object.png",
+        "contentType": "image/png",
+        "downloadUrl": "https://blob.vercel-storage.com/exams/1/key/object.png?download=1",
+    }
+
+
 def test_upload_bytes_raises_clear_error_on_sdk_signature_mismatch(monkeypatch) -> None:
     monkeypatch.setenv("BLOB_MOCK", "")
     monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "test-token")

@@ -1,9 +1,20 @@
+export interface ClassListRead {
+  id?: number | null;
+  name?: string;
+  created_at?: string | null;
+  names: string[];
+  source: string;
+  entry_count: number;
+  filenames: string[];
+}
+
 export interface ExamRead {
   id: number;
   name: string;
   created_at: string;
   teacher_style_profile_json: string | null;
   status?: string;
+  class_list?: ClassListRead | null;
   intake_job?: ExamIntakeJobRead | null;
 }
 
@@ -28,6 +39,37 @@ export interface ExamIntakeJobRead {
   last_progress_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface FrontPageUsageEntry {
+  submission_id: number;
+  student_name: string;
+  provider: string;
+  model: string;
+  thinking_level: string;
+  thinking_budget: number;
+  prompt_tokens: number;
+  output_tokens: number;
+  thought_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  normalized_image_width: number;
+  normalized_image_height: number;
+  normalized_image_bytes: number;
+}
+
+export interface FrontPageUsageReport {
+  exam_id: number;
+  exam_name: string;
+  entry_count: number;
+  prompt_tokens: number;
+  output_tokens: number;
+  thought_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  avg_tokens_per_image: number;
+  avg_cost_per_image_usd: number;
+  entries: FrontPageUsageEntry[];
 }
 
 export interface Region {

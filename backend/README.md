@@ -83,3 +83,54 @@ Storage notes:
 
 
 Persistence note: Blob stores files; DATABASE_URL stores metadata. Both are required for persistence in production.
+
+## Fly.io deployment
+
+If you want the same long-running background-job feel as local development, prefer Fly.io for the backend.
+
+Included files:
+
+- `Dockerfile`
+- `.dockerignore`
+- `fly.toml`
+
+Suggested split:
+
+- frontend on Vercel
+- backend on Fly.io
+- metadata in Neon Postgres
+- files in Vercel Blob
+
+Typical Fly flow:
+
+```bash
+cd backend
+export FLYCTL_INSTALL="$HOME/.fly"
+export PATH="$FLYCTL_INSTALL/bin:$PATH"
+
+flyctl auth login
+flyctl launch --copy-config --no-deploy
+flyctl secrets set \
+  DATABASE_URL=... \
+  BACKEND_API_KEY=... \
+  BACKEND_SESSION_SECRET=... \
+  CORS_ALLOW_ORIGINS=https://<frontend-domain> \
+  SUPERMARKS_LLM_PROVIDER=doubleword \
+  SUPERMARKS_LLM_BASE_URL=https://api.doubleword.ai/v1 \
+  SUPERMARKS_LLM_API_KEY=... \
+  SUPERMARKS_KEY_PARSE_NANO_MODEL=Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+  SUPERMARKS_KEY_PARSE_MINI_MODEL=Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+  SUPERMARKS_FRONT_PAGE_PROVIDER=gemini \
+  GEMINI_API_KEY=... \
+  SUPERMARKS_FRONT_PAGE_MODEL=gemini-2.5-flash \
+  BLOB_READ_WRITE_TOKEN=... \
+  BLOB_PUBLIC_ACCESS=private
+
+flyctl deploy
+```
+
+Notes:
+
+- `auto_stop_machines = "off"` keeps one machine running so background intake threads behave more like local.
+- `SUPERMARKS_ENV=production` is set in `fly.toml` so the app requires `DATABASE_URL`.
+- Update the Vercel frontend `VITE_API_BASE_URL` to the Fly backend URL after deploy.

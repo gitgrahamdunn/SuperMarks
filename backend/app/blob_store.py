@@ -80,12 +80,19 @@ def _upload_with_sdk(pathname: str, data: bytes, content_type: str) -> dict[str,
     except Exception:
         return None
 
-    if hasattr(result, "dict"):
+    if hasattr(result, "model_dump"):
+        payload = result.model_dump()
+    elif hasattr(result, "dict"):
         payload = result.dict()
     elif isinstance(result, dict):
         payload = result
     else:
-        return None
+        payload = {
+            "url": getattr(result, "url", ""),
+            "pathname": getattr(result, "pathname", pathname),
+            "contentType": getattr(result, "content_type", content_type),
+            "downloadUrl": getattr(result, "download_url", getattr(result, "url", "")),
+        }
 
     url = str(payload.get("url") or "").strip()
     returned_pathname = str(payload.get("pathname") or pathname)

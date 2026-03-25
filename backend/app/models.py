@@ -39,7 +39,17 @@ class Exam(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
     teacher_style_profile_json: Optional[str] = None
     front_page_template_json: Optional[str] = None
+    class_list_json: Optional[str] = None
+    class_list_source_json: Optional[str] = None
     status: ExamStatus = Field(default=ExamStatus.DRAFT)
+
+
+class ClassList(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    names_json: str = "[]"
+    source_json: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class ExamIntakeJob(SQLModel, table=True):
@@ -85,6 +95,7 @@ class Submission(SQLModel, table=True):
     capture_mode: SubmissionCaptureMode = Field(default=SubmissionCaptureMode.QUESTION_LEVEL)
     front_page_totals_json: Optional[str] = None
     front_page_candidates_json: Optional[str] = None
+    front_page_usage_json: Optional[str] = None
     front_page_reviewed_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -107,6 +118,7 @@ class ExamBulkUploadFile(SQLModel, table=True):
     exam_id: int = Field(foreign_key="exam.id", index=True)
     original_filename: str
     stored_path: str
+    source_manifest_json: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -120,6 +132,7 @@ class BulkUploadPage(SQLModel, table=True):
     detected_student_name: Optional[str] = None
     detection_confidence: float = 0.0
     detection_evidence_json: Optional[str] = None
+    front_page_usage_json: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
 
 

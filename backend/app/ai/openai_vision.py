@@ -15,7 +15,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from app.pipeline.key_pages import NormalizedImage, normalize_key_page_image
+from app.pipeline.key_pages import NormalizedImage, normalize_key_page_header_image, normalize_key_page_image
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +282,51 @@ def _front_page_provider_name() -> str:
     return _provider_name()
 
 
+def _class_list_provider_name() -> str:
+    configured = os.getenv("SUPERMARKS_CLASS_LIST_PROVIDER", "").strip()
+    if configured:
+        return configured
+    if os.getenv("OPENAI_API_KEY", "").strip():
+        return "openai_compatible"
+    if os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip():
+        return "gemini"
+    return _provider_name()
+
+
+def _class_list_provider_api_key() -> str:
+    explicit = os.getenv("SUPERMARKS_CLASS_LIST_API_KEY", "").strip()
+    if explicit:
+        return explicit
+    if _class_list_provider_name() == _front_page_provider_name():
+        return _front_page_provider_api_key()
+    if _class_list_provider_name() == "gemini":
+        return (
+            os.getenv("GEMINI_API_KEY", "").strip()
+            or os.getenv("GOOGLE_API_KEY", "").strip()
+        )
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if _class_list_provider_name() != "doubleword":
+        return openai_key
+    return openai_key or os.getenv("SUPERMARKS_LLM_API_KEY", "").strip()
+
+
+def _class_list_provider_base_url() -> str | None:
+    value = (
+        os.getenv("SUPERMARKS_CLASS_LIST_BASE_URL", "").strip()
+        or os.getenv("OPENAI_BASE_URL", "").strip()
+    )
+    if value:
+        return value
+    if _class_list_provider_name() == _front_page_provider_name():
+        return _front_page_provider_base_url()
+    if _class_list_provider_name() == "gemini":
+        return "https://generativelanguage.googleapis.com"
+    if _class_list_provider_name() == "doubleword":
+        fallback = os.getenv("SUPERMARKS_LLM_BASE_URL", "").strip()
+        return fallback or None
+    return None
+
+
 def _front_page_model() -> str:
     configured = os.getenv("SUPERMARKS_FRONT_PAGE_MODEL", "").strip()
     if configured:
@@ -295,6 +340,33 @@ def _front_page_model() -> str:
             or "gpt-5-mini"
         )
     return "gpt-5-nano"
+
+
+def _class_list_model() -> str:
+    configured = os.getenv("SUPERMARKS_CLASS_LIST_MODEL", "").strip()
+    if configured:
+        return configured
+    if _class_list_provider_name() == "gemini":
+        return "gemini-2.5-pro"
+    if _class_list_provider_name() == "doubleword":
+        return (
+            os.getenv("SUPERMARKS_KEY_PARSE_MINI_MODEL", "").strip()
+            or "gpt-5-mini"
+        )
+    return "gpt-5-mini"
+
+
+def _class_list_gemini_thinking_level() -> str:
+    normalized = (os.getenv("SUPERMARKS_CLASS_LIST_GEMINI_THINKING_LEVEL", "low").strip().lower() or "low")
+    if normalized in {"off", "low", "med"}:
+        return normalized
+    if normalized == "high":
+        return "med"
+    return "low"
+
+
+def _class_list_gemini_thinking_budget() -> int:
+    return _front_page_gemini_effective_thinking_budget(_class_list_gemini_thinking_level())
 
 
 def _front_page_mini_model() -> str:
@@ -338,13 +410,25 @@ def _front_page_gemini_thinking_budget(level: str | None) -> int:
     if normalized == "high":
         configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_HIGH", "2048")
     elif normalized == "med":
-        configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_MED", "512")
+        configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_MED", "1024")
     else:
-        configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_LOW", "128")
+        configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_LOW", "512")
     try:
         return max(0, int(configured or "0"))
     except ValueError:
         return 0
+
+
+def _front_page_gemini_effective_thinking_budget(level: str | None) -> int:
+    requested = _front_page_gemini_thinking_budget(level)
+    configured = os.getenv("SUPERMARKS_FRONT_PAGE_GEMINI_MAX_SAFE_THINKING_BUDGET", "8192").strip()
+    try:
+        max_safe = max(0, int(configured or "0"))
+    except ValueError:
+        max_safe = 8192
+    if max_safe <= 0:
+        return requested
+    return min(requested, max_safe)
 
 
 def _gemini_front_page_pricing(model: str) -> tuple[float, float] | None:
@@ -369,6 +453,14 @@ def _estimate_gemini_front_page_cost_usd(
     input_rate, output_rate = pricing
     billed_output_tokens = max(candidate_tokens, 0) + max(thought_tokens, 0)
     return ((max(prompt_tokens, 0) * input_rate) + (billed_output_tokens * output_rate)) / 1_000_000
+
+
+def _front_page_name_retry_confidence_threshold() -> float:
+    configured = os.getenv("SUPERMARKS_FRONT_PAGE_NAME_RETRY_CONFIDENCE_THRESHOLD", "0.8").strip()
+    try:
+        return min(max(float(configured or "0.8"), 0.0), 1.0)
+    except ValueError:
+        return 0.8
 
 
 @dataclass
@@ -918,6 +1010,7 @@ class FrontPageTotalsExtractor(Protocol):
         model_override: str | None = None,
         template: dict[str, object] | None = None,
         thinking_level_override: str | None = None,
+        known_student_names: list[str] | None = None,
     ) -> FrontPageTotalsExtractResult:
         """Extract front-page totals candidates from a single rendered page image."""
 
@@ -928,12 +1021,20 @@ class BulkNameDetector(Protocol):
 
 
 class GeminiStructuredVisionClient:
-    def __init__(self, timeout_seconds: float = 60.0) -> None:
-        api_key = _front_page_provider_api_key()
+    def __init__(
+        self,
+        timeout_seconds: float = 60.0,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        resolved_api_key = (api_key or "").strip() or _front_page_provider_api_key()
+        resolved_base_url = (base_url or "").strip() or (_front_page_provider_base_url() or "https://generativelanguage.googleapis.com")
+        api_key = resolved_api_key
         if not api_key:
             raise RuntimeError("SUPERMARKS_FRONT_PAGE_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY is not set")
         self._api_key = api_key
-        self._base_url = (_front_page_provider_base_url() or "https://generativelanguage.googleapis.com").rstrip("/")
+        self._base_url = resolved_base_url.rstrip("/")
         self._client = httpx.Client(timeout=timeout_seconds)
 
     def generate_json(
@@ -945,6 +1046,7 @@ class GeminiStructuredVisionClient:
         mime_type: str,
         response_json_schema: dict[str, object] | None = None,
         thinking_budget: int | None = None,
+        media_resolution: str | None = None,
     ) -> GeminiStructuredJsonResult:
         encoded = base64.b64encode(image).decode("utf-8")
         normalized_mime = mime_type.lower().strip()
@@ -956,6 +1058,8 @@ class GeminiStructuredVisionClient:
         }
         if thinking_budget is not None:
             generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+        if media_resolution:
+            generation_config["mediaResolution"] = media_resolution
         response = self._client.post(
             f"{self._base_url}/v1beta/models/{model}:generateContent",
             params={"key": self._api_key},
@@ -1015,6 +1119,136 @@ class GeminiStructuredVisionClient:
             payload=_load_json_with_fallbacks(_normalize_model_response_text(text)),
             usage=usage,
         )
+
+    def generate_json_for_images(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        images: list[tuple[bytes, str]],
+        response_json_schema: dict[str, object] | None = None,
+        thinking_budget: int | None = None,
+        media_resolution: str | None = None,
+    ) -> GeminiStructuredJsonResult:
+        if not images:
+            raise OpenAIRequestError(status_code=400, body="", message="Gemini request failed: no images supplied")
+        parts: list[dict[str, object]] = [{"text": prompt}]
+        for image_bytes, mime_type in images:
+            encoded = base64.b64encode(image_bytes).decode("utf-8")
+            normalized_mime = mime_type.lower().strip()
+            if normalized_mime not in {"image/png", "image/jpeg"}:
+                normalized_mime = "image/jpeg"
+            parts.append({"inlineData": {"mimeType": normalized_mime, "data": encoded}})
+
+        generation_config: dict[str, object] = {
+            "responseMimeType": "application/json",
+            **({"responseJsonSchema": response_json_schema} if response_json_schema else {}),
+        }
+        if thinking_budget is not None:
+            generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+        if media_resolution:
+            generation_config["mediaResolution"] = media_resolution
+
+        response = self._client.post(
+            f"{self._base_url}/v1beta/models/{model}:generateContent",
+            params={"key": self._api_key},
+            json={"contents": [{"parts": parts}], "generationConfig": generation_config},
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise OpenAIRequestError(
+                status_code=response.status_code,
+                body=response.text,
+                message=f"Gemini request failed: {exc}",
+            ) from exc
+        payload = response.json()
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            raise OpenAIRequestError(
+                status_code=response.status_code,
+                body=response.text,
+                message="Gemini request failed: empty candidate response",
+            )
+        content = candidates[0].get("content") if isinstance(candidates[0], dict) else None
+        parts_payload = content.get("parts") if isinstance(content, dict) else None
+        text = ""
+        if isinstance(parts_payload, list):
+            for part in parts_payload:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    text += part["text"]
+        if not text.strip():
+            raise OpenAIRequestError(
+                status_code=response.status_code,
+                body=response.text,
+                message="Gemini request failed: empty text response",
+            )
+        usage_metadata = payload.get("usageMetadata")
+        usage: dict[str, object] | None = None
+        if isinstance(usage_metadata, dict):
+            usage = {
+                "prompt_tokens": int(usage_metadata.get("promptTokenCount") or 0),
+                "candidate_tokens": int(usage_metadata.get("candidatesTokenCount") or 0),
+                "thought_tokens": int(usage_metadata.get("thoughtsTokenCount") or 0),
+                "total_tokens": int(usage_metadata.get("totalTokenCount") or 0),
+            }
+        return GeminiStructuredJsonResult(
+            payload=_load_json_with_fallbacks(_normalize_model_response_text(text)),
+            usage=usage,
+        )
+
+
+def extract_class_list_names_from_image(
+    image_path: Path,
+    *,
+    model_override: str | None = None,
+    thinking_level_override: str | None = None,
+) -> list[str]:
+    normalized = normalize_key_page_image(image_path)
+    model = model_override or _class_list_model()
+    prompt = _build_class_list_names_prompt()
+    schema = build_class_list_names_response_json_schema()
+
+    if _class_list_provider_name() == "gemini":
+        client = GeminiStructuredVisionClient(
+            api_key=_class_list_provider_api_key(),
+            base_url=_class_list_provider_base_url(),
+        )
+        result = client.generate_json(
+            model=model,
+            prompt=prompt,
+            image=normalized.image_bytes,
+            mime_type=normalized.mime_type,
+            response_json_schema=schema,
+            thinking_budget=_front_page_gemini_effective_thinking_budget(thinking_level_override or _class_list_gemini_thinking_level()),
+        )
+        payload = result.payload
+    else:
+        extractor = OpenAIFrontPageTotalsExtractor()
+        request_builder = (
+            build_front_page_extract_chat_request
+            if _class_list_provider_name() == "doubleword"
+            else build_front_page_extract_request
+        )
+        request_payload = request_builder(
+            model=model,
+            prompt=prompt,
+            image=normalized.image_bytes,
+            mime_type=normalized.mime_type,
+            schema=schema,
+        )
+        if _class_list_provider_name() == "doubleword":
+            response = extractor._client.chat.completions.create(**request_payload)  # type: ignore[attr-defined]
+            text = _normalize_model_response_text(response.choices[0].message.content)
+        else:
+            response = extractor._client.responses.create(**request_payload)  # type: ignore[attr-defined]
+            text = _normalize_model_response_text(response.output_text)
+        payload = _load_json_with_fallbacks(text)
+
+    names = payload.get("student_names")
+    if not isinstance(names, list):
+        return []
+    return [str(item).strip() for item in names if str(item).strip()]
 
 
 class OpenAIBulkNameDetector:
@@ -1228,6 +1462,41 @@ def build_front_page_totals_response_schema() -> dict[str, Any]:
     return schema
 
 
+def build_front_page_template_group_response_schema() -> dict[str, Any]:
+    schema = {
+        "type": "object",
+        "description": "Exam-level front-page score summary template inferred from several student front pages of the same test.",
+        "propertyOrdering": ["exam_name", "outcome_codes", "expects_overall_total", "expects_overall_max", "warnings"],
+        "properties": {
+            "exam_name": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "description": "Printed exam or test title shared across the grouped pages, when visible.",
+            },
+            "outcome_codes": {
+                "type": "array",
+                "description": "Canonical expected outcome or objective labels in order for this exam template.",
+                "items": {"type": "string"},
+            },
+            "expects_overall_total": {
+                "type": "boolean",
+                "description": "Whether the front-page summary includes an overall awarded total for each student.",
+            },
+            "expects_overall_max": {
+                "type": "boolean",
+                "description": "Whether the front-page summary includes an overall possible total for each student.",
+            },
+            "warnings": {
+                "type": "array",
+                "description": "Any ambiguity or mismatch notes from grouped template inference.",
+                "items": {"type": "string"},
+            },
+        },
+    }
+    _ensure_strict_schema_node(schema)
+    validate_schema_strictness(schema)
+    return schema
+
+
 def build_bulk_name_response_json_schema() -> dict[str, Any]:
     schema = {
         "type": "object",
@@ -1267,7 +1536,88 @@ def build_bulk_name_response_json_schema() -> dict[str, Any]:
     return schema
 
 
-def _build_front_page_totals_prompt(template: dict[str, object] | None = None) -> str:
+def build_front_page_name_retry_response_json_schema() -> dict[str, Any]:
+    schema = {
+        "type": "object",
+        "description": "Student-name retry read from the top header area of one exam page.",
+        "propertyOrdering": ["student_name", "confidence", "evidence", "warnings"],
+        "properties": {
+            "student_name": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "description": "Student name only from the top header name field. Never the exam title.",
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence from 0 to 1 for the student-name read.",
+            },
+            "evidence": {
+                "description": "Normalized box coordinates for the student-name field when visible.",
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "propertyOrdering": ["x", "y", "w", "h"],
+                        "properties": {
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "w": {"type": "number"},
+                            "h": {"type": "number"},
+                        },
+                    },
+                    {"type": "null"},
+                ],
+            },
+            "warnings": {
+                "type": "array",
+                "description": "Ambiguity notes for the name read.",
+                "items": {"type": "string"},
+            },
+        },
+    }
+    _ensure_strict_schema_node(schema)
+    validate_schema_strictness(schema)
+    return schema
+
+
+def build_class_list_names_response_json_schema() -> dict[str, Any]:
+    schema = {
+        "type": "object",
+        "description": "Student names extracted from one class-list page.",
+        "propertyOrdering": ["student_names", "warnings"],
+        "properties": {
+            "student_names": {
+                "type": "array",
+                "description": "All visible student names from the class list page in page order.",
+                "items": {"type": "string"},
+            },
+            "warnings": {
+                "type": "array",
+                "description": "Any ambiguity or formatting notes from the class-list extraction.",
+                "items": {"type": "string"},
+            },
+        },
+    }
+    _ensure_strict_schema_node(schema)
+    validate_schema_strictness(schema)
+    return schema
+
+
+def _known_student_names_prompt_hint(known_student_names: list[str] | None) -> str:
+    if not known_student_names:
+        return ""
+    cleaned = [str(name).strip() for name in known_student_names if str(name).strip()]
+    if not cleaned:
+        return ""
+    limited = cleaned[:40]
+    joined = "; ".join(limited)
+    suffix = " Use this list only to disambiguate ambiguous handwriting; do not force a match." if limited else ""
+    return f" Known student names for this exam: {joined}.{suffix}"
+
+
+def _build_front_page_totals_prompt(
+    template: dict[str, object] | None = None,
+    known_student_names: list[str] | None = None,
+) -> str:
+    known_names_hint = _known_student_names_prompt_hint(known_student_names)
     if template:
         outcome_codes = [str(item).strip() for item in template.get("outcome_codes", []) if str(item).strip()]
         expects_overall_total = bool(template.get("expects_overall_total"))
@@ -1295,6 +1645,7 @@ def _build_front_page_totals_prompt(template: dict[str, object] | None = None) -
             "Do not invent rows, infer hidden totals, or sum values yourself. If a field is not clearly visible, return null, or return an empty list for objective_scores. "
             "For each returned value, copy the exact visible text into value_text, set confidence 0..1, and include short evidence quotes with normalized box coordinates when possible. "
             "If multiple candidate overall totals compete, choose the one most clearly shown as the final overall summary and add a warning. "
+            f"{known_names_hint}"
             "Return strict JSON only."
         )
 
@@ -1309,8 +1660,97 @@ def _build_front_page_totals_prompt(template: dict[str, object] | None = None) -
         "Do not invent rows, infer hidden totals, or sum values yourself. If a field is not clearly visible, return null, or return an empty list for objective_scores. "
         "For each returned value, copy the exact visible text into value_text, set confidence 0..1, and include short evidence quotes with normalized box coordinates when possible. "
         "If multiple candidate overall totals compete, choose the one most clearly shown as the final overall summary and add a warning. "
+        f"{known_names_hint}"
         "Return strict JSON only."
     )
+
+
+def _build_front_page_template_group_prompt(page_count: int) -> str:
+    return (
+        f"You are looking at {page_count} student front pages from the same exam. "
+        "Infer the shared front-page score summary template for the exam, not the students' individual results. "
+        "Return only exam-level structure: exam_name, the canonical outcome/objective labels in order, and whether the summary includes overall awarded total and overall max. "
+        "Use printed summary tables, row labels, and repeated structure across the pages. Ignore student names, individual student scores, handwritten work, and question-body marks. "
+        "If pages disagree, choose the dominant repeated template and record the ambiguity in warnings. "
+        "Keep outcome_codes concise and normalized to the visible labels a teacher would expect, such as OB1, LO2, Outcome 3, K, T, C, or A. "
+        "Return strict JSON only."
+    )
+
+
+def _build_front_page_name_retry_prompt(known_student_names: list[str] | None = None) -> str:
+    return (
+        "Read only the student name from this top header crop of one exam page. "
+        "Use fields like Name or Student near the top of the paper. "
+        "Do not return the exam title, course name, teacher name, or any total score. "
+        "If the name is messy or partly unclear, return the best visible student name and lower the confidence. "
+        "If no student name is visible, return null. "
+        f"{_known_student_names_prompt_hint(known_student_names)}"
+        "Return strict JSON only."
+    )
+
+
+def _build_class_list_names_prompt() -> str:
+    return (
+        "Extract only the student names from this class-list page. "
+        "Return all visible student names in page order. "
+        "Ignore headings, totals, percentages, marks, ids, email addresses, and teacher notes. "
+        "If first and last names appear in separate columns on the same row, combine them into one full student name. "
+        "Return strict JSON only."
+    )
+
+
+def _front_page_candidate_confidence(payload: dict[str, object], key: str) -> float:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        return 0.0
+    confidence = value.get("confidence")
+    try:
+        return float(confidence or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _front_page_candidate_value_text(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("value_text") or "").strip()
+
+
+def _should_retry_front_page_name(payload: dict[str, object]) -> bool:
+    value_text = _front_page_candidate_value_text(payload, "student_name")
+    confidence = _front_page_candidate_confidence(payload, "student_name")
+    return not value_text or confidence < _front_page_name_retry_confidence_threshold()
+
+
+def _merge_front_page_usage(primary: dict[str, object] | None, secondary: dict[str, object] | None) -> dict[str, object] | None:
+    if not primary and not secondary:
+        return None
+    merged = dict(primary or {})
+    merged["call_count"] = int((primary or {}).get("call_count") or 1)
+    merged["normalized_image_bytes_total"] = int((primary or {}).get("normalized_image_bytes_total") or (primary or {}).get("normalized_image_bytes") or 0)
+    merged["normalized_image_width_total"] = int((primary or {}).get("normalized_image_width_total") or (primary or {}).get("normalized_image_width") or 0)
+    merged["normalized_image_height_total"] = int((primary or {}).get("normalized_image_height_total") or (primary or {}).get("normalized_image_height") or 0)
+    if not secondary:
+        return merged
+    merged["call_count"] = int(merged.get("call_count") or 0) + int(secondary.get("call_count") or 1)
+    merged["prompt_tokens"] = int(merged.get("prompt_tokens") or 0) + int(secondary.get("prompt_tokens") or 0)
+    merged["candidate_tokens"] = int(merged.get("candidate_tokens") or 0) + int(secondary.get("candidate_tokens") or 0)
+    merged["thought_tokens"] = int(merged.get("thought_tokens") or 0) + int(secondary.get("thought_tokens") or 0)
+    merged["total_tokens"] = int(merged.get("total_tokens") or 0) + int(secondary.get("total_tokens") or 0)
+    merged["estimated_cost_usd"] = float(merged.get("estimated_cost_usd") or 0.0) + float(secondary.get("estimated_cost_usd") or 0.0)
+    merged["normalized_image_bytes_total"] = int(merged.get("normalized_image_bytes_total") or 0) + int(secondary.get("normalized_image_bytes_total") or secondary.get("normalized_image_bytes") or 0)
+    merged["normalized_image_width_total"] = int(merged.get("normalized_image_width_total") or 0) + int(secondary.get("normalized_image_width_total") or secondary.get("normalized_image_width") or 0)
+    merged["normalized_image_height_total"] = int(merged.get("normalized_image_height_total") or 0) + int(secondary.get("normalized_image_height_total") or secondary.get("normalized_image_height") or 0)
+    if secondary.get("provider"):
+        merged["provider"] = secondary.get("provider")
+    if secondary.get("model"):
+        merged["model"] = secondary.get("model")
+    if secondary.get("thinking_level"):
+        merged["thinking_level"] = secondary.get("thinking_level")
+    if secondary.get("thinking_budget") is not None:
+        merged["thinking_budget"] = secondary.get("thinking_budget")
+    return merged
 
 
 class OpenAIFrontPageTotalsExtractor:
@@ -1333,12 +1773,13 @@ class OpenAIFrontPageTotalsExtractor:
         model_override: str | None = None,
         template: dict[str, object] | None = None,
         thinking_level_override: str | None = None,
+        known_student_names: list[str] | None = None,
     ) -> FrontPageTotalsExtractResult:
         _ = thinking_level_override
         normalized = normalize_key_page_image(image_path)
         schema = build_front_page_totals_response_schema()
         model = model_override or _front_page_model()
-        prompt = _build_front_page_totals_prompt(template)
+        prompt = _build_front_page_totals_prompt(template, known_student_names)
         request_builder = (
             build_front_page_extract_chat_request
             if _front_page_provider_name() == "doubleword"
@@ -1387,6 +1828,108 @@ class GeminiFrontPageTotalsExtractor:
     def __init__(self, timeout_seconds: float = 60.0) -> None:
         self._client = GeminiStructuredVisionClient(timeout_seconds=timeout_seconds)
 
+    def _retry_student_name_from_header(
+        self,
+        *,
+        image_path: Path,
+        model: str,
+        known_student_names: list[str] | None = None,
+    ) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+        header_image = normalize_key_page_header_image(image_path)
+        result = self._client.generate_json(
+            model=model,
+            prompt=_build_front_page_name_retry_prompt(known_student_names),
+            image=header_image.image_bytes,
+            mime_type=header_image.mime_type,
+            response_json_schema=build_front_page_name_retry_response_json_schema(),
+            thinking_budget=0,
+        )
+        parsed_name = str(result.payload.get("student_name") or "").strip() or None
+        if not parsed_name:
+            return None, None
+        retry_payload = {
+            "student_name": {
+                "value_text": parsed_name,
+                "confidence": float(result.payload.get("confidence") or 0.0),
+                "evidence": [
+                    {
+                        "page_number": 1,
+                        "quote": parsed_name,
+                        "x": (result.payload.get("evidence") or {}).get("x") if isinstance(result.payload.get("evidence"), dict) else None,
+                        "y": (result.payload.get("evidence") or {}).get("y") if isinstance(result.payload.get("evidence"), dict) else None,
+                        "w": (result.payload.get("evidence") or {}).get("w") if isinstance(result.payload.get("evidence"), dict) else None,
+                        "h": (result.payload.get("evidence") or {}).get("h") if isinstance(result.payload.get("evidence"), dict) else None,
+                    },
+                ],
+            },
+        }
+        usage = dict(result.usage or {})
+        if usage:
+            estimated_cost_usd = _estimate_gemini_front_page_cost_usd(
+                model=model,
+                prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                candidate_tokens=int(usage.get("candidate_tokens") or 0),
+                thought_tokens=int(usage.get("thought_tokens") or 0),
+            )
+            usage.update({
+                "provider": "gemini",
+                "model": model,
+                "thinking_level": "off",
+                "thinking_budget": 0,
+                "call_count": 1,
+                "normalized_image_bytes": header_image.final_size_bytes,
+                "normalized_image_width": header_image.width,
+                "normalized_image_height": header_image.height,
+                "normalized_image_bytes_total": header_image.final_size_bytes,
+                "normalized_image_width_total": header_image.width,
+                "normalized_image_height_total": header_image.height,
+                "estimated_cost_usd": estimated_cost_usd or 0.0,
+            })
+        return retry_payload, usage
+
+    def extract_template_group(
+        self,
+        image_paths: list[Path],
+        *,
+        model_override: str | None = None,
+        thinking_level_override: str | None = None,
+    ) -> dict[str, object] | None:
+        if not image_paths:
+            return None
+        normalized_images = [normalize_key_page_image(path) for path in image_paths]
+        model = model_override or _front_page_model()
+        thinking_level = _normalize_front_page_gemini_thinking_level(thinking_level_override)
+        thinking_budget = _front_page_gemini_effective_thinking_budget(thinking_level)
+        result = self._client.generate_json_for_images(
+            model=model,
+            prompt=_build_front_page_template_group_prompt(len(normalized_images)),
+            images=[(item.image_bytes, item.mime_type) for item in normalized_images],
+            response_json_schema=build_front_page_template_group_response_schema(),
+            thinking_budget=thinking_budget,
+        )
+        outcome_codes = [
+            str(item).strip()
+            for item in result.payload.get("outcome_codes", [])
+            if str(item).strip()
+        ] if isinstance(result.payload.get("outcome_codes"), list) else []
+        warnings = [str(item) for item in result.payload.get("warnings", [])] if isinstance(result.payload.get("warnings"), list) else []
+        exam_name = str(result.payload.get("exam_name") or "").strip() or None
+        return {
+            "stable": bool(outcome_codes or result.payload.get("expects_overall_total") or result.payload.get("expects_overall_max")),
+            "source": "grouped_front_pages",
+            "seed_pages_processed": len(normalized_images),
+            "seed_limit": len(normalized_images),
+            "sample_count": len(normalized_images),
+            "matched_pages": len(normalized_images),
+            "match_ratio": 1.0,
+            "outcome_codes": outcome_codes,
+            "outcome_count": len(outcome_codes),
+            "expects_overall_total": bool(result.payload.get("expects_overall_total")),
+            "expects_overall_max": bool(result.payload.get("expects_overall_max")),
+            "warnings": warnings,
+            "exam_name": exam_name,
+        }
+
     def extract(
         self,
         image_path: Path,
@@ -1395,13 +1938,14 @@ class GeminiFrontPageTotalsExtractor:
         model_override: str | None = None,
         template: dict[str, object] | None = None,
         thinking_level_override: str | None = None,
+        known_student_names: list[str] | None = None,
     ) -> FrontPageTotalsExtractResult:
         _ = request_id
         normalized = normalize_key_page_image(image_path)
         model = model_override or _front_page_model()
-        prompt = _build_front_page_totals_prompt(template)
+        prompt = _build_front_page_totals_prompt(template, known_student_names)
         thinking_level = _normalize_front_page_gemini_thinking_level(thinking_level_override)
-        thinking_budget = _front_page_gemini_thinking_budget(thinking_level)
+        thinking_budget = _front_page_gemini_effective_thinking_budget(thinking_level)
         result = self._client.generate_json(
             model=model,
             prompt=prompt,
@@ -1423,15 +1967,55 @@ class GeminiFrontPageTotalsExtractor:
                 "model": model,
                 "thinking_level": thinking_level,
                 "thinking_budget": thinking_budget,
+                "call_count": 1,
                 "normalized_image_width": normalized.width,
                 "normalized_image_height": normalized.height,
                 "normalized_image_bytes": normalized.final_size_bytes,
+                "normalized_image_width_total": normalized.width,
+                "normalized_image_height_total": normalized.height,
+                "normalized_image_bytes_total": normalized.final_size_bytes,
                 "estimated_cost_usd": estimated_cost_usd or 0.0,
             })
+        if _should_retry_front_page_name(result.payload):
+            retry_payload, retry_usage = self._retry_student_name_from_header(
+                image_path=image_path,
+                model=model,
+                known_student_names=known_student_names,
+            )
+            if retry_payload:
+                current_confidence = _front_page_candidate_confidence(result.payload, "student_name")
+                retry_confidence = _front_page_candidate_confidence(retry_payload, "student_name")
+                if retry_confidence >= current_confidence:
+                    result.payload["student_name"] = retry_payload["student_name"]
+            usage = _merge_front_page_usage(usage, retry_usage)
         return FrontPageTotalsExtractResult(payload=result.payload, model=model, usage=usage or None)
 
 
 class MockFrontPageTotalsExtractor:
+    def extract_template_group(
+        self,
+        image_paths: list[Path],
+        *,
+        model_override: str | None = None,
+        thinking_level_override: str | None = None,
+    ) -> dict[str, object] | None:
+        _ = (image_paths, model_override, thinking_level_override)
+        return {
+            "stable": True,
+            "source": "grouped_front_pages",
+            "seed_pages_processed": len(image_paths),
+            "seed_limit": len(image_paths),
+            "sample_count": len(image_paths),
+            "matched_pages": len(image_paths),
+            "match_ratio": 1.0,
+            "outcome_codes": ["OB1", "OB2"],
+            "outcome_count": 2,
+            "expects_overall_total": True,
+            "expects_overall_max": True,
+            "warnings": [],
+            "exam_name": "Math 20-1 Unit Test",
+        }
+
     def extract(
         self,
         image_path: Path,
@@ -1440,8 +2024,9 @@ class MockFrontPageTotalsExtractor:
         model_override: str | None = None,
         template: dict[str, object] | None = None,
         thinking_level_override: str | None = None,
+        known_student_names: list[str] | None = None,
     ) -> FrontPageTotalsExtractResult:
-        _ = (image_path, request_id, template, thinking_level_override)
+        _ = (image_path, request_id, template, thinking_level_override, known_student_names)
         return FrontPageTotalsExtractResult(
             payload={
                 "exam_name": {

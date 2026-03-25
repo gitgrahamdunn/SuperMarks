@@ -1160,6 +1160,7 @@ def _finalize_bulk_candidates(
     pages = session.exec(select(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk.id).order_by(BulkUploadPage.page_number)).all()
     if not pages:
         raise HTTPException(status_code=400, detail="No rendered pages available")
+    source_manifest_entries = _parse_bulk_source_manifest(bulk)
     page_map = {p.page_number: p for p in pages}
     max_page = pages[-1].page_number
     used_pages: set[int] = set()
@@ -1202,14 +1203,17 @@ def _finalize_bulk_candidates(
         if bulk.stored_path:
             bulk_extension = Path(bulk.original_filename or "").suffix.lower()
             file_kind = "pdf" if bulk_extension == ".pdf" else "image"
-            content_type = "application/pdf" if file_kind == "pdf" else "image/jpeg"
+            source_entry = source_manifest_entries[0] if source_manifest_entries else {}
+            content_type = str(source_entry.get("content_type") or ("application/pdf" if file_kind == "pdf" else "image/jpeg"))
             file_row = SubmissionFile(
                 submission_id=submission.id,
                 file_kind=file_kind,
                 original_filename=bulk.original_filename,
-                stored_path=bulk.stored_path,
+                stored_path=str(source_entry.get("blob_pathname") or bulk.stored_path),
+                blob_url=str(source_entry.get("blob_url") or ""),
+                blob_pathname=str(source_entry.get("blob_pathname") or ""),
                 content_type=content_type,
-                size_bytes=0,
+                size_bytes=int(source_entry.get("size_bytes") or 0),
             )
             session.add(file_row)
             session.flush()
@@ -1229,13 +1233,16 @@ def _finalize_bulk_candidates(
             src = page_map[page_num]
             if not bulk.stored_path:
                 src_path = Path(src.image_path)
+                source_entry = source_manifest_entries[page_num - 1] if page_num - 1 < len(source_manifest_entries) else {}
                 file_row = SubmissionFile(
                     submission_id=submission.id,
                     file_kind="image",
-                    original_filename=src_path.name,
-                    stored_path=str(src_path),
-                    content_type="image/png",
-                    size_bytes=src_path.stat().st_size if src_path.exists() else 0,
+                    original_filename=str(source_entry.get("original_filename") or src_path.name),
+                    stored_path=str(source_entry.get("blob_pathname") or src_path),
+                    blob_url=str(source_entry.get("blob_url") or ""),
+                    blob_pathname=str(source_entry.get("blob_pathname") or ""),
+                    content_type=str(source_entry.get("content_type") or "image/png"),
+                    size_bytes=int(source_entry.get("size_bytes") or (src_path.stat().st_size if src_path.exists() else 0)),
                 )
                 session.add(file_row)
                 session.flush()
@@ -1722,6 +1729,117 @@ def _bulk_upload_sources_dir(exam_id: int, bulk_upload_id: int) -> Path:
     return settings.data_path / "exams" / str(exam_id) / "bulk" / str(bulk_upload_id) / "source"
 
 
+def _parse_bulk_source_manifest(bulk: ExamBulkUploadFile) -> list[dict[str, object]]:
+    raw = (bulk.source_manifest_json or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("invalid bulk source manifest exam=%s bulk=%s", bulk.exam_id, bulk.id)
+        return []
+    if not isinstance(parsed, list):
+        return []
+    entries: list[dict[str, object]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        local_name = str(item.get("local_name") or "").strip()
+        blob_pathname = str(item.get("blob_pathname") or "").strip()
+        if not local_name or not blob_pathname:
+            continue
+        entries.append(
+            {
+                "local_name": local_name,
+                "original_filename": str(item.get("original_filename") or local_name),
+                "blob_pathname": blob_pathname,
+                "blob_url": str(item.get("blob_url") or ""),
+                "content_type": str(item.get("content_type") or "application/octet-stream"),
+                "size_bytes": int(item.get("size_bytes") or 0),
+            }
+        )
+    return entries
+
+
+def _upload_bulk_source_file(*, exam_id: int, bulk_upload_id: int, local_name: str, payload: bytes, content_type: str) -> dict[str, str]:
+    object_key = f"exams/{exam_id}/bulk/{bulk_upload_id}/source/{local_name}"
+    return upload_bytes(object_key, payload, content_type)
+
+
+def _persist_bulk_upload_sources(
+    *,
+    exam_id: int,
+    bulk_upload_id: int,
+    files: list[UploadFile],
+    output_dir: Path,
+) -> tuple[list[Path], str, str, int, list[dict[str, object]]]:
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
+
+    filenames = [_sanitize_filename(file.filename or f"bulk-upload-{index + 1}") for index, file in enumerate(files)]
+    extensions = [Path(filename).suffix.lower() for filename in filenames]
+    if any(extension not in _ALLOWED_BULK_EXTENSIONS for extension in extensions):
+        raise HTTPException(status_code=400, detail="Bulk upload requires PDF, PNG, or JPG files")
+
+    output_dir = reset_dir(output_dir)
+    manifest: list[dict[str, object]] = []
+
+    if any(extension == ".pdf" for extension in extensions):
+        if len(files) != 1:
+            raise HTTPException(status_code=400, detail="Upload one PDF or multiple images, not both")
+
+        local_name = filenames[0]
+        source_path = output_dir / local_name
+        payload = files[0].file.read()
+        source_path.write_bytes(payload)
+        stored = _upload_bulk_source_file(
+            exam_id=exam_id,
+            bulk_upload_id=bulk_upload_id,
+            local_name=local_name,
+            payload=payload,
+            content_type=files[0].content_type or "application/pdf",
+        )
+        manifest.append(
+            {
+                "local_name": local_name,
+                "original_filename": filenames[0],
+                "blob_pathname": str(stored.get("pathname") or ""),
+                "blob_url": str(stored.get("url") or ""),
+                "content_type": files[0].content_type or "application/pdf",
+                "size_bytes": len(payload),
+            }
+        )
+        return [source_path], filenames[0], source_path.name, 0, manifest
+
+    stored_paths: list[Path] = []
+    for index, (upload, filename) in enumerate(zip(files, filenames, strict=True), start=1):
+        local_name = f"source_{index:04d}{Path(filename).suffix.lower()}"
+        source_path = output_dir / local_name
+        payload = upload.file.read()
+        source_path.write_bytes(payload)
+        stored = _upload_bulk_source_file(
+            exam_id=exam_id,
+            bulk_upload_id=bulk_upload_id,
+            local_name=local_name,
+            payload=payload,
+            content_type=upload.content_type or "application/octet-stream",
+        )
+        manifest.append(
+            {
+                "local_name": local_name,
+                "original_filename": filename,
+                "blob_pathname": str(stored.get("pathname") or ""),
+                "blob_url": str(stored.get("url") or ""),
+                "content_type": upload.content_type or "application/octet-stream",
+                "size_bytes": len(payload),
+            }
+        )
+        stored_paths.append(source_path)
+
+    label = filenames[0] if len(filenames) == 1 else f"{len(filenames)} uploaded images"
+    return stored_paths, label, "", len(stored_paths), manifest
+
+
 def _store_bulk_upload_files(files: list[UploadFile], output_dir: Path) -> tuple[list[Path], str, str, int]:
     if not files:
         raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
@@ -1753,6 +1871,17 @@ def _store_bulk_upload_files(files: list[UploadFile], output_dir: Path) -> tuple
 
 def _render_stored_bulk_upload_files(bulk: ExamBulkUploadFile, output_dir: Path) -> tuple[list[Path], int]:
     source_dir = _bulk_upload_sources_dir(bulk.exam_id, bulk.id or 0)
+    if not source_dir.exists():
+        manifest_entries = _parse_bulk_source_manifest(bulk)
+        if manifest_entries:
+            source_dir.mkdir(parents=True, exist_ok=True)
+            for entry in manifest_entries:
+                local_name = str(entry["local_name"])
+                target = source_dir / local_name
+                if target.exists():
+                    continue
+                content, _content_type = _run_async(download_blob_bytes(str(entry["blob_pathname"])))
+                target.write_bytes(content)
     if not source_dir.exists():
         raise HTTPException(status_code=400, detail="Bulk upload source files are missing")
 
@@ -2090,11 +2219,17 @@ def _enqueue_intake_job_for_exam(
     source_dir = _bulk_upload_sources_dir(exam.id or 0, bulk.id or 0)
     try:
         store_started = time.perf_counter()
-        _stored_paths, filename, stored_path, page_count = _store_bulk_upload_files(upload_files, source_dir)
+        _stored_paths, filename, stored_path, page_count, source_manifest = _persist_bulk_upload_sources(
+            exam_id=exam.id or 0,
+            bulk_upload_id=bulk.id or 0,
+            files=upload_files,
+            output_dir=source_dir,
+        )
         store_upload_ms = round((time.perf_counter() - store_started) * 1000, 1)
 
         bulk.original_filename = filename
         bulk.stored_path = stored_path
+        bulk.source_manifest_json = json.dumps(source_manifest)
         session.add(bulk)
 
         exam.status = ExamStatus.DRAFT

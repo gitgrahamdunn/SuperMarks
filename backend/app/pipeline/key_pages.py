@@ -48,6 +48,37 @@ def normalize_key_page_image(image_path: Path, max_dimension: int = _MAX_DIMENSI
     )
 
 
+def normalize_key_page_header_image(
+    image_path: Path,
+    top_fraction: float = 0.38,
+    max_dimension: int = _MAX_DIMENSION,
+    jpeg_quality: int = _JPEG_QUALITY,
+) -> NormalizedImage:
+    """Normalize only the top header region of a page for lightweight name reads."""
+
+    original_size = image_path.stat().st_size
+    bounded_fraction = min(max(top_fraction, 0.15), 0.6)
+    with Image.open(image_path) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+        header_height = max(1, int(round(image.height * bounded_fraction)))
+        image = image.crop((0, 0, image.width, header_height))
+        if image.width > max_dimension or image.height > max_dimension:
+            image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=jpeg_quality, optimize=True)
+
+    payload = output.getvalue()
+    return NormalizedImage(
+        image_bytes=payload,
+        mime_type="image/jpeg",
+        width=image.width,
+        height=image.height,
+        original_size_bytes=original_size,
+        final_size_bytes=len(payload),
+    )
+
+
 def batch_image_paths(image_paths: list[Path], max_images: int = 6) -> list[list[Path]]:
     """Split page paths into chunks of max_images."""
 

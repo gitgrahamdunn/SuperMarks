@@ -71,12 +71,6 @@ console.log('[SuperMarks] API_BASE=', import.meta.env.VITE_API_BASE_URL || '<mis
 console.log('[SuperMarks] HAS_API_KEY=', Boolean(import.meta.env.VITE_BACKEND_API_KEY));
 void reloadIfBuildIsStale();
 
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') {
-    void reloadIfBuildIsStale();
-  }
-});
-
 if (!apiConfigError) {
   void checkBackendApiContract().then((result) => {
     if (!result.ok) {

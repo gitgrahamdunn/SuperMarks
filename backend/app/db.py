@@ -106,8 +106,11 @@ def create_db_and_tables() -> None:
     _ensure_column("submission", "last_name", "last_name VARCHAR DEFAULT ''")
     _ensure_column("submission", "front_page_totals_json", "front_page_totals_json TEXT")
     _ensure_column("submission", "front_page_candidates_json", "front_page_candidates_json TEXT")
+    _ensure_column("submission", "front_page_usage_json", "front_page_usage_json TEXT")
     _ensure_column("submission", "front_page_reviewed_at", "front_page_reviewed_at VARCHAR")
     _ensure_column("exam", "front_page_template_json", "front_page_template_json TEXT")
+    _ensure_column("exam", "class_list_json", "class_list_json TEXT")
+    _ensure_column("exam", "class_list_source_json", "class_list_source_json TEXT")
     _ensure_column("examintakejob", "attempt_count", "attempt_count INTEGER DEFAULT 0")
     _ensure_column("examintakejob", "runner_id", "runner_id VARCHAR")
     _ensure_column("examintakejob", "lease_expires_at", "lease_expires_at VARCHAR")
@@ -122,6 +125,8 @@ def create_db_and_tables() -> None:
     _ensure_column("examintakejob", "review_ready", "review_ready BOOLEAN DEFAULT 0")
     _ensure_column("examintakejob", "thinking_level", "thinking_level VARCHAR DEFAULT 'low'")
     _ensure_column("examintakejob", "last_progress_at", "last_progress_at VARCHAR")
+    _ensure_column("bulkuploadpage", "front_page_usage_json", "front_page_usage_json TEXT")
+    _ensure_column("exambulkuploadfile", "source_manifest_json", "source_manifest_json TEXT")
 
 
 

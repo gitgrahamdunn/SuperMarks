@@ -1,6 +1,6 @@
 import { DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-const ACCEPTED_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
+const DEFAULT_ACCEPTED_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'];
 
 interface FileUploaderProps {
   files: File[];
@@ -10,6 +10,8 @@ interface FileUploaderProps {
   onReject: (message: string) => void;
   multiple?: boolean;
   singularLabel?: string;
+  acceptedTypes?: string[];
+  acceptedLabel?: string;
 }
 
 function formatBytes(bytes: number): string {
@@ -24,6 +26,8 @@ export function FileUploader({
   onReject,
   multiple = true,
   singularLabel = 'file',
+  acceptedTypes = DEFAULT_ACCEPTED_TYPES,
+  acceptedLabel = 'PDF, PNG, JPG, JPEG',
 }: FileUploaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -52,7 +56,7 @@ export function FileUploader({
     const validFiles: File[] = [];
 
     for (const file of next) {
-      if (!ACCEPTED_TYPES.includes(file.type)) {
+      if (file.type && !acceptedTypes.includes(file.type)) {
         onReject(`${file.name} is not a supported file type.`);
         continue;
       }
@@ -101,13 +105,13 @@ export function FileUploader({
         onClick={() => !disabled && inputRef.current?.click()}
       >
         <p><strong>{multiple ? 'Drag & drop files' : `Drag & drop one ${singularLabel}`}</strong> or click to browse.</p>
-        <p className="subtle-text">Accepted: PDF, PNG, JPG, JPEG</p>
+        <p className="subtle-text">Accepted: {acceptedLabel}</p>
         <input
           ref={inputRef}
           id="exam-key-files"
           name="exam-key-files"
           type="file"
-          accept="application/pdf,image/png,image/jpeg,image/jpg"
+          accept={acceptedTypes.join(',')}
           multiple={multiple}
           disabled={disabled}
           onChange={(event) => addFiles(event.target.files || [])}
@@ -128,7 +132,7 @@ export function FileUploader({
                     {isImage && imagePreview ? (
                       <img src={imagePreview.url} alt={`${file.name} preview`} className="file-thumb" />
                     ) : (
-                      <span className="file-chip">PDF</span>
+                      <span className="file-chip">{file.name.split('.').pop()?.toUpperCase() || 'FILE'}</span>
                     )}
                     <span>{file.name} ({formatBytes(file.size)})</span>
                   </div>

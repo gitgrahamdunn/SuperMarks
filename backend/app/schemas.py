@@ -14,12 +14,23 @@ class ExamCreate(BaseModel):
     name: str = ""
 
 
+class ClassListRead(BaseModel):
+    id: int | None = None
+    name: str = ""
+    created_at: datetime | None = None
+    names: list[str] = Field(default_factory=list)
+    source: str = ""
+    entry_count: int = 0
+    filenames: list[str] = Field(default_factory=list)
+
+
 class ExamRead(BaseModel):
     id: int
     name: str
     created_at: datetime
     teacher_style_profile_json: str | None
     status: ExamStatus
+    class_list: ClassListRead | None = None
     intake_job: "ExamIntakeJobRead | None" = None
 
 
@@ -339,6 +350,37 @@ class ExamIntakeJobRead(BaseModel):
     last_progress_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class FrontPageUsageEntryRead(BaseModel):
+    submission_id: int
+    student_name: str
+    provider: str = ""
+    model: str = ""
+    thinking_level: str = ""
+    thinking_budget: int = 0
+    prompt_tokens: int = 0
+    output_tokens: int = 0
+    thought_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    normalized_image_width: int = 0
+    normalized_image_height: int = 0
+    normalized_image_bytes: int = 0
+
+
+class FrontPageUsageReportRead(BaseModel):
+    exam_id: int
+    exam_name: str
+    entry_count: int = 0
+    prompt_tokens: int = 0
+    output_tokens: int = 0
+    thought_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    avg_tokens_per_image: float = 0.0
+    avg_cost_per_image_usd: float = 0.0
+    entries: list[FrontPageUsageEntryRead] = Field(default_factory=list)
 
 
 class ObjectiveTotalRead(BaseModel):

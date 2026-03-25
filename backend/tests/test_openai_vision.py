@@ -4,12 +4,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 from app.ai.openai_vision import (
+    GeminiFrontPageTotalsExtractor,
     OpenAIFrontPageTotalsExtractor,
     OpenAIBulkNameDetector,
     SchemaBuildError,
+    _class_list_model,
     _estimate_gemini_front_page_cost_usd,
+    _front_page_gemini_effective_thinking_budget,
     _front_page_model,
     _front_page_gemini_thinking_budget,
     _front_page_provider_name,
@@ -148,6 +152,15 @@ def test_bulk_name_schema_is_strict_and_descriptive() -> None:
     assert "page header" in schema["properties"]["exam_name"]["description"].lower()
 
 
+def test_class_list_model_defaults_to_gpt5_mini_when_openai_key_is_available(monkeypatch) -> None:
+    monkeypatch.delenv("SUPERMARKS_CLASS_LIST_MODEL", raising=False)
+    monkeypatch.delenv("SUPERMARKS_CLASS_LIST_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+
+    assert _class_list_model() == "gpt-5-mini"
+
+
 def test_normalize_front_page_gemini_thinking_level_respects_valid_values(monkeypatch) -> None:
     monkeypatch.setenv("SUPERMARKS_FRONT_PAGE_GEMINI_DEFAULT_THINKING_LEVEL", "med")
 
@@ -167,6 +180,81 @@ def test_front_page_gemini_thinking_budget_uses_configured_levels(monkeypatch) -
     assert _front_page_gemini_thinking_budget("low") == 64
     assert _front_page_gemini_thinking_budget("med") == 256
     assert _front_page_gemini_thinking_budget("high") == 1024
+
+
+def test_front_page_gemini_thinking_budget_defaults_shift_upward(monkeypatch) -> None:
+    monkeypatch.delenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_LOW", raising=False)
+    monkeypatch.delenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_MED", raising=False)
+    monkeypatch.delenv("SUPERMARKS_FRONT_PAGE_GEMINI_THINKING_BUDGET_HIGH", raising=False)
+
+    assert _front_page_gemini_thinking_budget("low") == 512
+    assert _front_page_gemini_thinking_budget("med") == 1024
+    assert _front_page_gemini_thinking_budget("high") == 2048
+
+
+def test_front_page_gemini_effective_thinking_budget_caps_high_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("SUPERMARKS_FRONT_PAGE_GEMINI_MAX_SAFE_THINKING_BUDGET", raising=False)
+
+    assert _front_page_gemini_effective_thinking_budget("low") == 512
+    assert _front_page_gemini_effective_thinking_budget("med") == 1024
+    assert _front_page_gemini_effective_thinking_budget("high") == 2048
+
+
+def test_gemini_front_page_extractor_retries_low_confidence_name_with_header_crop(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    image_path = tmp_path / "front-page.png"
+    Image.new("RGB", (1200, 1800), color=(245, 245, 245)).save(image_path, format="PNG")
+
+    extractor = GeminiFrontPageTotalsExtractor()
+    calls: list[str] = []
+
+    class FakeClient:
+        def generate_json(self, **kwargs):
+            calls.append(str(kwargs["prompt"]))
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    payload={
+                        "student_name": {
+                            "value_text": "Math 20-1 Unit Test",
+                            "confidence": 0.31,
+                            "evidence": [{"page_number": 1, "quote": "Math 20-1 Unit Test", "x": 0.1, "y": 0.05, "w": 0.4, "h": 0.06}],
+                        },
+                        "overall_marks_awarded": {
+                            "value_text": "42",
+                            "confidence": 0.95,
+                            "evidence": [{"page_number": 1, "quote": "42/50", "x": 0.6, "y": 0.1, "w": 0.1, "h": 0.05}],
+                        },
+                        "overall_max_marks": {
+                            "value_text": "50",
+                            "confidence": 0.95,
+                            "evidence": [{"page_number": 1, "quote": "42/50", "x": 0.6, "y": 0.1, "w": 0.1, "h": 0.05}],
+                        },
+                        "objective_scores": [],
+                        "warnings": [],
+                    },
+                    usage={"prompt_tokens": 100, "candidate_tokens": 20, "thought_tokens": 10, "total_tokens": 130},
+                )
+            return SimpleNamespace(
+                payload={
+                    "student_name": "Jordan Lee",
+                    "confidence": 0.92,
+                    "evidence": None,
+                    "warnings": [],
+                },
+                usage={"prompt_tokens": 30, "candidate_tokens": 5, "thought_tokens": 0, "total_tokens": 35},
+            )
+
+    extractor._client = FakeClient()
+
+    result = extractor.extract(image_path=image_path, request_id="test", known_student_names=["Jordan Lee", "Avery Stone"])
+
+    assert result.payload["student_name"]["value_text"] == "Jordan Lee"
+    assert result.payload["overall_marks_awarded"]["value_text"] == "42"
+    assert result.usage["call_count"] == 2
+    assert result.usage["prompt_tokens"] == 130
+    assert any("Jordan Lee" in prompt for prompt in calls)
+    assert any("top header crop" in prompt.lower() for prompt in calls)
+    assert any("read only the student name" in prompt.lower() for prompt in calls)
 
 
 def test_estimate_gemini_front_page_cost_usd_counts_thought_tokens() -> None:

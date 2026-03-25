@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -47,6 +48,7 @@ from app.ai.openai_vision import (
     get_front_page_totals_extractor,
 )
 from app.reporting import accumulate_objective_totals, front_page_objective_totals, front_page_totals_read, objective_totals_read
+from app.class_lists import nearest_known_student_name
 from app.name_utils import compose_student_name, normalize_student_name, submission_display_name, submission_name_parts
 from app.reporting_service import invalidate_exam_reporting_cache
 from app.schemas import (
@@ -84,6 +86,24 @@ _FRONT_PAGE_CANDIDATE_LOCKS_GUARD = threading.Lock()
 _FRONT_PAGE_TEMPLATE_SEED_LIMIT = max(1, int(os.getenv("SUPERMARKS_FRONT_PAGE_TEMPLATE_SEED_LIMIT", "3") or "3"))
 _FRONT_PAGE_TEMPLATE_MIN_STABLE_SAMPLES = max(1, int(os.getenv("SUPERMARKS_FRONT_PAGE_TEMPLATE_MIN_STABLE_SAMPLES", "2") or "2"))
 _FRONT_PAGE_TEMPLATE_STABLE_THRESHOLD = float(os.getenv("SUPERMARKS_FRONT_PAGE_TEMPLATE_STABLE_THRESHOLD", "0.9") or "0.9")
+_FRONT_PAGE_TEMPLATE_FILL_THRESHOLD = float(os.getenv("SUPERMARKS_FRONT_PAGE_TEMPLATE_FILL_THRESHOLD", "0.5") or "0.5")
+_FRONT_PAGE_EXTRACT_ATTEMPTS = max(1, int(os.getenv("SUPERMARKS_FRONT_PAGE_EXTRACT_ATTEMPTS", "3") or "3"))
+
+
+def _exam_known_student_names(exam_id: int, session: Session) -> list[str]:
+    exam = session.get(Exam, exam_id)
+    if not exam:
+        return []
+    raw_payload = (exam.class_list_json or "").strip()
+    if not raw_payload:
+        return []
+    try:
+        parsed = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()]
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -157,6 +177,40 @@ def _build_template_from_candidates(
     overall_max_votes = sum(1 for _, candidate in dominant_rows if candidate.overall_max_marks is not None)
     dominant_submission_ids = [submission.id for submission, _ in dominant_rows if submission.id is not None]
 
+    def most_common_text(values: list[str]) -> str | None:
+        counts: dict[str, int] = {}
+        for value in values:
+            normalized = value.strip()
+            if not normalized:
+                continue
+            counts[normalized] = counts.get(normalized, 0) + 1
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda item: (item[1], len(item[0]), item[0]))[0]
+
+    outcome_display_codes: list[str] = []
+    outcome_max_marks: list[str | None] = []
+    for index, normalized_code in enumerate(dominant_signature):
+        label_votes: list[str] = []
+        max_votes: list[str] = []
+        for _, candidate in dominant_rows:
+            if index >= len(candidate.objective_scores):
+                continue
+            row = candidate.objective_scores[index]
+            if _normalize_outcome_code(row.objective_code.value_text) != normalized_code:
+                continue
+            label_votes.append(row.objective_code.value_text)
+            if row.max_marks and row.max_marks.value_text.strip():
+                max_votes.append(row.max_marks.value_text)
+        outcome_display_codes.append(most_common_text(label_votes) or normalized_code)
+        outcome_max_marks.append(most_common_text(max_votes))
+
+    overall_max_votes_values = [
+        candidate.overall_max_marks.value_text
+        for _, candidate in dominant_rows
+        if candidate.overall_max_marks and candidate.overall_max_marks.value_text.strip()
+    ]
+
     return {
         "stable": stable,
         "seed_pages_processed": len(seed_rows),
@@ -165,11 +219,104 @@ def _build_template_from_candidates(
         "matched_pages": dominant_count,
         "match_ratio": match_ratio,
         "outcome_codes": list(dominant_signature),
+        "outcome_display_codes": outcome_display_codes,
+        "outcome_max_marks": outcome_max_marks,
         "outcome_count": len(dominant_signature),
         "expects_overall_total": overall_total_votes >= max(1, round(dominant_count / 2)),
         "expects_overall_max": overall_max_votes >= max(1, round(dominant_count / 2)),
+        "overall_max_marks_value_text": most_common_text(overall_max_votes_values),
         "source_submission_ids": dominant_submission_ids,
     }
+
+
+def build_front_page_consensus_template_from_candidates(
+    candidates: list[FrontPageTotalsCandidateRead],
+) -> dict[str, object] | None:
+    seed_rows = [(Submission(id=index + 1, exam_id=0), candidate) for index, candidate in enumerate(candidates)]
+    return _build_template_from_candidates(seed_rows, seed_limit=len(seed_rows))
+
+
+def _template_supports_consensus_fill(template: dict[str, object] | None) -> bool:
+    if not template:
+        return False
+    try:
+        match_ratio = float(template.get("match_ratio") or 0.0)
+    except (TypeError, ValueError):
+        match_ratio = 0.0
+    sample_count = int(template.get("sample_count") or 0)
+    outcome_codes = template.get("outcome_codes")
+    return sample_count >= 2 and match_ratio >= _FRONT_PAGE_TEMPLATE_FILL_THRESHOLD and isinstance(outcome_codes, list)
+
+
+def _template_candidate_value(value_text: str) -> FrontPageCandidateValue:
+    return FrontPageCandidateValue(value_text=value_text, confidence=0.0, evidence=[])
+
+
+def apply_front_page_template_fill(
+    candidate: FrontPageTotalsCandidateRead,
+    template: dict[str, object] | None,
+) -> FrontPageTotalsCandidateRead:
+    if not _template_supports_consensus_fill(template):
+        return candidate
+
+    outcome_codes = [str(item).strip() for item in template.get("outcome_codes", []) if str(item).strip()]
+    display_codes = [str(item).strip() for item in template.get("outcome_display_codes", []) if str(item).strip()]
+    max_marks_values = list(template.get("outcome_max_marks") or [])
+    overall_max_value = str(template.get("overall_max_marks_value_text") or "").strip() or None
+    if not outcome_codes and not overall_max_value:
+        return candidate
+
+    existing_by_code = {
+        _normalize_outcome_code(row.objective_code.value_text): row
+        for row in candidate.objective_scores
+        if row.objective_code and row.objective_code.value_text.strip()
+    }
+    filled_rows: list[FrontPageObjectiveScoreCandidate] = []
+    filled_count = 0
+
+    for index, normalized_code in enumerate(outcome_codes):
+        canonical_label = display_codes[index] if index < len(display_codes) and display_codes[index] else normalized_code
+        expected_max = None
+        if index < len(max_marks_values):
+            expected_max = str(max_marks_values[index] or "").strip() or None
+        row = existing_by_code.pop(normalized_code, None)
+        if row is None:
+            filled_rows.append(
+                FrontPageObjectiveScoreCandidate(
+                    objective_code=_template_candidate_value(canonical_label),
+                    marks_awarded=_template_candidate_value("0"),
+                    max_marks=_template_candidate_value(expected_max) if expected_max else None,
+                )
+            )
+            filled_count += 1
+            continue
+        normalized_row = row.model_copy(deep=True)
+        if not normalized_row.objective_code.value_text.strip():
+            normalized_row.objective_code = _template_candidate_value(canonical_label)
+        if normalized_row.max_marks is None and expected_max:
+            normalized_row.max_marks = _template_candidate_value(expected_max)
+        filled_rows.append(normalized_row)
+
+    extra_rows = [row.model_copy(deep=True) for row in existing_by_code.values()]
+    warnings = list(candidate.warnings)
+    if filled_count > 0:
+        warnings.append(f"Filled {filled_count} missing outcome row(s) from the dominant exam template as 0/max.")
+    if extra_rows:
+        warnings.append("Page includes extra outcome rows beyond the dominant exam template.")
+
+    overall_max_marks = candidate.overall_max_marks.model_copy(deep=True) if candidate.overall_max_marks else None
+    if overall_max_marks is None and overall_max_value:
+        overall_max_marks = _template_candidate_value(overall_max_value)
+        warnings.append("Filled missing overall max from the dominant exam template.")
+
+    return FrontPageTotalsCandidateRead(
+        student_name=candidate.student_name.model_copy(deep=True) if candidate.student_name else None,
+        overall_marks_awarded=candidate.overall_marks_awarded.model_copy(deep=True) if candidate.overall_marks_awarded else None,
+        overall_max_marks=overall_max_marks,
+        objective_scores=[*filled_rows, *extra_rows] if outcome_codes else candidate.objective_scores,
+        warnings=warnings,
+        source=candidate.source,
+    )
 
 
 def _sync_exam_front_page_status(exam_id: int, session: Session) -> None:
@@ -767,6 +914,30 @@ def _ensure_page_preview(image_path: Path) -> Path:
     return build_page_preview_image(image_path, preview_path)
 
 
+def _ensure_submission_page_image(
+    submission: Submission,
+    page_number: int,
+    session: Session,
+) -> SubmissionPage:
+    page = session.exec(
+        select(SubmissionPage).where(SubmissionPage.submission_id == submission.id, SubmissionPage.page_number == page_number)
+    ).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    image_path = Path(page.image_path)
+    if image_path.exists():
+        return page
+
+    _build_pages_for_submission(submission, session)
+    rebuilt = session.exec(
+        select(SubmissionPage).where(SubmissionPage.submission_id == submission.id, SubmissionPage.page_number == page_number)
+    ).first()
+    if not rebuilt or not Path(rebuilt.image_path).exists():
+        raise HTTPException(status_code=404, detail="Page image not found")
+    return rebuilt
+
+
 @router.get("/{submission_id}/page/{page_number}")
 def get_page_image(submission_id: int, page_number: int, session: Session = Depends(get_session)) -> FileResponse:
     submission = session.get(Submission, submission_id)
@@ -779,9 +950,8 @@ def get_page_image(submission_id: int, page_number: int, session: Session = Depe
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
+    page = _ensure_submission_page_image(submission, page_number, session)
     image_path = Path(page.image_path)
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Page image not found")
 
     return FileResponse(image_path)
 
@@ -798,6 +968,7 @@ def get_page_preview_image(submission_id: int, page_number: int, session: Sessio
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
+    page = _ensure_submission_page_image(submission, page_number, session)
     preview_path = _ensure_page_preview(Path(page.image_path))
     return FileResponse(preview_path, media_type="image/jpeg")
 
@@ -888,6 +1059,12 @@ def _front_page_candidate_cache_read(submission: Submission) -> FrontPageTotalsC
         return None
 
 
+def _front_page_candidate_is_retryable_failure(candidate: FrontPageTotalsCandidateRead | None) -> bool:
+    if not candidate:
+        return False
+    return (candidate.source or "").startswith("extractor_unavailable")
+
+
 def _latest_exam_front_page_thinking_level(exam_id: int, session: Session) -> str | None:
     latest_job = session.exec(
         select(ExamIntakeJob)
@@ -911,8 +1088,14 @@ def _extract_front_page_candidates(
     with extraction_lock:
         session.refresh(submission)
         cached_payload = _front_page_candidate_cache_read(submission)
-        if cached_payload is not None:
+        if cached_payload is not None and not _front_page_candidate_is_retryable_failure(cached_payload):
             return cached_payload
+        if cached_payload is not None:
+            submission.front_page_candidates_json = None
+            submission.front_page_usage_json = None
+            session.add(submission)
+            session.commit()
+            session.refresh(submission)
 
         page = session.exec(
             select(SubmissionPage).where(SubmissionPage.submission_id == submission.id).order_by(SubmissionPage.page_number)
@@ -926,29 +1109,69 @@ def _extract_front_page_candidates(
 
         extractor = get_front_page_totals_extractor()
         thinking_level = _latest_exam_front_page_thinking_level(submission.exam_id, session)
-        try:
+        known_student_names = _exam_known_student_names(submission.exam_id, session)
+        def _run_extract():
             try:
-                result = extractor.extract(
+                return extractor.extract(
                     image_path=image_path,
                     request_id=f"submission-{submission.id}-front-page",
                     model_override=model_override,
                     template=template,
                     thinking_level_override=thinking_level,
+                    known_student_names=known_student_names,
                 )
             except TypeError:
-                result = extractor.extract(image_path=image_path, request_id=f"submission-{submission.id}-front-page")
-        except OpenAIRequestError as exc:
-            logger.warning("front-page totals extractor failed for submission %s: %s", submission.id, exc)
+                try:
+                    return extractor.extract(
+                        image_path=image_path,
+                        request_id=f"submission-{submission.id}-front-page",
+                        model_override=model_override,
+                        template=template,
+                        thinking_level_override=thinking_level,
+                    )
+                except TypeError:
+                    return extractor.extract(
+                        image_path=image_path,
+                        request_id=f"submission-{submission.id}-front-page",
+                    )
+        last_provider_error: OpenAIRequestError | None = None
+        for attempt in range(1, _FRONT_PAGE_EXTRACT_ATTEMPTS + 1):
+            try:
+                result = _run_extract()
+                break
+            except OpenAIRequestError as exc:
+                last_provider_error = exc
+                logger.warning(
+                    "front-page totals extractor failed for submission %s attempt %s/%s: %s",
+                    submission.id,
+                    attempt,
+                    _FRONT_PAGE_EXTRACT_ATTEMPTS,
+                    exc,
+                )
+                if attempt < _FRONT_PAGE_EXTRACT_ATTEMPTS:
+                    time.sleep(0.35 * attempt)
+            except Exception:  # pragma: no cover
+                logger.exception(
+                    "unexpected front-page totals extractor failure for submission %s attempt %s/%s",
+                    submission.id,
+                    attempt,
+                    _FRONT_PAGE_EXTRACT_ATTEMPTS,
+                )
+                if attempt < _FRONT_PAGE_EXTRACT_ATTEMPTS:
+                    time.sleep(0.35 * attempt)
+                else:
+                    result = None
+        else:
+            result = None
+
+        if result is None:
+            if last_provider_error is not None:
+                logger.warning("front-page totals extractor gave up for submission %s after retries", submission.id)
+            else:
+                logger.warning("front-page totals extractor exhausted retries for submission %s", submission.id)
             return FrontPageTotalsCandidateRead(
                 objective_scores=[],
                 warnings=["Extractor unavailable for this paper right now. You can still confirm totals manually."],
-                source="extractor_unavailable",
-            )
-        except Exception:  # pragma: no cover
-            logger.exception("unexpected front-page totals extractor failure for submission %s", submission.id)
-            return FrontPageTotalsCandidateRead(
-                objective_scores=[],
-                warnings=["Extractor failed for this paper. You can still confirm totals manually."],
                 source="extractor_unavailable",
             )
 
@@ -996,7 +1219,13 @@ def _extract_front_page_candidates(
             warnings=[str(item) for item in warnings] if isinstance(warnings, list) else [],
             source=f"{source_model}:{phase}" if source_model else phase,
         )
+        if known_student_names and candidate_payload.student_name and candidate_payload.student_name.value_text.strip():
+            matched_name = nearest_known_student_name(candidate_payload.student_name.value_text, known_student_names)
+            if matched_name and matched_name != candidate_payload.student_name.value_text:
+                candidate_payload.student_name.value_text = matched_name
+        candidate_payload = apply_front_page_template_fill(candidate_payload, template)
         submission.front_page_candidates_json = candidate_payload.model_dump_json()
+        submission.front_page_usage_json = json.dumps(result.usage) if result.usage else None
         session.add(submission)
         session.commit()
         return candidate_payload
@@ -1018,12 +1247,16 @@ def _ensure_exam_front_page_template(exam_id: int, session: Session) -> tuple[di
         return _front_page_template_cache_read(exam), []
 
     template_payload = _front_page_template_cache_read(exam)
+    if template_payload and bool(template_payload.get("stable")):
+        return template_payload, []
     seed_rows: list[tuple[Submission, FrontPageTotalsCandidateRead]] = []
     changed = False
     seed_limit = min(_FRONT_PAGE_TEMPLATE_SEED_LIMIT, len(front_page_submissions))
 
     for submission in front_page_submissions[:seed_limit]:
         cached_payload = _front_page_candidate_cache_read(submission)
+        if _front_page_candidate_is_retryable_failure(cached_payload):
+            cached_payload = None
         if cached_payload is None:
             cached_payload = _extract_front_page_candidates(
                 submission,
@@ -1053,13 +1286,13 @@ def get_or_create_front_page_totals_candidates(submission_id: int, session: Sess
         raise HTTPException(status_code=404, detail="Submission not found")
 
     cached_payload = _front_page_candidate_cache_read(submission)
-    if cached_payload is not None:
+    if cached_payload is not None and not _front_page_candidate_is_retryable_failure(cached_payload):
         return cached_payload
 
     template_payload, seed_ids = _ensure_exam_front_page_template(submission.exam_id, session)
     session.refresh(submission)
     cached_payload = _front_page_candidate_cache_read(submission)
-    if cached_payload is not None:
+    if cached_payload is not None and not _front_page_candidate_is_retryable_failure(cached_payload):
         return cached_payload
 
     is_seed_submission = submission.id in seed_ids
