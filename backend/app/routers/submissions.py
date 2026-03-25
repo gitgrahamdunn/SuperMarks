@@ -922,11 +922,7 @@ def _ensure_submission_page_image(
     page = session.exec(
         select(SubmissionPage).where(SubmissionPage.submission_id == submission.id, SubmissionPage.page_number == page_number)
     ).first()
-    if not page:
-        raise HTTPException(status_code=404, detail="Page not found")
-
-    image_path = Path(page.image_path)
-    if image_path.exists():
+    if page and Path(page.image_path).exists():
         return page
 
     _build_pages_for_submission(submission, session)
@@ -944,12 +940,6 @@ def get_page_image(submission_id: int, page_number: int, session: Session = Depe
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    page = session.exec(
-        select(SubmissionPage).where(SubmissionPage.submission_id == submission_id, SubmissionPage.page_number == page_number)
-    ).first()
-    if not page:
-        raise HTTPException(status_code=404, detail="Page not found")
-
     page = _ensure_submission_page_image(submission, page_number, session)
     image_path = Path(page.image_path)
 
@@ -961,12 +951,6 @@ def get_page_preview_image(submission_id: int, page_number: int, session: Sessio
     submission = session.get(Submission, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
-
-    page = session.exec(
-        select(SubmissionPage).where(SubmissionPage.submission_id == submission_id, SubmissionPage.page_number == page_number)
-    ).first()
-    if not page:
-        raise HTTPException(status_code=404, detail="Page not found")
 
     page = _ensure_submission_page_image(submission, page_number, session)
     preview_path = _ensure_page_preview(Path(page.image_path))

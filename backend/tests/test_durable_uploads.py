@@ -27,6 +27,15 @@ def _tiny_png_bytes() -> bytes:
     )
 
 
+def _tiny_pdf_bytes() -> bytes:
+    import fitz  # pymupdf
+
+    doc = fitz.open()
+    page = doc.new_page(width=200, height=200)
+    page.insert_text((36, 72), "Jordan 14/20")
+    return doc.tobytes()
+
+
 def test_exam_intake_persists_bulk_upload_source_manifest(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")
@@ -185,3 +194,57 @@ def test_submission_page_route_rebuilds_missing_page_from_blob_backed_source(tmp
     with Session(db.engine) as session:
         rebuilt = session.exec(select(SubmissionPage).where(SubmissionPage.submission_id == 1, SubmissionPage.page_number == 1)).one()
         assert Path(rebuilt.image_path).exists()
+
+
+def test_submission_preview_route_rebuilds_pdf_pages_from_blob_backed_source(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+
+    with Session(db.engine) as session:
+        exam = Exam(name="PDF Preview Rebuild")
+        session.add(exam)
+        session.flush()
+
+        submission = Submission(
+            exam_id=exam.id,
+            student_name="Jordan",
+            status=SubmissionStatus.UPLOADED,
+        )
+        session.add(submission)
+        session.flush()
+
+        session.add(
+            SubmissionFile(
+                submission_id=submission.id,
+                file_kind="pdf",
+                original_filename="student-1.pdf",
+                stored_path="exams/1/submissions/1/student-1.pdf",
+                blob_pathname="exams/1/submissions/1/student-1.pdf",
+                blob_url="https://blob.example/exams/1/submissions/1/student-1.pdf",
+                content_type="application/pdf",
+                size_bytes=len(_tiny_pdf_bytes()),
+            )
+        )
+        session.commit()
+
+    async def fake_materialize_object_to_path(key: str, cache_dir: Path) -> Path:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target = cache_dir / "source.pdf"
+        target.write_bytes(_tiny_pdf_bytes())
+        return target
+
+    monkeypatch.setattr(submissions_router, "materialize_object_to_path", fake_materialize_object_to_path)
+
+    with TestClient(app) as client:
+        response = client.get("/api/submissions/1/page/1/preview")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+
+    with Session(db.engine) as session:
+        rebuilt = session.exec(select(SubmissionPage).where(SubmissionPage.submission_id == 1, SubmissionPage.page_number == 1)).one()
+        assert Path(rebuilt.image_path).exists()
+        assert Path(rebuilt.image_path).with_name(f"{Path(rebuilt.image_path).stem}.preview.jpg").exists()

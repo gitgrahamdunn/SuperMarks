@@ -19,25 +19,26 @@ class PDFConverter:
 
 
 class Pdf2ImageConverter(PDFConverter):
-    """PDF converter using pdf2image when available."""
+    """PDF converter using PyMuPDF, which is already bundled with the app."""
 
     def __init__(self) -> None:
         try:
-            from pdf2image import convert_from_path  # type: ignore
+            import fitz  # pymupdf
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                "pdf2image is not installed. Install pdf2image and poppler for PDF support."
-            ) from exc
-        self._convert_from_path = convert_from_path
+            raise RuntimeError("PyMuPDF is not installed. Install pymupdf for PDF support.") from exc
+        self._fitz = fitz
 
     def convert(self, pdf_path: Path, output_dir: Path) -> list[Path]:
         output_dir.mkdir(parents=True, exist_ok=True)
-        pages = self._convert_from_path(str(pdf_path))
         out_paths: list[Path] = []
-        for idx, page in enumerate(pages, 1):
-            out = output_dir / f"page_{idx:04d}.png"
-            page.save(out, format="PNG")
-            out_paths.append(out)
+        try:
+            with self._fitz.open(pdf_path) as doc:
+                for idx, page in enumerate(doc, 1):
+                    out = output_dir / f"page_{idx:04d}.png"
+                    page.get_pixmap(matrix=self._fitz.Matrix(2, 2)).save(str(out))
+                    out_paths.append(out)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("PDF render failed. Try uploading images.") from exc
         return out_paths
 
 

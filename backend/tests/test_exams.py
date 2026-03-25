@@ -1041,11 +1041,21 @@ def test_delete_exam_removes_related_rows_and_local_files(tmp_path, monkeypatch)
         parse_job = ExamKeyParseJob(exam_id=exam_id, status="done", page_count=1, pages_done=1)
         session.add(parse_job)
         session.flush()
-        session.add(ExamIntakeJob(exam_id=exam_id, status="running", stage="detecting_names", page_count=1, pages_processed=0, submissions_created=0))
-
         bulk_upload = ExamBulkUploadFile(exam_id=exam_id, original_filename="bulk.pdf", stored_path=f"exams/{exam_id}/bulk/input.pdf")
         session.add(bulk_upload)
         session.flush()
+
+        session.add(
+            ExamIntakeJob(
+                exam_id=exam_id,
+                bulk_upload_id=bulk_upload.id,
+                status="running",
+                stage="detecting_names",
+                page_count=1,
+                pages_processed=0,
+                submissions_created=0,
+            )
+        )
 
         session.add(SubmissionFile(submission_id=submission.id, file_kind="pdf", original_filename="submission.pdf", stored_path=f"exams/{exam_id}/submissions/{submission.id}/submission.pdf"))
         session.add(SubmissionPage(submission_id=submission.id, page_number=1, image_path=str(pages_dir / "page1.png"), width=100, height=200))

@@ -774,7 +774,6 @@ def _detect_bulk_pages(
             row.detected_student_name = detection.student_name
             row.detection_confidence = detection.confidence
             row.detection_evidence_json = json.dumps(detection.evidence or {})
-            row.front_page_usage_json = json.dumps(usage) if usage else None
             session.add(row)
 
             processed_pages += 1
@@ -1920,7 +1919,6 @@ def _delete_exam_resources(exam_id: int, session: Session) -> None:
         submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id)).all()
         questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
         parse_jobs = session.exec(select(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id)).all()
-        bulk_uploads = session.exec(select(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id)).all()
 
         for submission in submissions:
             session.exec(delete(SubmissionPage).where(SubmissionPage.submission_id == submission.id))
@@ -1939,16 +1937,20 @@ def _delete_exam_resources(exam_id: int, session: Session) -> None:
         for job in parse_jobs:
             session.exec(delete(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id))
 
-        for bulk_upload in bulk_uploads:
-            session.exec(delete(BulkUploadPage).where(BulkUploadPage.bulk_upload_id == bulk_upload.id))
-
         session.exec(delete(Submission).where(Submission.exam_id == exam_id))
         session.exec(delete(Question).where(Question.exam_id == exam_id))
         session.exec(delete(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id))
         session.exec(delete(ExamKeyPage).where(ExamKeyPage.exam_id == exam_id))
         session.exec(delete(ExamKeyFile).where(ExamKeyFile.exam_id == exam_id))
-        session.exec(delete(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id))
         session.exec(delete(ExamIntakeJob).where(ExamIntakeJob.exam_id == exam_id))
+        session.exec(
+            delete(BulkUploadPage).where(
+                BulkUploadPage.bulk_upload_id.in_(
+                    select(ExamBulkUploadFile.id).where(ExamBulkUploadFile.exam_id == exam_id)
+                )
+            )
+        )
+        session.exec(delete(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id))
         session.delete(exam)
         session.commit()
 
