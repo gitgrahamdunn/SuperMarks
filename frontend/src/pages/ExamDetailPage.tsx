@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
-import { uploadToBlob } from '../blob/upload';
 import { compareStudentNamesByLastName, formatStudentName } from '../lib/nameFormat';
 import { useToast } from '../components/ToastProvider';
 import type { BulkUploadPreview, ExamDetail, ExamIntakeJobRead, ExamMarkingDashboardResponse, ExamObjectiveRead, FrontPageUsageReport, ParseLatestResponse, QuestionRead, StoredFileRead, SubmissionDashboardRow, SubmissionRead } from '../types/api';

@@ -51,6 +51,27 @@ SuperMarks is already beyond prototype territory.
 That means the job is no longer “invent the product.”
 The job is now “finish the teacher workstation, harden it, and make it trustworthy enough to use repeatedly.”
 
+## Deployment execution plan (current)
+
+### Phase 1 — Local backend first (active)
+
+- Keep the backend running locally on `127.0.0.1:8000` with local config.
+- Run the frontend with `VITE_API_BASE_URL=/api` and Vite proxy to local backend.
+- Validate via `./scripts/verify-local.sh` after each meaningful stack change.
+- Run release-adjacent UI checks against local public host or local production-safe stack before any Cloudflare Pages changes.
+
+### Phase 2 — Hosted backend verification
+
+- Optional: point `VITE_API_BASE_URL` to hosted backend for targeted checks.
+- Keep this as a short verification slice, not the default loop.
+
+### Phase 3 — Cloudflare Pages release
+
+- Use Cloudflare Pages for the hosted static frontend only when a release bundle is ready.
+- Run the backend in Cloudflare Containers behind a Worker entrypoint.
+- Move durable uploaded-file storage to Cloudflare R2.
+- Keep `DATABASE_URL` in place for metadata persistence.
+
 ---
 
 # 2. Production target - Main Focus!!!!

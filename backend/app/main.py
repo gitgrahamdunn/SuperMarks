@@ -196,14 +196,6 @@ def deep_health() -> dict[str, bool | str]:
         "db_ok": db_ok,
     }
 
-
-
-
-@app.post("/api/blob/client-upload-token", tags=["blob"], dependencies=[Depends(require_api_key)])
-def client_upload_token_stub() -> Response:
-    return JSONResponse(status_code=501, content={"detail": "Client upload not implemented yet."})
-
-
 @app.get("/{full_path:path}", include_in_schema=False, response_model=None)
 def frontend_spa(full_path: str) -> Response:
     if not _should_serve_frontend():

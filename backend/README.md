@@ -1,18 +1,16 @@
 # SuperMarks Backend
 
-FastAPI backend service for SuperMarks, designed to deploy as a dedicated Vercel project.
+FastAPI backend service for SuperMarks, intended to run locally during development and in Cloudflare Containers for hosted deployment.
 
 ## Structure
 
 ```text
 backend/
-├── api/index.py      # Vercel Python function entrypoint
 ├── app/              # Backend application package
 ├── data/             # Local runtime data directory (sqlite/uploads)
 ├── tests/
 ├── pyproject.toml
-├── requirements.txt
-└── vercel.json
+└── requirements.txt
 ```
 
 ## Local development
@@ -56,37 +54,64 @@ Recommended shape for teacher-first key parsing:
 
 The backend will keep clean pages on the fast path and only escalate suspicious pages based on structural heuristics.
 
-## Vercel deployment
-
-Dependency source: Vercel installs Python dependencies from `pyproject.toml` for this backend project root; keep `requirements.txt` aligned only if used for local/manual installs.
-
-Create a Vercel project with Root Directory set to `backend`.
-
-- Entrypoint: `api/index.py`
-- Routing: `vercel.json` rewrites all paths to `/api/index.py`
-
-Optional environment variables:
-
-- `SUPERMARKS_VERCEL_ENVIRONMENT=true`
-- `SUPERMARKS_CORS_ORIGINS=https://<frontend-domain>`
-- `SUPERMARKS_CORS_ALLOW_ORIGIN_REGEX=https://.*\.vercel\.app`
-- `APP_VERSION=<git-sha-or-build-id>` (optional; exposed by `GET /version`)
-- `DATABASE_URL=<postgres-connection-url>` (recommended for hosted/scalable production)
-- `SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1` (supported only for self-hosting outside Vercel)
-
-
-Storage notes:
-
-- Local development defaults to `./data` (inside `backend/data`).
-- On Vercel (`VERCEL`/`VERCEL_ENV` detected), runtime files are written to `/tmp/supermarks`.
-- `/tmp` on Vercel is ephemeral and not persistent across deployments/invocations. Use external storage (S3, Vercel Blob, etc.) for durable file persistence.
-
-
-
 Persistence note:
 
-- Hosted production: Blob stores files and `DATABASE_URL` stores metadata.
+- Hosted production: Cloudflare R2 stores files and `DATABASE_URL` stores metadata.
 - Self-hosted low-cost production: local files plus SQLite on disk are supported.
+
+Recommended hosted storage shape:
+
+```bash
+SUPERMARKS_STORAGE_BACKEND=s3
+SUPERMARKS_S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
+SUPERMARKS_S3_BUCKET=<r2-bucket-name>
+SUPERMARKS_S3_ACCESS_KEY_ID=<r2-access-key-id>
+SUPERMARKS_S3_SECRET_ACCESS_KEY=<r2-secret-access-key>
+SUPERMARKS_S3_REGION=auto
+SUPERMARKS_S3_PUBLIC_BASE_URL=https://<public-r2-domain>   # optional
+```
+
+## Cloudflare hosted backend
+
+The hosted backend target is Cloudflare Containers, fronted by a Worker.
+
+Files:
+
+- [wrangler.toml](/home/graham/repos/SuperMarks/backend/wrangler.toml)
+- [cloudflare/index.js](/home/graham/repos/SuperMarks/backend/cloudflare/index.js)
+- [Dockerfile](/home/graham/repos/SuperMarks/backend/Dockerfile)
+- [.dev.vars.example](/home/graham/repos/SuperMarks/backend/.dev.vars.example)
+
+Deploy flow:
+
+```bash
+cd backend
+npm install
+wrangler login
+wrangler secret put DATABASE_URL
+wrangler secret put BACKEND_API_KEY
+wrangler secret put SUPERMARKS_S3_ACCESS_KEY_ID
+wrangler secret put SUPERMARKS_S3_SECRET_ACCESS_KEY
+wrangler deploy
+```
+
+Recommended hosted env shape:
+
+```bash
+SUPERMARKS_ENV=production
+SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT=1
+SUPERMARKS_STORAGE_BACKEND=s3
+SUPERMARKS_S3_ENDPOINT_URL=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+SUPERMARKS_S3_BUCKET=<R2_BUCKET_NAME>
+SUPERMARKS_S3_ACCESS_KEY_ID=<R2_ACCESS_KEY_ID>
+SUPERMARKS_S3_SECRET_ACCESS_KEY=<R2_SECRET_ACCESS_KEY>
+SUPERMARKS_S3_REGION=auto
+SUPERMARKS_S3_PUBLIC_BASE_URL=https://<public-r2-domain>   # optional
+DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<database>
+BACKEND_API_KEY=<backend-api-key>
+SUPERMARKS_CORS_ALLOW_ORIGINS=https://<your-pages-domain>
+SUPERMARKS_SERVE_FRONTEND=0
+```
 
 ## Self-hosted low-cost mode
 
@@ -133,54 +158,3 @@ Local production notes:
 - runtime boot does not install dependencies
 - runtime boot does not use `uvicorn --reload`
 - Tailscale Funnel is re-applied against backend port `8000`
-
-## Fly.io deployment
-
-If you want the same long-running background-job feel as local development, prefer Fly.io for the backend.
-
-Included files:
-
-- `Dockerfile`
-- `.dockerignore`
-- `fly.toml`
-
-Suggested split:
-
-- frontend on Vercel
-- backend on Fly.io
-- metadata in Neon Postgres
-- files in Vercel Blob
-
-Typical Fly flow:
-
-```bash
-cd backend
-export FLYCTL_INSTALL="$HOME/.fly"
-export PATH="$FLYCTL_INSTALL/bin:$PATH"
-
-flyctl auth login
-flyctl launch --copy-config --no-deploy
-flyctl secrets set \
-  DATABASE_URL=... \
-  BACKEND_API_KEY=... \
-  BACKEND_SESSION_SECRET=... \
-  CORS_ALLOW_ORIGINS=https://<frontend-domain> \
-  SUPERMARKS_LLM_PROVIDER=doubleword \
-  SUPERMARKS_LLM_BASE_URL=https://api.doubleword.ai/v1 \
-  SUPERMARKS_LLM_API_KEY=... \
-  SUPERMARKS_KEY_PARSE_NANO_MODEL=Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
-  SUPERMARKS_KEY_PARSE_MINI_MODEL=Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
-  SUPERMARKS_FRONT_PAGE_PROVIDER=gemini \
-  GEMINI_API_KEY=... \
-  SUPERMARKS_FRONT_PAGE_MODEL=gemini-2.5-flash \
-  BLOB_READ_WRITE_TOKEN=... \
-  BLOB_PUBLIC_ACCESS=private
-
-flyctl deploy
-```
-
-Notes:
-
-- `auto_stop_machines = "off"` keeps one machine running so background intake threads behave more like local.
-- `SUPERMARKS_ENV=production` is set in `fly.toml` so the app requires `DATABASE_URL`.
-- Update the Vercel frontend `VITE_API_BASE_URL` to the Fly backend URL after deploy.

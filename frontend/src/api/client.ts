@@ -73,7 +73,6 @@ class ApiError extends Error {
 
 const REQUIRED_BACKEND_PATHS = [
   '/api/exams',
-  '/api/blob/upload-token',
   '/api/blob/signed-url',
   '/api/exams/{exam_id}/key/register',
   '/api/submissions/{submission_id}/files/register',
@@ -547,7 +546,6 @@ export const api = {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ student_name: studentName, capture_mode: captureMode }),
   }, DEFAULT_TIMEOUT_MS),
-  getBlobUploadToken: () => request<{ token: string }>('blob/upload-token', { method: 'POST' }),
   uploadExamKeyFiles: (examId: number, files: File[], options?: RequestInit) => {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));

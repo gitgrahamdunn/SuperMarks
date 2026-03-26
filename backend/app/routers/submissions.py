@@ -754,7 +754,7 @@ def upload_submission_files(
         content_type = upload.content_type or "application/octet-stream"
         payload = upload.file.read()
         if len(payload) > _VERCEL_SERVER_UPLOAD_LIMIT_BYTES:
-            raise HTTPException(status_code=413, detail="File too large for server upload on Vercel.")
+            raise HTTPException(status_code=413, detail="File too large for direct server upload.")
 
         object_key = f"exams/{submission.exam_id}/submissions/{submission_id}/{uuid.uuid4().hex}_{filename}"
         try:

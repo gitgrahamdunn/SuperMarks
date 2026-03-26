@@ -1,0 +1,15 @@
+{
+  "name": "supermarks-backend-cloudflare",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cloudflare/containers": "^0.0.25"
+  },
+  "devDependencies": {
+    "wrangler": "^4.77.0"
+  },
+  "scripts": {
+    "cf:deploy": "wrangler deploy",
+    "cf:dev": "wrangler dev"
+  }
+}

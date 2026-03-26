@@ -1,12 +1,16 @@
 # SuperMarks Frontend
 
-React + Vite frontend for SuperMarks, deployed as a dedicated Vercel project.
+React + Vite frontend for SuperMarks, intended to be hosted as a static SPA.
+
+Cloudflare Pages is the canonical hosted frontend target.
 
 ## Strategy B lock
 
 Frontend calls backend directly using `VITE_API_BASE_URL`.
 
-- `VITE_API_BASE_URL` must be an absolute URL ending with `/api`.
+- `VITE_API_BASE_URL` must end with `/api`.
+- Use `/api` for local Vite development with proxy.
+- Use `https://<backend>/api` for Cloudflare Pages deployments.
 - Do not add frontend `/api` proxy functions.
 - Do not add frontend `/api` rewrites.
 
@@ -27,7 +31,7 @@ Or from repo root:
 Set env vars:
 
 ```bash
-VITE_API_BASE_URL=http://localhost:8000/api
+VITE_API_BASE_URL=/api
 VITE_BACKEND_API_KEY=<your-backend-api-key>
 VITE_APP_VERSION=<git-sha-or-release-tag>
 ```
@@ -56,9 +60,21 @@ What the test run does:
 
 The seed generator lives at `../scripts/seed_acceptance.py` and writes `../artifacts/acceptance/seed-metadata.json` for stable local IDs.
 
-## Vercel deployment
+## Cloudflare Pages deployment
 
-- Root Directory: `frontend`
-- Build Command: `npm run build`
-- Output Directory: `dist`
-- SPA fallback routing is configured by `frontend/vercel.json`
+- Project root: `frontend`
+- Build command: `npm run build`
+- Build output directory: `dist`
+- `frontend/wrangler.toml` tracks the Pages build output for CLI-driven deploys
+- SPA fallback routing is configured by `frontend/public/_redirects`
+- Set `VITE_API_BASE_URL` to the Cloudflare backend URL, ending in `/api`
+- Use Cloudflare Pages environment variables for hosted builds; the value must still end with `/api`
+- File access now comes through backend-issued signed URLs backed by the backend storage provider (Cloudflare R2 in the hosted direction).
+
+## Hosted preview note
+
+Hosted previews are not self-contained.
+
+- This frontend makes direct browser API calls.
+- Preview deployments only work if `VITE_API_BASE_URL` points at a reachable public backend.
+- If no public backend is available, use the local or Funnel-hosted workflow instead of hosted previews.

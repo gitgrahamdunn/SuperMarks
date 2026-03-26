@@ -1916,26 +1916,25 @@ def _delete_exam_resources(exam_id: int, session: Session) -> None:
         if not exam:
             raise HTTPException(status_code=404, detail="Exam not found")
 
-        submissions = session.exec(select(Submission).where(Submission.exam_id == exam_id)).all()
-        questions = session.exec(select(Question).where(Question.exam_id == exam_id)).all()
-        parse_jobs = session.exec(select(ExamKeyParseJob).where(ExamKeyParseJob.exam_id == exam_id)).all()
+        submission_ids = select(Submission.id).where(Submission.exam_id == exam_id)
+        question_ids = select(Question.id).where(Question.exam_id == exam_id)
+        parse_job_ids = session.exec(select(ExamKeyParseJob.id).where(ExamKeyParseJob.exam_id == exam_id)).all()
+        bulk_upload_ids = select(ExamBulkUploadFile.id).where(ExamBulkUploadFile.exam_id == exam_id)
 
-        for submission in submissions:
-            session.exec(delete(SubmissionPage).where(SubmissionPage.submission_id == submission.id))
-            session.exec(delete(SubmissionFile).where(SubmissionFile.submission_id == submission.id))
-            session.exec(delete(AnswerCrop).where(AnswerCrop.submission_id == submission.id))
-            session.exec(delete(Transcription).where(Transcription.submission_id == submission.id))
-            session.exec(delete(GradeResult).where(GradeResult.submission_id == submission.id))
+        session.exec(delete(SubmissionPage).where(SubmissionPage.submission_id.in_(submission_ids)))
+        session.exec(delete(SubmissionFile).where(SubmissionFile.submission_id.in_(submission_ids)))
+        session.exec(delete(AnswerCrop).where(AnswerCrop.submission_id.in_(submission_ids)))
+        session.exec(delete(Transcription).where(Transcription.submission_id.in_(submission_ids)))
+        session.exec(delete(GradeResult).where(GradeResult.submission_id.in_(submission_ids)))
 
-        for question in questions:
-            session.exec(delete(QuestionRegion).where(QuestionRegion.question_id == question.id))
-            session.exec(delete(QuestionParseEvidence).where(QuestionParseEvidence.question_id == question.id))
-            session.exec(delete(AnswerCrop).where(AnswerCrop.question_id == question.id))
-            session.exec(delete(Transcription).where(Transcription.question_id == question.id))
-            session.exec(delete(GradeResult).where(GradeResult.question_id == question.id))
+        session.exec(delete(QuestionRegion).where(QuestionRegion.question_id.in_(question_ids)))
+        session.exec(delete(QuestionParseEvidence).where(QuestionParseEvidence.exam_id == exam_id))
+        session.exec(delete(AnswerCrop).where(AnswerCrop.question_id.in_(question_ids)))
+        session.exec(delete(Transcription).where(Transcription.question_id.in_(question_ids)))
+        session.exec(delete(GradeResult).where(GradeResult.question_id.in_(question_ids)))
 
-        for job in parse_jobs:
-            session.exec(delete(ExamKeyParsePage).where(ExamKeyParsePage.job_id == job.id))
+        if parse_job_ids:
+            session.exec(delete(ExamKeyParsePage).where(ExamKeyParsePage.job_id.in_(parse_job_ids)))
 
         session.exec(delete(Submission).where(Submission.exam_id == exam_id))
         session.exec(delete(Question).where(Question.exam_id == exam_id))
@@ -1945,9 +1944,7 @@ def _delete_exam_resources(exam_id: int, session: Session) -> None:
         session.exec(delete(ExamIntakeJob).where(ExamIntakeJob.exam_id == exam_id))
         session.exec(
             delete(BulkUploadPage).where(
-                BulkUploadPage.bulk_upload_id.in_(
-                    select(ExamBulkUploadFile.id).where(ExamBulkUploadFile.exam_id == exam_id)
-                )
+                BulkUploadPage.bulk_upload_id.in_(bulk_upload_ids)
             )
         )
         session.exec(delete(ExamBulkUploadFile).where(ExamBulkUploadFile.exam_id == exam_id))
@@ -1955,8 +1952,9 @@ def _delete_exam_resources(exam_id: int, session: Session) -> None:
         session.commit()
 
         _exam_question_locks.pop(exam_id, None)
-        for job in parse_jobs:
-            _parse_job_runner_locks.pop(job.id or 0, None)
+        for job_id in parse_job_ids:
+            if job_id is not None:
+                _parse_job_runner_locks.pop(job_id, None)
         _exam_intake_runner_locks.pop(exam_id, None)
 
         _remove_tree(settings.data_path / "exams" / str(exam_id))
@@ -3493,7 +3491,7 @@ def upload_exam_key_files(
         content_type = upload.content_type or "application/octet-stream"
         payload = upload.file.read()
         if len(payload) > _VERCEL_SERVER_UPLOAD_LIMIT_BYTES:
-            raise HTTPException(status_code=413, detail="File too large for server upload on Vercel. Use client upload mode.")
+            raise HTTPException(status_code=413, detail="File too large for direct server upload. Split the file or raise the backend upload limit.")
         object_key = f"exams/{exam_id}/key/{uuid.uuid4().hex}_{filename}"
         try:
             stored = upload_bytes(object_key, payload, content_type)

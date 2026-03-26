@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_LOCAL_DATA_DIR = BASE_DIR / "data"
-DEFAULT_VERCEL_DATA_DIR = Path("/tmp/supermarks")
+DEFAULT_EPHEMERAL_DATA_DIR = Path("/tmp/supermarks")
 DEFAULT_FRONTEND_DIST_DIR = BASE_DIR.parent / "frontend" / "dist"
 
 
@@ -19,13 +19,16 @@ def _is_truthy(value: str | None) -> bool:
     return bool(value and value.strip().lower() in TRUTHY_VALUES)
 
 
-def _running_on_vercel() -> bool:
-    return bool(os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or _is_truthy(os.getenv("SUPERMARKS_VERCEL_ENVIRONMENT")))
+def _running_in_managed_runtime() -> bool:
+    return bool(
+        _is_truthy(os.getenv("SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT"))
+        or _is_truthy(os.getenv("MANAGED_RUNTIME_ENVIRONMENT"))
+    )
 
 
 def _default_data_dir() -> str:
-    if _running_on_vercel():
-        return str(DEFAULT_VERCEL_DATA_DIR)
+    if _running_in_managed_runtime():
+        return str(DEFAULT_EPHEMERAL_DATA_DIR)
     return str(DEFAULT_LOCAL_DATA_DIR)
 
 
@@ -103,9 +106,12 @@ class Settings(BaseSettings):
     )
 
     # Deployment toggles
-    vercel_environment: bool = Field(
-        default_factory=lambda: _running_on_vercel(),
-        validation_alias=AliasChoices("SUPERMARKS_VERCEL_ENVIRONMENT", "VERCEL_ENVIRONMENT"),
+    managed_runtime_environment: bool = Field(
+        default_factory=lambda: _running_in_managed_runtime(),
+        validation_alias=AliasChoices(
+            "SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT",
+            "MANAGED_RUNTIME_ENVIRONMENT",
+        ),
     )
 
     # CORS configuration
@@ -127,14 +133,14 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         env = os.getenv("SUPERMARKS_ENV", os.getenv("ENV", "")).strip().lower()
-        return self.vercel_environment or env in {"prod", "production"}
+        return self.managed_runtime_environment or env in {"prod", "production"}
 
     @property
     def effective_database_url(self) -> str:
         if self.is_production:
             if self.database_url and self.database_url.strip():
                 return _normalize_database_url(self.database_url)
-            if self.allow_production_sqlite and not self.vercel_environment:
+            if self.allow_production_sqlite and not self.managed_runtime_environment:
                 return self.sqlite_url
             raise RuntimeError(
                 "DATABASE_URL is required in production unless SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1 is set for self-hosting."

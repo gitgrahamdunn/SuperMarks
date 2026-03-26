@@ -3,16 +3,11 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app.blob_service import BlobConfigError, create_signed_blob_url, get_blob_token
+from app.blob_service import create_signed_blob_url
 
 router = APIRouter(prefix="/blob", tags=["blob"])
-
-
-class BlobTokenResponse(BaseModel):
-    token: str
 
 
 class SignedUrlRequest(BaseModel):
@@ -25,14 +20,6 @@ class SignedUrlResponse(BaseModel):
 
 def _run_async(coro):
     return asyncio.run(coro)
-
-
-@router.post("/upload-token", response_model=BlobTokenResponse)
-def get_upload_token() -> BlobTokenResponse | JSONResponse:
-    try:
-        return BlobTokenResponse(token=get_blob_token())
-    except BlobConfigError as exc:
-        return JSONResponse(status_code=501, content={"detail": "Blob not configured", "missing": exc.missing})
 
 
 @router.post("/signed-url", response_model=SignedUrlResponse)

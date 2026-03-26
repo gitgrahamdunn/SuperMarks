@@ -22,10 +22,6 @@ def test_blob_mock_endpoints_and_register_rows(tmp_path, monkeypatch) -> None:
         assert exam.status_code == 201
         exam_id = exam.json()["id"]
 
-        token_resp = client.post("/api/blob/upload-token")
-        assert token_resp.status_code == 200
-        assert token_resp.json()["token"] == "mock-token"
-
         register_key = client.post(
             f"/api/exams/{exam_id}/key/register",
             json={
@@ -73,15 +69,3 @@ def test_blob_mock_endpoints_and_register_rows(tmp_path, monkeypatch) -> None:
         assert key_rows[0].stored_path.endswith("file-1.pdf")
         assert len(submission_rows) == 1
         assert submission_rows[0].stored_path.endswith("file-1.pdf")
-
-
-
-def test_upload_token_returns_501_when_not_configured(monkeypatch) -> None:
-    monkeypatch.delenv("BLOB_MOCK", raising=False)
-    monkeypatch.delenv("BLOB_READ_WRITE_TOKEN", raising=False)
-
-    with TestClient(app) as client:
-        response = client.post("/api/blob/upload-token")
-
-    assert response.status_code == 501
-    assert response.json() == {"detail": "Blob not configured", "missing": ["BLOB_READ_WRITE_TOKEN"]}

@@ -1,14 +1,16 @@
-"""Vercel Blob upload helpers with SDK + HTTP fallback."""
+"""Object storage upload helpers backed by local disk or S3-compatible storage."""
 
 from __future__ import annotations
 
+import asyncio
 import os
-import inspect
 import logging
 from pathlib import Path
-from typing import Any
+from urllib.parse import quote
 
-import httpx
+import boto3
+
+from app.settings import settings
 
 
 logger = logging.getLogger(__name__)
@@ -16,21 +18,49 @@ logger = logging.getLogger(__name__)
 class BlobUploadError(RuntimeError):
     """Raised when blob upload fails."""
 
-def _blob_access_value() -> str:
-    return os.getenv("BLOB_PUBLIC_ACCESS", "public").strip() or "public"
-
-def _require_blob_token() -> str:
-    token = os.getenv("BLOB_READ_WRITE_TOKEN", "").strip()
-    if not token:
-        raise BlobUploadError("Missing BLOB_READ_WRITE_TOKEN")
-    return token
-
 def _is_mock_mode() -> bool:
-    return os.getenv("BLOB_MOCK", "").strip() == "1"
+    return os.getenv("BLOB_MOCK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _storage_backend() -> str:
+    return settings.storage_backend.lower().strip()
+
+
+def _stable_url(pathname: str) -> str:
+    normalized = pathname.lstrip("/")
+    if _storage_backend() == "s3" and settings.s3_public_base_url:
+        return f"{settings.s3_public_base_url.rstrip('/')}/{quote(normalized, safe='/')}"
+    if _storage_backend() != "s3":
+        return f"/api/files/local?key={quote(normalized)}"
+    return normalized
+
+
+def _missing_s3_config() -> list[str]:
+    missing: list[str] = []
+    if not (settings.s3_bucket or "").strip():
+        missing.append("S3_BUCKET")
+    if not (settings.s3_access_key_id or "").strip():
+        missing.append("S3_ACCESS_KEY_ID")
+    if not (settings.s3_secret_access_key or "").strip():
+        missing.append("S3_SECRET_ACCESS_KEY")
+    return missing
+
+
+def _get_s3_client():
+    missing = _missing_s3_config()
+    if missing:
+        raise BlobUploadError(
+            "Missing storage configuration: " + ", ".join(missing)
+        )
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.s3_endpoint_url,
+        region_name=settings.s3_region,
+        aws_access_key_id=settings.s3_access_key_id,
+        aws_secret_access_key=settings.s3_secret_access_key,
+    )
 
 def _mock_upload(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
-    from app.settings import settings
-
     base = "https://blob.mock.local"
     url = f"{base}/{pathname.lstrip('/')}"
     target = settings.data_path / "objects" / pathname.lstrip("/")
@@ -43,107 +73,59 @@ def _mock_upload(pathname: str, data: bytes, content_type: str) -> dict[str, str
         "downloadUrl": url,
     }
 
-def _upload_with_sdk(pathname: str, data: bytes, content_type: str) -> dict[str, str] | None:
+def _upload_with_s3(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
+    client = _get_s3_client()
     try:
-        from vercel.blob import put  # type: ignore
-    except Exception:
-        return None
-
-    token = _require_blob_token()
-    access = _blob_access_value()
-
-    if not callable(put):
-        return None
-
-    signature = "<unknown>"
-    try:
-        signature = str(inspect.signature(put))
-    except Exception:
-        pass
-    logger.debug("Using vercel.blob.put=%s with signature=%s", type(put), signature)
-
-    try:
-        result: Any = put(
-            pathname,
-            data,
-            access=access,
-            content_type=content_type,
-            add_random_suffix=False,
-            token=token,
+        client.put_object(
+            Bucket=settings.s3_bucket,
+            Key=pathname,
+            Body=data,
+            ContentType=content_type,
         )
-    except TypeError as exc:
-        raise BlobUploadError(
-            "Blob SDK put() signature mismatch: "
-            f"signature={signature}; "
-            "attempted_call_mode=put(pathname, data, access=..., content_type=..., add_random_suffix=False, token=...)"
-        ) from exc
-    except Exception:
-        return None
+    except Exception as exc:
+        logger.exception("S3 upload failed pathname=%s", pathname)
+        raise BlobUploadError(f"Object storage upload failed: {exc}") from exc
 
-    if hasattr(result, "model_dump"):
-        payload = result.model_dump()
-    elif hasattr(result, "dict"):
-        payload = result.dict()
-    elif isinstance(result, dict):
-        payload = result
-    else:
-        payload = {
-            "url": getattr(result, "url", ""),
-            "pathname": getattr(result, "pathname", pathname),
-            "contentType": getattr(result, "content_type", content_type),
-            "downloadUrl": getattr(result, "download_url", getattr(result, "url", "")),
-        }
-
-    url = str(payload.get("url") or "").strip()
-    returned_pathname = str(payload.get("pathname") or pathname)
-    returned_content_type = str(payload.get("contentType") or content_type)
-    download_url = str(payload.get("downloadUrl") or url)
-    if not url:
-        return None
+    stable_url = _stable_url(pathname)
+    download_url = stable_url
+    if stable_url == pathname:
+        try:
+            download_url = asyncio.run(
+                asyncio.to_thread(
+                    client.generate_presigned_url,
+                    "get_object",
+                    Params={"Bucket": settings.s3_bucket, "Key": pathname},
+                    ExpiresIn=3600,
+                )
+            )
+        except Exception:
+            download_url = pathname
 
     return {
-        "url": url,
-        "pathname": returned_pathname,
-        "contentType": returned_content_type,
+        "url": stable_url,
+        "pathname": pathname,
+        "contentType": content_type,
         "downloadUrl": download_url,
     }
 
-def _upload_with_http(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
-    token = _require_blob_token()
-    access = _blob_access_value()
-    url = "https://blob.vercel-storage.com/"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "x-content-type": content_type,
-        "x-add-random-suffix": "0",
-    }
-    params = {"pathname": pathname, "access": access}
-
-    response = httpx.put(url, content=data, headers=headers, params=params, timeout=60.0)
-    if response.status_code >= 400:
-        raise BlobUploadError(f"Blob upload failed ({response.status_code}): {response.text[:300]}")
-
-    payload = response.json()
-    blob_url = str(payload.get("url") or "").strip()
-    if not blob_url:
-        raise BlobUploadError("Blob upload succeeded but no URL was returned")
-
-    return {
-        "url": blob_url,
-        "pathname": str(payload.get("pathname") or pathname),
-        "contentType": str(payload.get("contentType") or content_type),
-        "downloadUrl": str(payload.get("downloadUrl") or blob_url),
-    }
-
 def upload_bytes(pathname: str, data: bytes, content_type: str) -> dict[str, str]:
+    normalized = pathname.lstrip("/")
     if _is_mock_mode():
-        return _mock_upload(pathname, data, content_type)
+        return _mock_upload(normalized, data, content_type)
 
-    sdk_result = _upload_with_sdk(pathname, data, content_type)
-    if sdk_result is not None:
-        return sdk_result
+    if _storage_backend() == "s3":
+        return _upload_with_s3(normalized, data, content_type)
 
-    return _upload_with_http(pathname, data, content_type)
+    target = settings.data_path / "objects" / normalized
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    url = _stable_url(normalized)
+    return {
+        "url": url,
+        "pathname": normalized,
+        "contentType": content_type,
+        "downloadUrl": url,
+    }
 
 
 def upload_rendered_key_page(exam_id: int, page_number: int, local_png_path: Path) -> dict[str, str]:

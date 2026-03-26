@@ -19,7 +19,8 @@ Current workflow defaults that must be preserved:
 - mobile simplicity and low-clutter review take priority over debug-heavy or over-explained UI
 
 ## Before merging any PR that touches:
-- `vercel.json`
+- `frontend/public/_redirects`
+- `frontend/wrangler.toml`
 - `api/*`
 - routing
 - CORS

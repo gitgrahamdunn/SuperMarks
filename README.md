@@ -1,15 +1,25 @@
 # SuperMarks Monorepo
 
-SuperMarks is organized as a two-project monorepo for Vercel:
+SuperMarks now targets a Cloudflare-hosted stack with a local-first development loop.
 
-- `backend/`: FastAPI + SQLModel API deployed as a Python serverless project.
-- `frontend/`: Vite + React SPA deployed as a static frontend project.
+## Deployment Plan (Current)
+
+- Phase 1 (active): run local backend + local frontend for iteration and verification.
+- Phase 2: expose the local backend publicly from your machine when a hosted frontend needs it.
+- Phase 3: host the frontend on Cloudflare Pages, run the backend in Cloudflare Containers, and use Cloudflare R2 for uploaded files.
+
+Today, normal development still runs locally first. Hosted direction is Cloudflare end to end.
+
+- `backend/`: FastAPI + SQLModel API with local-first development and Cloudflare Containers as the hosted backend target.
+- `frontend/`: Vite + React SPA hosted statically on Cloudflare Pages.
 
 ## Strategy Lock
 
 This repository is locked to **Strategy B: direct backend API calls only**.
 
-- Frontend must call backend using `VITE_API_BASE_URL=https://<backend>/api`.
+- Frontend must call backend using `VITE_API_BASE_URL`:
+  - `/api` for local Vite dev (proxied to `http://127.0.0.1:8000`)
+  - `https://<backend>/api` for hosted backend
 - No frontend `/api` proxy functions.
 - Do not add frontend `/api` rewrites.
 
@@ -19,16 +29,24 @@ See `docs/ARCHITECTURE.md` for guardrails and `docs/EXPERIMENTATION.md` for the 
 
 ### Frontend
 
-- `VITE_API_BASE_URL=https://<backend-domain>/api`
+- `VITE_API_BASE_URL=/api` in local development.
+- `VITE_API_BASE_URL=https://<backend-domain>/api` in Cloudflare Pages deployments.
 - `VITE_BACKEND_API_KEY=<backend-api-key>` (optional if backend auth is disabled)
 - `VITE_APP_VERSION=<git-sha-or-release-tag>` (optional, shown in UI diagnostics)
 
 ### Backend
 
 - `BACKEND_API_KEY=<backend-api-key>`
-- `CORS_ALLOW_ORIGINS=https://<frontend-domain>`
+- `CORS_ALLOW_ORIGINS=https://<cloudflare-pages-frontend-domain>`
 - `APP_VERSION=<git-sha-or-build-id>` (optional, served by `GET /version`)
-- `DATABASE_URL=<postgres-connection-url>` (recommended for hosted/scalable production)
+- `DATABASE_URL=<postgres-connection-url>` (required for hosted Cloudflare deployment)
+- `SUPERMARKS_STORAGE_BACKEND=s3`
+- `SUPERMARKS_S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com`
+- `SUPERMARKS_S3_BUCKET=<r2-bucket-name>`
+- `SUPERMARKS_S3_ACCESS_KEY_ID=<r2-access-key-id>`
+- `SUPERMARKS_S3_SECRET_ACCESS_KEY=<r2-secret-access-key>`
+- `SUPERMARKS_S3_REGION=auto`
+- `SUPERMARKS_S3_PUBLIC_BASE_URL=https://<public-r2-domain>` (optional)
 - `SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1` (supported for self-hosted low-cost production on your own machine)
 
 ## Local development
@@ -61,7 +79,7 @@ Verification:
 Set frontend `.env` with backend values:
 
 ```bash
-VITE_API_BASE_URL=http://localhost:8000/api
+VITE_API_BASE_URL=/api
 VITE_BACKEND_API_KEY=<your-local-key>
 ```
 
@@ -93,6 +111,30 @@ Use this for reboot-safe public hosting from your machine:
 ./scripts/verify-local-prod.sh
 ```
 
+To make this system-level (restarts automatically on reboot), run this one command:
+
+```bash
+sudo /home/graham/repos/SuperMarks/scripts/install-supermarks-service.sh --system
+```
+
+After that, future reconnects are one short command:
+
+```bash
+supermarks-reconnect
+```
+
+The shortest command is:
+
+```bash
+smarks
+```
+
+Readable alias:
+
+```bash
+supermarks-reconnect
+```
+
 What this does:
 
 - builds the frontend once to `frontend/dist`
@@ -107,27 +149,37 @@ What this does:
 - Backend tests run locally under `uv`
 - Current backend failures are concentrated in blob-mock behavior and answer-key parser dependency injection, not broad repo instability
 
-## Vercel deployment (two projects)
+## Hosted frontend deployment
 
-### 1) Backend project
+This is Phase 3 and should only be used once the local/public backend path is stable.
 
-- Create a Vercel project with **Root Directory** = `backend`
-- Uses `backend/api/index.py` as Python function entrypoint
-- `backend/vercel.json` rewrites all backend paths to the function
+### Static frontend host
 
-### 2) Frontend project
-
-- Create a separate Vercel project with **Root Directory** = `frontend`
+- Host `frontend/` as a static SPA on Cloudflare Pages.
 - Build command: `npm run build`
 - Output directory: `dist`
-- SPA fallback routing is handled in `frontend/vercel.json`
+- Keep `VITE_API_BASE_URL` pointed at the Cloudflare backend URL, ending in `/api`.
+- Hosted previews are only usable when that backend URL is reachable and allowed by backend CORS.
+- SPA fallback routing is provided by `frontend/public/_redirects`.
+- `frontend/wrangler.toml` is the canonical hosted frontend config.
 
 ## Deployment policy note
 
-Git-based automatic deployments are disabled for both Vercel projects to avoid Hobby plan deployment-cap limits.
-When you are ready to ship, deploy manually from the Vercel UI using **Redeploy**.
+Cloudflare Pages is the canonical hosted frontend, Cloudflare Containers is the canonical hosted backend, and Cloudflare R2 is the canonical durable object store.
+When you are ready to ship:
+
+1. deploy the backend from `backend/` with Wrangler
+2. set backend secrets for `DATABASE_URL`, `BACKEND_API_KEY`, and R2 credentials
+3. point frontend `VITE_API_BASE_URL` at the backend Worker URL or custom domain
 
 ## Recommended improvement loop
+
+### Phase-1 local reconnect checklist
+
+- Start backend: `./scripts/dev-backend.sh`
+- Start frontend: `./scripts/dev-frontend.sh`
+- Verify local stack: `./scripts/verify-local.sh`
+- Confirm browser calls are `http://localhost:8000/api` (or `/api` with Vite proxy) in DevTools.
 
 For day-to-day product polish, do not use production deploys as the feedback loop.
 
@@ -141,20 +193,43 @@ Practical rule:
 - local build + browser smoke first
 - production redeploy only for release-ready batches, not for each small tweak
 
-## Versioning on Vercel
+## Hosted frontend versioning
 
-For easier deploy verification, set both of these per deployment:
+For easier deploy verification, set `VITE_APP_VERSION` on the Cloudflare Pages deployment.
 
-- Frontend: `VITE_APP_VERSION`
-- Backend: `APP_VERSION`
+## Hosted backend deployment
 
-A good value is the same Git SHA (or release tag) in both projects.
+Backend hosting now lives under [backend/wrangler.toml](/home/graham/repos/SuperMarks/backend/wrangler.toml) and [backend/cloudflare/index.js](/home/graham/repos/SuperMarks/backend/cloudflare/index.js).
+
+One-time setup:
+
+```bash
+cd backend
+npm install
+wrangler login
+```
+
+Set secrets and deploy:
+
+```bash
+wrangler secret put DATABASE_URL
+wrangler secret put BACKEND_API_KEY
+wrangler secret put SUPERMARKS_S3_ACCESS_KEY_ID
+wrangler secret put SUPERMARKS_S3_SECRET_ACCESS_KEY
+wrangler secret put SUPERMARKS_S3_BUCKET
+wrangler secret put SUPERMARKS_S3_ENDPOINT_URL
+wrangler secret put SUPERMARKS_S3_PUBLIC_BASE_URL
+wrangler secret put SUPERMARKS_CORS_ALLOW_ORIGINS
+wrangler deploy
+```
+
+Non-secret defaults and local Wrangler examples live in [backend/.dev.vars.example](/home/graham/repos/SuperMarks/backend/.dev.vars.example).
 
 ## Persistence requirements
 
-- Blob storage stores uploaded files/binaries.
+- Cloudflare R2 stores uploaded files/binaries in the hosted direction.
 - `DATABASE_URL` stores all metadata (exams, questions, key files, submissions, pages, parse jobs).
-- Hosted production should use Blob storage plus `DATABASE_URL`.
+- Hosted production should use R2 plus `DATABASE_URL`.
 - Self-hosted low-cost production can use local files plus SQLite on disk instead.
 
 ## Low-cost self-hosted mode

@@ -1812,7 +1812,7 @@ def test_upload_exam_key_file_over_4mb_returns_413(tmp_path, monkeypatch) -> Non
         )
 
         assert response.status_code == 413
-        assert response.json()["detail"] == "File too large for server upload on Vercel. Use client upload mode."
+        assert response.json()["detail"] == "File too large for direct server upload. Split the file or raise the backend upload limit."
 
 
 def test_parse_start_reuses_unfinished_job(tmp_path, monkeypatch) -> None:

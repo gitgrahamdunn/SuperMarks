@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator
-from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from vercel.blob import AsyncBlobClient
+import boto3
 
 from app.settings import settings
 
@@ -16,7 +15,7 @@ class BlobConfigError(RuntimeError):
 
     def __init__(self, missing: list[str]):
         self.missing = missing
-        super().__init__("Blob not configured")
+        super().__init__("Blob storage not configured")
 
 
 class BlobDownloadError(RuntimeError):
@@ -34,22 +33,10 @@ def blob_mock_enabled() -> bool:
     return os.getenv("BLOB_MOCK", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def get_blob_token() -> str:
-    if blob_mock_enabled():
-        return "mock-token"
-    token = os.getenv("BLOB_READ_WRITE_TOKEN", "").strip()
-    if not token:
-        raise BlobConfigError(["BLOB_READ_WRITE_TOKEN"])
-    return token
-
-
 def normalize_blob_path(value: str) -> str:
     value = (value or "").strip()
     if not value:
         raise ValueError("pathname must be non-empty")
-
-    if "blob.vercel-storage.com/v1/sign" in value:
-        raise RuntimeError("Old blob sign path should never be used")
 
     if value.startswith("http://") or value.startswith("https://"):
         parsed = urlsplit(value)
@@ -61,148 +48,107 @@ def normalize_blob_path(value: str) -> str:
     return normalized
 
 
+def _storage_backend() -> str:
+    return settings.storage_backend.lower().strip()
+
+
+def _local_object_path(pathname: str):
+    return settings.data_path / "objects" / pathname
+
+
+def _guess_content_type(pathname: str) -> str | None:
+    lower = pathname.lower()
+    if lower.endswith(".png"):
+        return "image/png"
+    if lower.endswith(".jpg") or lower.endswith(".jpeg"):
+        return "image/jpeg"
+    if lower.endswith(".pdf"):
+        return "application/pdf"
+    return None
+
+
+def _missing_s3_config() -> list[str]:
+    missing: list[str] = []
+    if not (settings.s3_bucket or "").strip():
+        missing.append("S3_BUCKET")
+    if not (settings.s3_access_key_id or "").strip():
+        missing.append("S3_ACCESS_KEY_ID")
+    if not (settings.s3_secret_access_key or "").strip():
+        missing.append("S3_SECRET_ACCESS_KEY")
+    return missing
+
+
+def _get_s3_client():
+    missing = _missing_s3_config()
+    if missing:
+        raise BlobConfigError(missing)
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.s3_endpoint_url,
+        region_name=settings.s3_region,
+        aws_access_key_id=settings.s3_access_key_id,
+        aws_secret_access_key=settings.s3_secret_access_key,
+    )
+
+
 async def download_blob_bytes(pathname: str) -> tuple[bytes, str | None]:
     normalized_pathname = normalize_blob_path(pathname)
-    logger.info("blob_private_read pathname=%s", normalized_pathname)
+    logger.info("blob_read pathname=%s backend=%s", normalized_pathname, _storage_backend())
 
-    result = None
-    sdk_exc: Exception | None = None
-    try:
-        client = AsyncBlobClient()
-        result = await client.get(normalized_pathname, access="private")
-    except Exception as exc:
-        sdk_exc = exc
-        if not blob_mock_enabled():
-            logger.exception("Blob SDK get failed pathname=%s", normalized_pathname)
-            raise BlobDownloadError(
-                f"Blob SDK get failed pathname={normalized_pathname} error={exc}"
-            ) from exc
-
-    if result is None and blob_mock_enabled():
-        local_object = settings.data_path / "objects" / normalized_pathname
+    local_object = _local_object_path(normalized_pathname)
+    if blob_mock_enabled() or _storage_backend() != "s3":
         if local_object.exists():
-            content_type = None
-            if local_object.suffix.lower() == ".png":
-                content_type = "image/png"
-            elif local_object.suffix.lower() in {".jpg", ".jpeg"}:
-                content_type = "image/jpeg"
-            elif local_object.suffix.lower() == ".pdf":
-                content_type = "application/pdf"
-            return local_object.read_bytes(), content_type
-
-    if result is None:
-        if sdk_exc is not None:
-            logger.exception("Blob SDK get failed pathname=%s", normalized_pathname)
-        else:
-            logger.exception("Blob not found or unreadable pathname=%s", normalized_pathname)
-        raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}")
-
-    public_attrs = sorted(name for name in dir(result) if not name.startswith("_"))
-    logger.info(
-        "blob_private_read_result_shape type=%s attrs=%s pathname=%s",
-        type(result).__name__,
-        public_attrs,
-        normalized_pathname,
-    )
-
-    status_code = getattr(result, "status_code", None)
-    if isinstance(status_code, int) and status_code != 200:
+            return await asyncio.to_thread(local_object.read_bytes), _guess_content_type(normalized_pathname)
         raise BlobDownloadError(f"Blob not found or unreadable: {normalized_pathname}")
 
     try:
-        content_bytes = await _read_blob_result_bytes(result)
+        response = await asyncio.to_thread(
+            _get_s3_client().get_object,
+            Bucket=settings.s3_bucket,
+            Key=normalized_pathname,
+        )
+    except BlobConfigError:
+        raise
     except Exception as exc:
-        logger.exception("Blob read failed pathname=%s", normalized_pathname)
+        logger.exception("S3 blob get failed pathname=%s", normalized_pathname)
         raise BlobDownloadError(
-            f"Blob read failed pathname={normalized_pathname} error={exc}"
+            f"Blob get failed pathname={normalized_pathname} error={exc}"
         ) from exc
 
-    content_type = _extract_content_type(result)
-    return content_bytes, content_type
-
-
-def _extract_content_type(result: Any) -> str | None:
-    content_type = getattr(result, "content_type", None)
-    if isinstance(content_type, str):
-        return content_type
-    blob = getattr(result, "blob", None)
-    blob_content_type = getattr(blob, "content_type", None)
-    if isinstance(blob_content_type, str):
-        return blob_content_type
-    return None
-
-
-async def _read_blob_result_bytes(result: Any) -> bytes:
-    direct = _coerce_bytes(getattr(result, "content", None))
-    if direct is not None:
-        return direct
-
-    direct = _coerce_bytes(getattr(result, "body", None))
-    if direct is not None:
-        return direct
-
-    read_fn = getattr(result, "read", None)
-    if callable(read_fn):
-        read_value = read_fn()
-        if hasattr(read_value, "__await__"):
-            read_value = await read_value
-        direct = _coerce_bytes(read_value)
-        if direct is not None:
-            return direct
-
-    response = getattr(result, "response", None)
-    if response is not None:
-        response_content = _coerce_bytes(getattr(response, "content", None))
-        if response_content is not None:
-            return response_content
-
-        aiter_bytes = getattr(response, "aiter_bytes", None)
-        if callable(aiter_bytes):
-            chunks: list[bytes] = []
-            iterator = aiter_bytes()
-            if isinstance(iterator, AsyncIterator):
-                async for chunk in iterator:
-                    chunks.append(bytes(chunk))
-                return b"".join(chunks)
-
-    public_attrs = sorted(name for name in dir(result) if not name.startswith("_"))
-    raise RuntimeError(
-        f"Unsupported blob result type={type(result).__name__} attrs={public_attrs}"
-    )
-
-
-def _coerce_bytes(value: Any) -> bytes | None:
-    if value is None:
-        return None
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, bytearray | memoryview):
-        return bytes(value)
-    return None
+    body = response.get("Body")
+    if body is None:
+        raise BlobDownloadError(f"Blob body unavailable: {normalized_pathname}")
+    content = await asyncio.to_thread(body.read)
+    content_type = response.get("ContentType")
+    return content, content_type if isinstance(content_type, str) else None
 
 
 async def create_signed_blob_url(pathname: str, expires_seconds: int = 600) -> str:
-    del expires_seconds
     normalized_pathname = normalize_blob_path(pathname)
+
     if blob_mock_enabled():
         return "https://example.com/mock"
 
+    if _storage_backend() != "s3":
+        return f"/api/files/local?key={quote(normalized_pathname)}"
+
+    if settings.s3_public_base_url:
+        return f"{settings.s3_public_base_url.rstrip('/')}/{quote(normalized_pathname, safe='/')}"
+
     try:
-        result = await AsyncBlobClient().get(normalized_pathname, access="private")
+        return await asyncio.to_thread(
+            _get_s3_client().generate_presigned_url,
+            "get_object",
+            Params={"Bucket": settings.s3_bucket, "Key": normalized_pathname},
+            ExpiresIn=expires_seconds,
+        )
+    except BlobConfigError:
+        raise
     except Exception as exc:
-        logger.exception("Blob signed URL lookup failed pathname=%s", normalized_pathname)
-        raise BlobSignedUrlError(f"Blob signed URL lookup failed pathname={normalized_pathname} error={exc}") from exc
-
-    if result is None or result.status_code != 200:
-        raise BlobSignedUrlError(f"Blob not found or unreadable: {normalized_pathname}")
-
-    candidate = str(getattr(result, "url", "") or "").strip()
-    if candidate:
-        return candidate
-    candidate = str(getattr(result, "download_url", "") or "").strip()
-    if candidate:
-        return candidate
-    raise BlobSignedUrlError(f"Blob URL unavailable for pathname={normalized_pathname}")
+        logger.exception("Blob signed URL generation failed pathname=%s", normalized_pathname)
+        raise BlobSignedUrlError(
+            f"Blob signed URL generation failed pathname={normalized_pathname} error={exc}"
+        ) from exc
 
 
 async def get_signed_read_url(pathname: str, expires_seconds: int = 600) -> str:

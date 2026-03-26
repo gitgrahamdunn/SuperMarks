@@ -15,6 +15,11 @@ Do not treat autonomous grading as the primary milestone. Treat it as a later ac
 ### Goal
 Reduce debugging hell by making changes cheap to verify.
 
+Phase 1 default is a local-backend workflow:
+- backend on `http://localhost:8000`
+- frontend Vite on `http://localhost:5173`
+- `VITE_API_BASE_URL=/api` (local proxy to backend)
+
 ### Tasks
 1. Establish a canonical local development setup for both backend and frontend.
 2. Add a single documented smoke path for local development.

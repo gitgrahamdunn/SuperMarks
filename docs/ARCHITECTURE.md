@@ -5,15 +5,16 @@
 SuperMarks is locked to **Strategy B**:
 
 - The browser calls the backend directly via `VITE_API_BASE_URL`.
-- `VITE_API_BASE_URL` must be an absolute URL and must end with `/api`.
+- `VITE_API_BASE_URL` must end with `/api`. In production this is an absolute URL; in local Vite dev it can be `/api` with proxy.
 - There are **no frontend `/api` proxy functions** for application logic.
 - Frontend deploy config is SPA-only; do not add `/api` rewrites.
+- Hosted target is Cloudflare Pages -> Cloudflare backend URL -> FastAPI container.
 
 ## Rules and Guardrails
 
 1. Do not add `frontend/api/*` proxy handlers.
 2. Do not add root `api/*` proxy handlers for frontend routing.
-3. Do not rely on same-origin `/api` for browser requests.
+3. Do not rely on same-origin `/api` for browser requests in production.
 4. Keep backend CORS configured for frontend origins via `CORS_ALLOW_ORIGINS`.
 5. Ensure OPTIONS preflight remains unauthenticated.
 
@@ -21,13 +22,14 @@ SuperMarks is locked to **Strategy B**:
 
 ### Frontend
 
-- `VITE_API_BASE_URL=https://<backend-domain>/api`
+- `VITE_API_BASE_URL=/api` for local Vite dev.
+- `VITE_API_BASE_URL=https://<backend-domain>/api` for Cloudflare Pages deployments.
 - `VITE_BACKEND_API_KEY=<backend-api-key>` (optional if backend auth disabled)
 
 ### Backend
 
 - `BACKEND_API_KEY=<backend-api-key>`
-- `CORS_ALLOW_ORIGINS=https://<frontend-domain>`
+- `CORS_ALLOW_ORIGINS=https://<cloudflare-pages-frontend-domain>`
 
 ## Smoke Checks
 
@@ -38,6 +40,6 @@ SuperMarks is locked to **Strategy B**:
 
 ## Persistence model
 
-- Blob storage persists file content (exam keys, submission uploads, page images).
+- Cloudflare R2 persists file content (exam keys, submission uploads, page images) in the hosted direction.
 - `DATABASE_URL` persists metadata (exams, questions, key files, submissions, pages, parse jobs).
 - Both systems are required in production for durable end-to-end exam data persistence.

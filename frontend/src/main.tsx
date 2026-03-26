@@ -12,6 +12,26 @@ const apiConfigError = getApiConfigError();
 const BUILD_MARKER = String(__APP_BUILD_TS__);
 const BUILD_RELOAD_STORAGE_KEY = 'supermarks-build-reload';
 
+function renderHostedApiConfigMessage(errorMessage: string): React.JSX.Element {
+  const host = window.location.hostname.trim().toLowerCase();
+  const isHosted = host !== 'localhost' && host !== '127.0.0.1';
+
+  return (
+    <div className="contract-error-page">
+      <div className="contract-error-card">
+        <h1>Invalid VITE_API_BASE_URL configuration.</h1>
+        <p>{errorMessage}</p>
+        {isHosted ? (
+          <>
+            <p>Hosted SuperMarks frontends are not self-contained. They need a public backend URL ending in <code>/api</code>.</p>
+            <p>For the current local-backend deployment model, point <code>VITE_API_BASE_URL</code> at the machine&apos;s public Funnel URL instead of expecting a hosted preview backend.</p>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 async function fetchLatestBuildMarker(): Promise<string | null> {
   try {
     const response = await fetch('/', {
@@ -82,12 +102,7 @@ if (!apiConfigError) {
 if (import.meta.env.PROD && apiConfigError) {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
-      <div className="contract-error-page">
-        <div className="contract-error-card">
-          <h1>Invalid VITE_API_BASE_URL configuration.</h1>
-          <p>{apiConfigError}</p>
-        </div>
-      </div>
+      {renderHostedApiConfigMessage(apiConfigError)}
     </React.StrictMode>,
   );
 } else {
