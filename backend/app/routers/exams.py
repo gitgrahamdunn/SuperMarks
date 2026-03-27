@@ -1313,7 +1313,8 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                     lease_expires_at=None,
                     finished_at=failed_at,
                 )
-                session.commit()
+                if db.engine is not None:
+                    session.commit()
                 return
             intake_metrics["front_page_thinking_level"] = _normalize_front_page_gemini_thinking_level(job.thinking_level)
             running_at = utcnow()
@@ -1328,7 +1329,8 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 lease_expires_at=_exam_intake_lease_deadline(),
                 metrics_json=_job_metrics_payload(job, intake_metrics),
             )
-            session.commit()
+            if db.engine is not None:
+                session.commit()
 
             render_stage_started = time.perf_counter()
             rendered_paths, rendered_page_count = _render_stored_bulk_upload_files(bulk, _bulk_pages_dir(exam_id, bulk.id or 0))
@@ -1592,7 +1594,8 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                     exam,
                     status=ExamStatus.REVIEWING if (job and (job.initial_review_ready or job.review_ready)) else ExamStatus.FAILED,
                 )
-            session.commit()
+            if db.engine is not None:
+                session.commit()
         logger.error("exam intake failed exam=%s job=%s metrics=%s", exam_id, job_id, intake_metrics)
     finally:
         lock.release()
