@@ -14,10 +14,22 @@ frontend/node_modules/
 frontend/dist/
 frontend/test-results/
 frontend/tsconfig.tsbuildinfo
+backend/node_modules/
 
 # Local env
 backend/.env.local
+backend/.env.hosted-local
+backend/.vercel-tmp.env
 frontend/.env.local
+frontend/.vercel-tmp.env
+
+# Local tooling
+.supermarks-uv/
+
+# Acceptance artifacts generated locally
+artifacts/acceptance/supermarks-acceptance.db
+artifacts/acceptance/data/pages/
+artifacts/acceptance/data/submission-2-front-page.pdf
 
 # OS/editor
 .DS_Store
