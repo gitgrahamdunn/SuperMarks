@@ -155,7 +155,22 @@ BACKEND_API_KEY=<backend-api-key>
 SUPERMARKS_D1_BRIDGE_TOKEN=<internal-bridge-token-or-backend-api-key>
 SUPERMARKS_D1_BRIDGE_URL=https://<your-d1-bridge-worker-domain>/_supermarks/d1
 SUPERMARKS_CORS_ALLOW_ORIGINS=https://<your-pages-domain>
+SUPERMARKS_AUTH_SESSION_SECRET=<strong-random-secret>
+SUPERMARKS_AUTH_ALLOWED_RETURN_ORIGINS=https://<your-pages-domain>,http://localhost:5173
+SUPERMARKS_MAGIC_LINK_LOGIN_ENABLED=1
+SUPERMARKS_EMAIL_PROVIDER=log
+SUPERMARKS_EMAIL_API_KEY=<resend-server-key>           # only when using resend
+SUPERMARKS_EMAIL_FROM_ADDRESS=<verified-sender>        # only when using resend
+SUPERMARKS_OIDC_PROVIDERS_JSON=
 SUPERMARKS_SERVE_FRONTEND=0
+SUPERMARKS_LLM_PROVIDER=doubleword
+SUPERMARKS_LLM_BASE_URL=https://api.doubleword.ai/v1
+SUPERMARKS_LLM_API_KEY=<doubleword-api-key>
+SUPERMARKS_KEY_PARSE_NANO_MODEL=Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+SUPERMARKS_KEY_PARSE_MINI_MODEL=Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+SUPERMARKS_FRONT_PAGE_PROVIDER=gemini
+GEMINI_API_KEY=<gemini-api-key>
+SUPERMARKS_FRONT_PAGE_MODEL=gemini-2.5-flash
 ```
 
 Render deploy flow:
@@ -165,6 +180,13 @@ render blueprints validate
 ```
 
 Then sync the Blueprint in Render and deploy the `supermarks-backend` service.
+
+Magic link notes:
+
+- `SUPERMARKS_MAGIC_LINK_LOGIN_ENABLED=1` enables the email login UI and backend endpoints.
+- `SUPERMARKS_AUTH_SESSION_SECRET` is required because magic-link verification issues app bearer tokens.
+- `SUPERMARKS_EMAIL_PROVIDER=log` is acceptable for temporary hosted testing; the login link will be emitted to Render logs instead of being sent.
+- For real delivery, switch to `SUPERMARKS_EMAIL_PROVIDER=resend` and set `SUPERMARKS_EMAIL_API_KEY` plus `SUPERMARKS_EMAIL_FROM_ADDRESS`.
 
 Hosted backend smoke check:
 

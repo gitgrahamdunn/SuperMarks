@@ -34,8 +34,8 @@ def get_exam(session: DbSession, exam_id: int) -> Exam | None:
     return session.get(Exam, exam_id)
 
 
-def create_exam(session: DbSession, *, name: str) -> Exam:
-    exam = Exam(name=name)
+def create_exam(session: DbSession, *, name: str, owner_user_id: int | None = None) -> Exam:
+    exam = Exam(name=name, owner_user_id=owner_user_id)
     session.add(exam)
     session.flush()
     return exam
@@ -48,20 +48,26 @@ def update_exam(session: DbSession, exam: Exam, **fields) -> Exam:
     return exam
 
 
-def list_exams(session: DbSession) -> list[Exam]:
-    return session.exec(select(Exam).order_by(Exam.created_at.desc(), Exam.id.desc())).all()
+def list_exams(session: DbSession, owner_user_id: int | None = None) -> list[Exam]:
+    statement = select(Exam)
+    if owner_user_id is not None:
+        statement = statement.where(Exam.owner_user_id == owner_user_id)
+    return session.exec(statement.order_by(Exam.created_at.desc(), Exam.id.desc())).all()
 
 
-def list_class_lists(session: DbSession) -> list[ClassList]:
-    return session.exec(select(ClassList).order_by(ClassList.created_at.desc(), ClassList.id.desc())).all()
+def list_class_lists(session: DbSession, owner_user_id: int | None = None) -> list[ClassList]:
+    statement = select(ClassList)
+    if owner_user_id is not None:
+        statement = statement.where(ClassList.owner_user_id == owner_user_id)
+    return session.exec(statement.order_by(ClassList.created_at.desc(), ClassList.id.desc())).all()
 
 
 def get_class_list(session: DbSession, class_list_id: int) -> ClassList | None:
     return session.get(ClassList, class_list_id)
 
 
-def create_class_list(session: DbSession, *, name: str) -> ClassList:
-    class_list = ClassList(name=name, names_json="[]", source_json=None)
+def create_class_list(session: DbSession, *, name: str, owner_user_id: int | None = None) -> ClassList:
+    class_list = ClassList(name=name, owner_user_id=owner_user_id, names_json="[]", source_json=None)
     session.add(class_list)
     session.flush()
     return class_list

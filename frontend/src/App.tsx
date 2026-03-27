@@ -1,6 +1,7 @@
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
-import { SupportDiagnostics } from './components/SupportDiagnostics';
+import { api } from './api/client';
+import type { AuthStatusRead } from './types/api';
 
 const ExamsPage = lazy(async () => ({ default: (await import('./pages/ExamsPage')).ExamsPage }));
 const ClassListsPage = lazy(async () => ({ default: (await import('./pages/ClassListsPage')).ClassListsPage }));
@@ -11,6 +12,22 @@ const SubmissionMarkingPage = lazy(async () => ({ default: (await import('./page
 const SubmissionFrontPageTotalsPage = lazy(async () => ({ default: (await import('./pages/SubmissionFrontPageTotalsPage')).SubmissionFrontPageTotalsPage }));
 const TemplateBuilderPage = lazy(async () => ({ default: (await import('./pages/TemplateBuilderPage')).TemplateBuilderPage }));
 const ResultsPage = lazy(async () => ({ default: (await import('./pages/ResultsPage')).ResultsPage }));
+const LoginPage = lazy(async () => ({ default: (await import('./pages/LoginPage')).LoginPage }));
+const AuthCallbackPage = lazy(async () => ({ default: (await import('./pages/AuthCallbackPage')).AuthCallbackPage }));
+
+function preloadRouteModules() {
+  void import('./pages/ExamsPage');
+  void import('./pages/ClassListsPage');
+  void import('./pages/ExamDetailPage');
+  void import('./pages/ExamReviewPage');
+  void import('./pages/SubmissionDetailPage');
+  void import('./pages/SubmissionMarkingPage');
+  void import('./pages/SubmissionFrontPageTotalsPage');
+  void import('./pages/TemplateBuilderPage');
+  void import('./pages/ResultsPage');
+  void import('./pages/LoginPage');
+  void import('./pages/AuthCallbackPage');
+}
 
 type Theme = 'light' | 'dark';
 const THEME_STORAGE_KEY = 'supermarks-theme';
@@ -20,15 +37,83 @@ function getInitialTheme(): Theme {
   return storedTheme === 'dark' ? 'dark' : 'light';
 }
 
+function LoadingShell() {
+  return (
+    <section className="card page-loading-shell" aria-label="Loading page">
+      <div className="skeleton page-loading-shell-title" />
+      <div className="skeleton page-loading-shell-row" />
+      <div className="skeleton page-loading-shell-row page-loading-shell-row--short" />
+    </section>
+  );
+}
+
 export default function App() {
   const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+  const [authState, setAuthState] = useState<AuthStatusRead | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loggingOut, setLoggingOut] = useState(false);
   const location = useLocation();
   const isFocusedWorkflowRoute = location.pathname.startsWith('/submissions/');
+  const isAuthCallbackRoute = location.pathname.startsWith('/auth/callback');
+
+  const refreshAuthState = useCallback(async () => {
+    setAuthLoading(true);
+    try {
+      const next = await api.getAuthStatus();
+      setAuthState(next);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     document.body.classList.toggle('theme-dark', theme === 'dark');
     localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    const idleCallback = window.requestIdleCallback;
+    if (typeof idleCallback === 'function') {
+      const id = idleCallback(() => preloadRouteModules());
+      return () => window.cancelIdleCallback(id);
+    }
+    const timeoutId = window.setTimeout(() => preloadRouteModules(), 150);
+    return () => window.clearTimeout(timeoutId);
+  }, []);
+
+  useEffect(() => {
+    void refreshAuthState();
+  }, [refreshAuthState]);
+
+  const authEnabled = Boolean(authState?.auth_enabled);
+  const shouldRenderLogin = !isAuthCallbackRoute && authEnabled && !authLoading && !authState?.authenticated;
+
+  const handleLogout = useCallback(async () => {
+    setLoggingOut(true);
+    try {
+      await api.logout();
+    } catch {
+      // swallow logout cleanup errors; local token clearing still matters
+    } finally {
+      api.clearStoredAuthToken();
+      setAuthState((previous) => previous
+        ? { ...previous, authenticated: false, auth_method: 'anonymous', user: null }
+        : previous);
+      setLoggingOut(false);
+    }
+  }, []);
+
+  if (authLoading && !isAuthCallbackRoute) {
+    return <LoadingShell />;
+  }
+
+  if (shouldRenderLogin) {
+    return (
+      <Suspense fallback={<LoadingShell />}>
+        <LoginPage providers={authState?.providers ?? []} magicLinkEnabled={authState?.magic_link_enabled ?? false} />
+      </Suspense>
+    );
+  }
 
   return (
     <div className="layout app-shell">
@@ -56,17 +141,23 @@ export default function App() {
             </nav>
           )}
         </div>
+        {!isFocusedWorkflowRoute && authEnabled && authState?.user ? (
+          <div className="top-nav-right" style={{ display: 'flex', alignItems: 'center', gap: '.75rem' }}>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontWeight: 600, fontSize: '.92rem' }}>{authState.user.full_name || authState.user.email || 'Signed in'}</div>
+              {authState.user.email ? <div className="subtle-text" style={{ fontSize: '.8rem' }}>{authState.user.email}</div> : null}
+            </div>
+            <button type="button" className="btn btn-secondary" onClick={() => void handleLogout()} disabled={loggingOut}>
+              {loggingOut ? 'Signing out…' : 'Sign out'}
+            </button>
+          </div>
+        ) : null}
       </header>
 
       <main id="main-content" tabIndex={-1}>
-        <Suspense fallback={
-          <section className="card page-loading-shell" aria-label="Loading page">
-            <div className="skeleton page-loading-shell-title" />
-            <div className="skeleton page-loading-shell-row" />
-            <div className="skeleton page-loading-shell-row page-loading-shell-row--short" />
-          </section>
-        }>
+        <Suspense fallback={<LoadingShell />}>
           <Routes>
+            <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={refreshAuthState} />} />
             <Route path="/" element={<ExamsPage />} />
             <Route path="/class-lists" element={<ClassListsPage />} />
             <Route path="/exams/:examId" element={<ExamDetailPage />} />
@@ -82,7 +173,6 @@ export default function App() {
 
       {!isFocusedWorkflowRoute && (
         <footer className="app-shell-footer">
-          <SupportDiagnostics />
           <button
             type="button"
             className={`theme-switch ${theme === 'dark' ? 'is-dark' : ''}`}

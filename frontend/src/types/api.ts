@@ -8,6 +8,29 @@ export interface ClassListRead {
   filenames: string[];
 }
 
+export interface AuthProviderRead {
+  slug: string;
+  name: string;
+}
+
+export interface AuthUserRead {
+  id: number;
+  email?: string | null;
+  full_name?: string | null;
+  given_name?: string | null;
+  family_name?: string | null;
+  picture_url?: string | null;
+}
+
+export interface AuthStatusRead {
+  auth_enabled: boolean;
+  magic_link_enabled?: boolean;
+  authenticated: boolean;
+  auth_method: string;
+  user?: AuthUserRead | null;
+  providers: AuthProviderRead[];
+}
+
 export interface ExamRead {
   id: number;
   name: string;

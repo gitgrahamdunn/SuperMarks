@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlmodel import Session, delete, select
 
+from app.auth import can_access_owned_resource
 from app.persistence import DbSession, commit_repository_session, get_repository_session, refresh_repository_instance, repository_provider
 from app.blob_service import create_signed_blob_url, normalize_blob_path
 from app.blob_service import BlobDownloadError
@@ -79,6 +80,17 @@ router = APIRouter(prefix="/submissions", tags=["submissions"])
 logger = logging.getLogger(__name__)
 exam_repo = repository_provider().exams
 submission_repo = repository_provider().submissions
+question_repo = repository_provider().questions
+
+
+def _get_submission_or_404(submission_id: int, session: DbSession) -> Submission:
+    submission = submission_repo.get_submission(session, submission_id)
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    exam = exam_repo.get_exam(session, submission.exam_id)
+    if not exam or not can_access_owned_resource(exam.owner_user_id):
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return submission
 
 _RATIO_VALUE_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$")
 _ALLOWED_SUBMISSION_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
@@ -677,7 +689,7 @@ def _prepare_status(submission: Submission, session: DbSession, actions_run: lis
 
 @router.get("/{submission_id}", response_model=SubmissionRead)
 def get_submission(submission_id: int, session: DbSession = Depends(get_repository_session)) -> SubmissionRead:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     files = submission_repo.list_submission_files(session, submission_id)
@@ -688,7 +700,7 @@ def get_submission(submission_id: int, session: DbSession = Depends(get_reposito
 
 @router.get("/{submission_id}/files", response_model=list[StoredFileRead])
 def list_submission_files(submission_id: int, session: DbSession = Depends(get_repository_session)) -> list[StoredFileRead]:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -710,7 +722,7 @@ def list_submission_files(submission_id: int, session: DbSession = Depends(get_r
 
 @router.post("/{submission_id}/files/register", response_model=BlobRegisterResponse)
 def register_submission_files(submission_id: int, payload: BlobRegisterRequest, session: DbSession = Depends(get_repository_session)) -> BlobRegisterResponse:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -749,7 +761,7 @@ def upload_submission_files(
     files: list[UploadFile] = File(...),
     session: DbSession = Depends(get_repository_session),
 ) -> ExamKeyUploadResponse:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -797,7 +809,7 @@ def upload_submission_files(
 
 @router.post("/{submission_id}/build-pages", response_model=list[SubmissionPageRead])
 def build_pages(submission_id: int, session: DbSession = Depends(get_repository_session)) -> list[SubmissionPageRead]:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return _build_pages_for_submission(submission, session)
@@ -805,7 +817,7 @@ def build_pages(submission_id: int, session: DbSession = Depends(get_repository_
 
 @router.post("/{submission_id}/build-crops")
 def build_crops(submission_id: int, session: DbSession = Depends(get_repository_session)) -> dict:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return _build_crops_for_submission(submission, session)
@@ -817,7 +829,7 @@ def transcribe_submission(
     provider: str = Query("stub"),
     session: DbSession = Depends(get_repository_session),
 ) -> dict:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return _transcribe_submission(submission, provider, session)
@@ -829,7 +841,7 @@ def grade_submission(
     grader: str = Query("rule_based"),
     session: DbSession = Depends(get_repository_session),
 ) -> dict:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     if submission.status not in (SubmissionStatus.TRANSCRIBED, SubmissionStatus.GRADED):
@@ -876,7 +888,7 @@ def grade_submission(
 
 @router.get("/{submission_id}/prepare-status", response_model=SubmissionPrepareStatus)
 def get_prepare_status(submission_id: int, session: DbSession = Depends(get_repository_session)) -> SubmissionPrepareStatus:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return _prepare_status(submission, session)
@@ -888,7 +900,7 @@ def prepare_submission_for_marking(
     provider: str = Query("stub"),
     session: DbSession = Depends(get_repository_session),
 ) -> SubmissionPrepareStatus:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -898,19 +910,19 @@ def prepare_submission_for_marking(
     pages = submission_repo.list_submission_pages(session, submission_id)
     if not status.ready_for_marking and not pages:
         _build_pages_for_submission(submission, session)
-        submission = submission_repo.get_submission(session, submission_id)
+        submission = _get_submission_or_404(submission_id, session)
         actions_run.append("build_pages")
         status = _prepare_status(submission, session, actions_run=actions_run)
 
     if not status.ready_for_marking and status.can_prepare_now and "build_crops" in status.suggested_actions:
         _build_crops_for_submission(submission, session)
-        submission = submission_repo.get_submission(session, submission_id)
+        submission = _get_submission_or_404(submission_id, session)
         actions_run.append("build_crops")
         status = _prepare_status(submission, session, actions_run=actions_run)
 
     if not status.ready_for_marking and status.can_prepare_now and "transcribe" in status.suggested_actions:
         _transcribe_submission(submission, provider, session)
-        submission = submission_repo.get_submission(session, submission_id)
+        submission = _get_submission_or_404(submission_id, session)
         actions_run.append("transcribe")
         status = _prepare_status(submission, session, actions_run=actions_run)
 
@@ -944,7 +956,7 @@ def _ensure_submission_page_image(
 
 @router.get("/{submission_id}/page/{page_number}")
 def get_page_image(submission_id: int, page_number: int, session: DbSession = Depends(get_repository_session)) -> FileResponse:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -956,7 +968,7 @@ def get_page_image(submission_id: int, page_number: int, session: DbSession = De
 
 @router.get("/{submission_id}/page/{page_number}/preview")
 def get_page_preview_image(submission_id: int, page_number: int, session: DbSession = Depends(get_repository_session)) -> FileResponse:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -967,7 +979,7 @@ def get_page_preview_image(submission_id: int, page_number: int, session: DbSess
 
 @router.get("/{submission_id}/crop/{question_id}")
 def get_crop_image(submission_id: int, question_id: int, session: DbSession = Depends(get_repository_session)) -> FileResponse:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -984,7 +996,7 @@ def get_crop_image(submission_id: int, question_id: int, session: DbSession = De
 
 @router.get("/{submission_id}/front-page-totals", response_model=FrontPageTotalsRead | None)
 def get_front_page_totals(submission_id: int, session: DbSession = Depends(get_repository_session)) -> FrontPageTotalsRead | None:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return front_page_totals_read(submission)
@@ -1267,7 +1279,7 @@ def _ensure_exam_front_page_template(exam_id: int, session: DbSession) -> tuple[
 
 
 def get_or_create_front_page_totals_candidates(submission_id: int, session: DbSession) -> FrontPageTotalsCandidateRead:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -1276,7 +1288,7 @@ def get_or_create_front_page_totals_candidates(submission_id: int, session: DbSe
         return cached_payload
 
     template_payload, seed_ids = _ensure_exam_front_page_template(submission.exam_id, session)
-    submission = submission_repo.get_submission(session, submission_id) or submission
+    submission = _get_submission_or_404(submission_id, session)
     submission = refresh_repository_instance(session, submission)
     cached_payload = _front_page_candidate_cache_read(submission)
     if cached_payload is not None and not _front_page_candidate_is_retryable_failure(cached_payload):
@@ -1321,7 +1333,7 @@ def upsert_front_page_totals(
     payload: FrontPageTotalsUpsert,
     session: DbSession = Depends(get_repository_session),
 ) -> FrontPageTotalsRead:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -1379,7 +1391,7 @@ def upsert_manual_grade(
     payload: ManualGradeUpsert,
     session: DbSession = Depends(get_repository_session),
 ) -> GradeResultRead:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -1427,7 +1439,7 @@ def upsert_manual_grade(
 
 @router.get("/{submission_id}/results", response_model=SubmissionResults)
 def get_results(submission_id: int, session: DbSession = Depends(get_repository_session)) -> SubmissionResults:
-    submission = submission_repo.get_submission(session, submission_id)
+    submission = _get_submission_or_404(submission_id, session)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 

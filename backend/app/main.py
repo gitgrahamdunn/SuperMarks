@@ -13,8 +13,9 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import text
+from starlette.middleware.sessions import SessionMiddleware
 
-from app.auth import SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, build_api_session_cookie_value, require_api_key
+from app.auth import BROWSER_SESSION_COOKIE_NAME, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, auth_context_middleware, build_api_session_cookie_value, require_authenticated_request
 from app.ai.openai_vision import (
     _front_page_provider_api_key,
     _front_page_provider_base_url,
@@ -22,6 +23,7 @@ from app.ai.openai_vision import (
 )
 from app.db import create_db_and_tables, get_database_backend_name, get_redacted_database_url
 from app.persistence import open_repository_session
+from app.routers.auth import router as auth_router
 from app.routers.exams import public_router as public_exams_router
 from app.routers.exams import _resume_pending_exam_intake_jobs
 from app.routers.exams import class_lists_router
@@ -102,33 +104,43 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=(settings.auth_session_secret or os.getenv("BACKEND_SESSION_SECRET", "") or os.getenv("BACKEND_API_KEY", "") or "supermarks-dev-session-secret"),
+    session_cookie=BROWSER_SESSION_COOKIE_NAME,
+    same_site="none" if settings.managed_runtime_environment else "lax",
+    https_only=settings.managed_runtime_environment,
+    max_age=settings.auth_token_ttl_seconds,
+)
 app.add_middleware(SafeCORSMiddleware)
 
 
 @app.middleware("http")
-async def seed_api_session_cookie(request: Request, call_next):
-    response = await call_next(request)
-    expected_api_key = os.getenv("BACKEND_API_KEY", "").strip()
-    presented_api_key = request.headers.get("x-api-key", "").strip()
-    if expected_api_key and presented_api_key == expected_api_key:
-        response.set_cookie(
-            key=SESSION_COOKIE_NAME,
-            value=build_api_session_cookie_value(expected_api_key),
-            max_age=SESSION_MAX_AGE_SECONDS,
-            httponly=True,
-            samesite="lax",
-            secure=request.url.scheme == "https",
-            path="/",
-        )
-    return response
+async def bind_auth_context(request: Request, call_next):
+    with auth_context_middleware(request):
+        response = await call_next(request)
+        expected_api_key = os.getenv("BACKEND_API_KEY", "").strip()
+        presented_api_key = request.headers.get("x-api-key", "").strip()
+        if expected_api_key and presented_api_key == expected_api_key:
+            response.set_cookie(
+                key=SESSION_COOKIE_NAME,
+                value=build_api_session_cookie_value(expected_api_key),
+                max_age=SESSION_MAX_AGE_SECONDS,
+                httponly=True,
+                samesite="lax" if not settings.managed_runtime_environment else "none",
+                secure=settings.managed_runtime_environment,
+                path="/",
+            )
+        return response
 
-app.include_router(public_exams_router, prefix="/api")
-app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_api_key)])
-app.include_router(class_lists_router, prefix="/api", dependencies=[Depends(require_api_key)])
-app.include_router(questions_router, prefix="/api", dependencies=[Depends(require_api_key)])
-app.include_router(submissions_router, prefix="/api", dependencies=[Depends(require_api_key)])
-app.include_router(files_router, prefix="/api", dependencies=[Depends(require_api_key)])
-app.include_router(blob_router, prefix="/api", dependencies=[Depends(require_api_key)])
+app.include_router(auth_router)
+app.include_router(public_exams_router, prefix="/api", dependencies=[Depends(require_authenticated_request)])
+app.include_router(exams_router, prefix="/api", dependencies=[Depends(require_authenticated_request)])
+app.include_router(class_lists_router, prefix="/api", dependencies=[Depends(require_authenticated_request)])
+app.include_router(questions_router, prefix="/api", dependencies=[Depends(require_authenticated_request)])
+app.include_router(submissions_router, prefix="/api", dependencies=[Depends(require_authenticated_request)])
+app.include_router(files_router, prefix="/api", dependencies=[Depends(require_authenticated_request)])
+app.include_router(blob_router, prefix="/api", dependencies=[Depends(require_authenticated_request)])
 
 
 @app.get("/", tags=["meta"], response_model=None)

@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlmodel import delete, select
 
 from app import db
+from app.auth import can_access_owned_resource, current_user_owner_id
 from app.blob_service import BlobDownloadError, create_signed_blob_url, download_blob_bytes, normalize_blob_path
 from app.ai.openai_vision import (
     _normalize_front_page_gemini_thinking_level,
@@ -316,7 +317,11 @@ def _create_class_list_resource(
     session: DbSession,
 ) -> ClassList:
     normalized_names = normalize_class_list_names(names)
-    class_list = exam_repo.create_class_list(session, name=_normalized_class_list_name(name, filenames=filenames))
+    class_list = exam_repo.create_class_list(
+        session,
+        name=_normalized_class_list_name(name, filenames=filenames),
+        owner_user_id=current_user_owner_id(),
+    )
     names_json, source_json = build_class_list_payload(
         normalized_names,
         source=source,
@@ -520,7 +525,7 @@ def _auto_resume_exam_intake_job_if_needed(job: ExamIntakeJob | None, session: D
         last_progress_at=now,
     )
 
-    exam = exam_repo.get_exam(session, job.exam_id)
+    exam = _get_exam_or_404(job.exam_id, session)
     if exam and exam.status != ExamStatus.READY:
         exam_repo.update_exam(
             session,
@@ -644,7 +649,7 @@ def _set_exam_initial_review_ready(
 ) -> None:
     with open_repository_session() as session:
         job = exam_repo.get_exam_intake_job(session, job_id)
-        exam = exam_repo.get_exam(session, exam_id)
+        exam = _get_exam_or_404(exam_id, session)
         if not job:
             return
         now = utcnow()
@@ -669,7 +674,7 @@ def _set_exam_initial_review_ready(
 def _mark_exam_review_ready_if_possible(exam_id: int, submission_ids: list[int], *, failed_submission_ids: list[int] | None = None) -> None:
     failed_submission_ids = failed_submission_ids or []
     with open_repository_session() as session:
-        exam = exam_repo.get_exam(session, exam_id)
+        exam = _get_exam_or_404(exam_id, session)
         if not exam:
             return
         initial_ids, _remaining_ids, _threshold = _split_initial_and_remaining_review_ids(submission_ids)
@@ -1314,7 +1319,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             if not _claim_exam_intake_job(job_id, runner_id, session):
                 return
             job = exam_repo.get_exam_intake_job(session, job_id)
-            exam = exam_repo.get_exam(session, exam_id)
+            exam = _get_exam_or_404(exam_id, session)
             if not job or not exam:
                 return
             bulk = exam_repo.get_exam_bulk_upload(session, job.bulk_upload_id) if job.bulk_upload_id else None
@@ -1560,7 +1565,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
 
         with open_repository_session() as session:
             job = exam_repo.get_exam_intake_job(session, job_id)
-            exam = exam_repo.get_exam(session, exam_id)
+            exam = _get_exam_or_404(exam_id, session)
             readiness_failures = list(initial_readiness_failures)
             ready_submission_count = len(ready_submission_ids)
             if not readiness_failures and remaining_submission_ids:
@@ -1610,7 +1615,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
         intake_metrics["total_ms"] = round((time.perf_counter() - overall_started) * 1000, 1)
         with open_repository_session() as session:
             job = exam_repo.get_exam_intake_job(session, job_id)
-            exam = exam_repo.get_exam(session, exam_id)
+            exam = _get_exam_or_404(exam_id, session)
             if job:
                 partial_ready = bool(job.initial_review_ready or job.review_ready)
                 failed_at = utcnow()
@@ -1977,7 +1982,7 @@ def _delete_exam_resources(exam_id: int, session: DbSession) -> None:
     intake_lock = _get_exam_intake_runner_lock(exam_id)
     intake_lock.acquire()
     try:
-        exam = exam_repo.get_exam(session, exam_id)
+        exam = _get_exam_or_404(exam_id, session)
         if not exam:
             raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -2193,9 +2198,10 @@ def _invoke_parser(parser: AnswerKeyParser, image_paths: list[Path], model: str,
 def create_exam(payload: ExamCreate, session: DbSession = Depends(get_repository_session)) -> Exam:
     exam_name = "Untitled Test"
     normalized_name = " ".join(str(payload.name or "").strip().split())
+    exam: Exam | None = None
     if normalized_name:
         exam_name = normalized_name
-        exam = exam_repo.create_exam(session, name=exam_name)
+    exam = exam_repo.create_exam(session, name=exam_name, owner_user_id=current_user_owner_id())
     commit_repository_session(session)
     return exam
 
@@ -2220,11 +2226,9 @@ def _enqueue_intake_job_for_exam(
 
     normalized_thinking_level = _normalize_front_page_gemini_thinking_level(front_page_thinking_level)
     if exam.id is None:
-        exam = exam_repo.create_exam(session, name=_normalized_exam_name(exam.name))
+        exam = exam_repo.create_exam(session, name=_normalized_exam_name(exam.name), owner_user_id=current_user_owner_id())
     if selected_class_list_id:
-        class_list = exam_repo.get_class_list(session, selected_class_list_id)
-        if not class_list:
-            raise HTTPException(status_code=400, detail="Selected class list was not found")
+        class_list = _get_class_list_or_404(selected_class_list_id, session)
         _select_class_list_for_exam(exam=exam, class_list=class_list, session=session)
     elif class_list_upload_files:
         class_list_names, class_list_filenames = _extract_class_list_names_from_uploads(
@@ -2314,7 +2318,7 @@ def create_exam_with_intake(
     if class_list_file is not None:
         class_list_upload_files.append(class_list_file)
 
-    exam = exam_repo.create_exam(session, name=_normalized_exam_name(name))
+    exam = exam_repo.create_exam(session, name=_normalized_exam_name(name), owner_user_id=current_user_owner_id())
     job = _enqueue_intake_job_for_exam(
         exam=exam,
         upload_files=upload_files,
@@ -2340,7 +2344,7 @@ def start_exam_intake_job(
     front_page_thinking_level: str | None = Form(default=None),
     session: DbSession = Depends(get_repository_session),
 ) -> ExamIntakeJobRead:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -2375,7 +2379,7 @@ def start_exam_intake_job(
 
 @router.get("/{exam_id}/intake-jobs/latest", response_model=ExamIntakeJobRead | None)
 def get_latest_exam_intake_job(exam_id: int, session: DbSession = Depends(get_repository_session)) -> ExamIntakeJobRead | None:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     return _exam_intake_job_read(_latest_exam_intake_job(exam_id, session))
@@ -2388,7 +2392,7 @@ def upload_exam_class_list(
     file: UploadFile | None = File(default=None),
     session: DbSession = Depends(get_repository_session),
 ) -> ExamRead:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     upload_files = list(files or [])
@@ -2411,7 +2415,7 @@ def upload_exam_class_list(
 
 @router.post("/{exam_id}/class-list/from-confirmed", response_model=ExamRead)
 def create_exam_class_list_from_confirmed_names(exam_id: int, session: DbSession = Depends(get_repository_session)) -> ExamRead:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -2433,7 +2437,7 @@ def create_exam_class_list_from_confirmed_names(exam_id: int, session: DbSession
 
 @class_lists_router.get("", response_model=list[ClassListRead])
 def list_class_lists(session: DbSession = Depends(get_repository_session)) -> list[ClassListRead]:
-    class_lists = exam_repo.list_class_lists(session)
+    class_lists = exam_repo.list_class_lists(session, owner_user_id=current_user_owner_id())
     return [payload for item in class_lists if (payload := _class_list_resource_read(item)) is not None]
 
 
@@ -2477,7 +2481,7 @@ def create_class_list_from_exam(
     names_json: str | None = Form(default=""),
     session: DbSession = Depends(get_repository_session),
 ) -> ClassListRead:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -2524,7 +2528,7 @@ def append_names_to_class_list(
     exam_id: int | None = Form(default=None),
     session: DbSession = Depends(get_repository_session),
 ) -> ClassListRead:
-    class_list = exam_repo.get_class_list(session, class_list_id)
+    class_list = _get_class_list_or_404(class_list_id, session)
     if not class_list:
         raise HTTPException(status_code=404, detail="Class list not found")
 
@@ -2550,7 +2554,7 @@ def append_names_to_class_list(
     )
 
     if exam_id is not None:
-        exam = exam_repo.get_exam(session, exam_id)
+        exam = _get_exam_or_404(exam_id, session)
         if not exam:
             raise HTTPException(status_code=404, detail="Exam not found")
         exam_class_list = _class_list_read(exam)
@@ -2568,7 +2572,7 @@ def append_names_to_class_list(
 
 @class_lists_router.delete("/{class_list_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_class_list(class_list_id: int, session: DbSession = Depends(get_repository_session)) -> Response:
-    class_list = exam_repo.get_class_list(session, class_list_id)
+    class_list = _get_class_list_or_404(class_list_id, session)
     if not class_list:
         raise HTTPException(status_code=404, detail="Class list not found")
     exam_repo.delete_class_list(session, class_list=class_list)
@@ -2578,7 +2582,7 @@ def delete_class_list(class_list_id: int, session: DbSession = Depends(get_repos
 
 @router.post("/{exam_id}/intake-jobs/retry", response_model=ExamIntakeJobRead, status_code=status.HTTP_202_ACCEPTED)
 def retry_exam_intake_job(exam_id: int, session: DbSession = Depends(get_repository_session)) -> ExamIntakeJobRead:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     latest_job = _latest_exam_intake_job(exam_id, session)
@@ -2695,14 +2699,14 @@ def _list_exam_submissions_read(exam_id: int, session: DbSession) -> list[Submis
 
 @router.get("", response_model=list[ExamRead])
 def list_exams(session: DbSession = Depends(get_repository_session)) -> list[Exam]:
-    exams = exam_repo.list_exams(session)
+    exams = exam_repo.list_exams(session, owner_user_id=current_user_owner_id())
     latest_jobs = _latest_exam_intake_jobs_by_exam_id([exam.id for exam in exams if exam.id is not None], session)
     return [_exam_read(exam, latest_jobs.get(exam.id or 0)) for exam in exams]
 
 
 @router.get("/{exam_id}", response_model=ExamDetail)
 def get_exam(exam_id: int, session: DbSession = Depends(get_repository_session)) -> ExamDetail:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -2738,7 +2742,7 @@ def delete_exam(exam_id: int, session: DbSession = Depends(get_repository_sessio
 
 @router.get("/{exam_id}/submissions", response_model=list[SubmissionRead])
 def list_exam_submissions(exam_id: int, session: DbSession = Depends(get_repository_session)) -> list[SubmissionRead]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -2747,7 +2751,7 @@ def list_exam_submissions(exam_id: int, session: DbSession = Depends(get_reposit
 
 @router.get("/{exam_id}/front-page-usage", response_model=FrontPageUsageReportRead)
 def get_exam_front_page_usage(exam_id: int, session: DbSession = Depends(get_repository_session)) -> FrontPageUsageReportRead:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -2812,7 +2816,7 @@ def get_exam_front_page_usage(exam_id: int, session: DbSession = Depends(get_rep
 
 @router.get("/{exam_id}/workspace-bootstrap", response_model=ExamWorkspaceBootstrapResponse)
 def get_exam_workspace_bootstrap(exam_id: int, session: DbSession = Depends(get_repository_session)) -> ExamWorkspaceBootstrapResponse:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -2936,7 +2940,7 @@ async def create_submission(
     request: Request,
     session: DbSession = Depends(get_repository_session),
 ) -> SubmissionRead:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3027,7 +3031,7 @@ async def create_submission(
 
 @router.post("/{exam_id}/key/register", response_model=BlobRegisterResponse)
 def register_exam_key_files(exam_id: int, payload: BlobRegisterRequest, session: DbSession = Depends(get_repository_session)) -> BlobRegisterResponse:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3203,7 +3207,7 @@ def create_bulk_submission_preview(
     session: DbSession = Depends(get_repository_session),
 ) -> BulkUploadPreviewResponse:
     _ = name_hint_regex
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3316,7 +3320,7 @@ def finalize_bulk_submission_preview(
     payload: BulkUploadFinalizeRequest,
     session: DbSession = Depends(get_repository_session),
 ) -> BulkUploadFinalizeResponse:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3374,7 +3378,7 @@ def upload_exam_key_files(
     files: list[UploadFile] = File(...),
     session: DbSession = Depends(get_repository_session),
 ) -> ExamKeyUploadResponse:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3420,7 +3424,7 @@ def upload_exam_key_files(
 
 @router.get("/{exam_id}/key/files", response_model=list[StoredFileRead])
 def list_exam_key_files(exam_id: int, session: DbSession = Depends(get_repository_session)) -> list[StoredFileRead]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3442,7 +3446,7 @@ def list_exam_key_files(exam_id: int, session: DbSession = Depends(get_repositor
 
 @router.post("/{exam_id}/key/build-pages", response_model=list[ExamKeyPageRead])
 def build_exam_key_pages(exam_id: int, session: DbSession = Depends(get_repository_session)) -> list[ExamKeyPageRead]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3485,7 +3489,7 @@ def build_exam_key_pages(exam_id: int, session: DbSession = Depends(get_reposito
 
 @router.get("/{exam_id}/key/pages", response_model=list[ExamKeyPageRead])
 def list_exam_key_pages(exam_id: int, session: DbSession = Depends(get_repository_session)) -> list[ExamKeyPageRead]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     rows = exam_repo.list_exam_key_pages(session, exam_id)
@@ -3508,7 +3512,7 @@ def list_exam_key_pages(exam_id: int, session: DbSession = Depends(get_repositor
 
 @router.post("/{exam_id}/questions", response_model=QuestionRead, status_code=status.HTTP_201_CREATED)
 def create_question(exam_id: int, payload: QuestionCreate, session: DbSession = Depends(get_repository_session)) -> QuestionRead:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3540,7 +3544,7 @@ def create_question(exam_id: int, payload: QuestionCreate, session: DbSession = 
 
 @router.get("/{exam_id}/questions", response_model=list[QuestionRead])
 def list_questions(exam_id: int, session: DbSession = Depends(get_repository_session), job_id: int | None = None) -> list[QuestionRead]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     if job_id is not None:
@@ -3609,7 +3613,7 @@ def _key_page_missing_detail(exam_id: int, page: ExamKeyPage, requested_page_num
 
 
 def _read_key_page_bytes_or_404(exam_id: int, page_number: int, session: DbSession) -> tuple[bytes, str]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
@@ -3877,9 +3881,16 @@ def _raise_parse_validation_error(*, status_code: int, detail: str, exam_exists:
 
 def _get_exam_or_404(exam_id: int, session: DbSession) -> Exam:
     exam = exam_repo.get_exam(session, exam_id)
-    if not exam:
+    if not exam or not can_access_owned_resource(exam.owner_user_id):
         _raise_parse_validation_error(status_code=404, detail="Exam not found", exam_exists=False, job_exists=False)
     return exam
+
+
+def _get_class_list_or_404(class_list_id: int, session: DbSession) -> ClassList:
+    class_list = exam_repo.get_class_list(session, class_list_id)
+    if not class_list or not can_access_owned_resource(class_list.owner_user_id):
+        raise HTTPException(status_code=404, detail="Class list not found")
+    return class_list
 
 
 def _get_job_for_exam_or_error(exam_id: int, job_id: int, session: DbSession) -> ExamKeyParseJob:
@@ -4286,7 +4297,7 @@ async def parse_answer_key_next_page(
 
 @router.get("/{exam_id}/key/parse/status")
 def get_answer_key_parse_status(exam_id: int, job_id: int | None = None, request_id: str | None = None, session: DbSession = Depends(get_repository_session)) -> dict[str, object]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     resolved_job_id = job_id or (int(request_id) if request_id and request_id.isdigit() else None)
     if not resolved_job_id:
         raise HTTPException(status_code=422, detail="job_id is required")
@@ -4441,7 +4452,7 @@ def finish_answer_key_parse(exam_id: int, job_id: int | None = None, request_id:
 
 @router.get("/{exam_id}/key/parse/latest")
 def get_latest_parse_job(exam_id: int, session: DbSession = Depends(get_repository_session)) -> dict[str, object]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         return {"exam_exists": False, "job": None}
 
@@ -4507,7 +4518,7 @@ def parse_answer_key(exam_id: int, session: DbSession = Depends(get_repository_s
 
 @router.post("/{exam_id}/key/review/complete")
 def complete_key_review(exam_id: int, session: DbSession = Depends(get_repository_session)) -> dict[str, object]:
-    exam = exam_repo.get_exam(session, exam_id)
+    exam = _get_exam_or_404(exam_id, session)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     question_count = len(question_repo.list_exam_questions(session, exam_id))

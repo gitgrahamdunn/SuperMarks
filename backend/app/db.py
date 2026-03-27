@@ -123,6 +123,8 @@ def create_db_and_tables() -> None:
     _ensure_column("exam", "front_page_template_json", "front_page_template_json TEXT")
     _ensure_column("exam", "class_list_json", "class_list_json TEXT")
     _ensure_column("exam", "class_list_source_json", "class_list_source_json TEXT")
+    _ensure_column("exam", "owner_user_id", "owner_user_id INTEGER")
+    _ensure_column("classlist", "owner_user_id", "owner_user_id INTEGER")
     _ensure_column("examintakejob", "attempt_count", "attempt_count INTEGER DEFAULT 0")
     _ensure_column("examintakejob", "runner_id", "runner_id VARCHAR")
     _ensure_column("examintakejob", "lease_expires_at", "lease_expires_at VARCHAR")

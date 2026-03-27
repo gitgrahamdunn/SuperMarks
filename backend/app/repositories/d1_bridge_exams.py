@@ -107,7 +107,7 @@ def get_exam(session: DbSession, exam_id: int) -> Exam | None:
     return _exam_from_row(
         _bridge().query_first(
             """
-            SELECT id, name, created_at, teacher_style_profile_json, front_page_template_json,
+            SELECT id, owner_user_id, name, created_at, teacher_style_profile_json, front_page_template_json,
                    class_list_json, class_list_source_json, status
             FROM exam
             WHERE id = ?
@@ -117,16 +117,16 @@ def get_exam(session: DbSession, exam_id: int) -> Exam | None:
     )
 
 
-def create_exam(session: DbSession, *, name: str) -> Exam:
+def create_exam(session: DbSession, *, name: str, owner_user_id: int | None = None) -> Exam:
     _ = session
     row = _bridge().query_first(
         """
         INSERT INTO exam
-            (name, created_at, teacher_style_profile_json, front_page_template_json, class_list_json, class_list_source_json, status)
-        VALUES (?, ?, NULL, NULL, NULL, NULL, ?)
-        RETURNING id, name, created_at, teacher_style_profile_json, front_page_template_json, class_list_json, class_list_source_json, status
+            (owner_user_id, name, created_at, teacher_style_profile_json, front_page_template_json, class_list_json, class_list_source_json, status)
+        VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?)
+        RETURNING id, owner_user_id, name, created_at, teacher_style_profile_json, front_page_template_json, class_list_json, class_list_source_json, status
         """,
-        [name, _normalize_value(utcnow()), "DRAFT"],
+        [owner_user_id, name, _normalize_value(utcnow()), "DRAFT"],
     )
     created = _exam_from_row(row)
     if created is None:
@@ -142,7 +142,7 @@ def update_exam(session: DbSession, exam: Exam, **fields) -> Exam:
         "exam",
         int(exam.id or 0),
         fields,
-        "id, name, created_at, teacher_style_profile_json, front_page_template_json, class_list_json, class_list_source_json, status",
+        "id, owner_user_id, name, created_at, teacher_style_profile_json, front_page_template_json, class_list_json, class_list_source_json, status",
     )
     updated = _exam_from_row(row)
     if updated is None:
@@ -150,27 +150,45 @@ def update_exam(session: DbSession, exam: Exam, **fields) -> Exam:
     return updated
 
 
-def list_exams(session: DbSession) -> list[Exam]:
+def list_exams(session: DbSession, owner_user_id: int | None = None) -> list[Exam]:
     _ = session
+    params: list[Any] = []
+    where_clause = ""
+    if owner_user_id is not None:
+        where_clause = "WHERE owner_user_id = ?"
+        params.append(owner_user_id)
     rows = _bridge().query_all(
         """
-        SELECT id, name, created_at, teacher_style_profile_json, front_page_template_json,
+        SELECT id, owner_user_id, name, created_at, teacher_style_profile_json, front_page_template_json,
                class_list_json, class_list_source_json, status
         FROM exam
-        ORDER BY created_at DESC, id DESC
         """
+        + where_clause
+        + """
+        ORDER BY created_at DESC, id DESC
+        """,
+        params,
     )
     return _hydrate_many(Exam, rows)
 
 
-def list_class_lists(session: DbSession) -> list[ClassList]:
+def list_class_lists(session: DbSession, owner_user_id: int | None = None) -> list[ClassList]:
     _ = session
+    params: list[Any] = []
+    where_clause = ""
+    if owner_user_id is not None:
+        where_clause = "WHERE owner_user_id = ?"
+        params.append(owner_user_id)
     rows = _bridge().query_all(
         """
-        SELECT id, name, names_json, source_json, created_at
+        SELECT id, owner_user_id, name, names_json, source_json, created_at
         FROM classlist
-        ORDER BY created_at DESC, id DESC
         """
+        + where_clause
+        + """
+        ORDER BY created_at DESC, id DESC
+        """,
+        params,
     )
     return _hydrate_many(ClassList, rows)
 
@@ -180,7 +198,7 @@ def get_class_list(session: DbSession, class_list_id: int) -> ClassList | None:
     return _class_list_from_row(
         _bridge().query_first(
             """
-            SELECT id, name, names_json, source_json, created_at
+            SELECT id, owner_user_id, name, names_json, source_json, created_at
             FROM classlist
             WHERE id = ?
             """,
@@ -189,15 +207,15 @@ def get_class_list(session: DbSession, class_list_id: int) -> ClassList | None:
     )
 
 
-def create_class_list(session: DbSession, *, name: str) -> ClassList:
+def create_class_list(session: DbSession, *, name: str, owner_user_id: int | None = None) -> ClassList:
     _ = session
     row = _bridge().query_first(
         """
-        INSERT INTO classlist (name, names_json, source_json, created_at)
-        VALUES (?, '[]', NULL, ?)
-        RETURNING id, name, names_json, source_json, created_at
+        INSERT INTO classlist (owner_user_id, name, names_json, source_json, created_at)
+        VALUES (?, ?, '[]', NULL, ?)
+        RETURNING id, owner_user_id, name, names_json, source_json, created_at
         """,
-        [name, _normalize_value(utcnow())],
+        [owner_user_id, name, _normalize_value(utcnow())],
     )
     created = _class_list_from_row(row)
     if created is None:
@@ -211,7 +229,7 @@ def update_class_list_payload(session: DbSession, *, class_list: ClassList, name
         "classlist",
         int(class_list.id or 0),
         {"names_json": names_json, "source_json": source_json},
-        "id, name, names_json, source_json, created_at",
+        "id, owner_user_id, name, names_json, source_json, created_at",
     )
     updated = _class_list_from_row(row)
     if updated is None:

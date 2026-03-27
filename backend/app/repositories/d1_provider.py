@@ -16,9 +16,9 @@ from dataclasses import dataclass
 from typing import cast
 
 from app.settings import settings
-from app.repositories.contracts import ExamRepository, QuestionRepository, ReportingRepository, RepositoryProvider, SubmissionRepository
+from app.repositories.contracts import ExamRepository, QuestionRepository, ReportingRepository, RepositoryProvider, SubmissionRepository, UserRepository
 from app.repositories.sqlmodel_provider import provider as sqlmodel_provider
-from . import d1_bridge_exams, d1_bridge_questions, d1_bridge_reporting, d1_bridge_submissions
+from . import d1_bridge_exams, d1_bridge_questions, d1_bridge_reporting, d1_bridge_submissions, d1_bridge_users
 
 
 def _bridge_is_configured() -> bool:
@@ -423,6 +423,30 @@ class D1BridgeHybridReportingRepository:
         return d1_bridge_reporting.load_exam_reporting_collections(session, exam_id)
 
 
+@dataclass(frozen=True)
+class D1BridgeHybridUserRepository:
+    def __getattr__(self, name: str):
+        bridge_attr = _strict_bridge_attr(d1_bridge_users, name)
+        if bridge_attr is not None:
+            return bridge_attr
+        return getattr(sqlmodel_provider.users, name)
+
+    def get_user_by_id(self, session, user_id: int):
+        if not _bridge_is_configured():
+            return sqlmodel_provider.users.get_user_by_id(session, user_id)
+        return d1_bridge_users.get_user_by_id(session, user_id)
+
+    def get_user_by_identity(self, session, **kwargs):
+        if not _bridge_is_configured():
+            return sqlmodel_provider.users.get_user_by_identity(session, **kwargs)
+        return d1_bridge_users.get_user_by_identity(session, **kwargs)
+
+    def upsert_user_identity(self, session, **kwargs):
+        if not _bridge_is_configured():
+            return sqlmodel_provider.users.upsert_user_identity(session, **kwargs)
+        return d1_bridge_users.upsert_user_identity(session, **kwargs)
+
+
 def get_provider() -> RepositoryProvider:
     backend = (os.getenv("SUPERMARKS_REPOSITORY_BACKEND", "sqlmodel") or "sqlmodel").strip().lower()
     if backend == "d1-bridge":
@@ -432,6 +456,7 @@ def get_provider() -> RepositoryProvider:
             submissions: SubmissionRepository = cast(SubmissionRepository, D1BridgeHybridSubmissionRepository())
             questions: QuestionRepository = cast(QuestionRepository, D1BridgeHybridQuestionRepository())
             reporting: ReportingRepository = cast(ReportingRepository, D1BridgeHybridReportingRepository())
+            users: UserRepository = cast(UserRepository, D1BridgeHybridUserRepository())
 
         return cast(RepositoryProvider, D1BridgeHybridRepositoryProvider())
 

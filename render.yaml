@@ -42,3 +42,17 @@ services:
         sync: false
       - key: SUPERMARKS_S3_SECRET_ACCESS_KEY
         sync: false
+      - key: SUPERMARKS_AUTH_SESSION_SECRET
+        sync: false
+      - key: SUPERMARKS_AUTH_ALLOWED_RETURN_ORIGINS
+        sync: false
+      - key: SUPERMARKS_MAGIC_LINK_LOGIN_ENABLED
+        value: "1"
+      - key: SUPERMARKS_EMAIL_PROVIDER
+        value: log
+      - key: SUPERMARKS_EMAIL_API_KEY
+        sync: false
+      - key: SUPERMARKS_EMAIL_FROM_ADDRESS
+        sync: false
+      - key: SUPERMARKS_OIDC_PROVIDERS_JSON
+        value: ""

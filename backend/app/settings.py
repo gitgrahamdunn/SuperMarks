@@ -116,6 +116,53 @@ class Settings(BaseSettings):
         default=str(DEFAULT_FRONTEND_DIST_DIR),
         validation_alias=AliasChoices("SUPERMARKS_FRONTEND_DIST_DIR", "FRONTEND_DIST_DIR"),
     )
+    auth_session_secret: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "SUPERMARKS_AUTH_SESSION_SECRET",
+            "AUTH_SESSION_SECRET",
+            "BACKEND_SESSION_SECRET",
+        ),
+    )
+    auth_allowed_return_origins: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173",
+        validation_alias=AliasChoices(
+            "SUPERMARKS_AUTH_ALLOWED_RETURN_ORIGINS",
+            "AUTH_ALLOWED_RETURN_ORIGINS",
+        ),
+    )
+    oidc_providers_json: str = Field(
+        default="",
+        validation_alias=AliasChoices("SUPERMARKS_OIDC_PROVIDERS_JSON", "OIDC_PROVIDERS_JSON"),
+    )
+    auth_token_ttl_seconds: int = Field(
+        default=60 * 60 * 24 * 7,
+        validation_alias=AliasChoices("SUPERMARKS_AUTH_TOKEN_TTL_SECONDS", "AUTH_TOKEN_TTL_SECONDS"),
+    )
+    magic_link_token_ttl_seconds: int = Field(
+        default=60 * 15,
+        validation_alias=AliasChoices("SUPERMARKS_MAGIC_LINK_TOKEN_TTL_SECONDS", "MAGIC_LINK_TOKEN_TTL_SECONDS"),
+    )
+    magic_link_login_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SUPERMARKS_MAGIC_LINK_LOGIN_ENABLED", "MAGIC_LINK_LOGIN_ENABLED"),
+    )
+    email_provider: str = Field(
+        default="log",
+        validation_alias=AliasChoices("SUPERMARKS_EMAIL_PROVIDER", "EMAIL_PROVIDER"),
+    )
+    email_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_EMAIL_API_KEY", "EMAIL_API_KEY", "RESEND_API_KEY"),
+    )
+    email_from_address: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_EMAIL_FROM_ADDRESS", "EMAIL_FROM_ADDRESS"),
+    )
+    email_base_url: str = Field(
+        default="https://api.resend.com",
+        validation_alias=AliasChoices("SUPERMARKS_EMAIL_BASE_URL", "EMAIL_BASE_URL", "RESEND_BASE_URL"),
+    )
 
     # Deployment toggles
     managed_runtime_environment: bool = Field(
@@ -186,6 +233,23 @@ class Settings(BaseSettings):
     @property
     def has_d1_bridge(self) -> bool:
         return bool((self.d1_bridge_url or "").strip() and (self.d1_bridge_token or "").strip())
+
+    @property
+    def email_delivery_enabled(self) -> bool:
+        provider = self.email_provider.strip().lower()
+        if provider == "log":
+            return True
+        if provider == "resend":
+            return bool((self.email_api_key or "").strip() and (self.email_from_address or "").strip())
+        return False
+
+    @property
+    def oidc_enabled(self) -> bool:
+        return bool(self.oidc_providers_json.strip())
+
+    @property
+    def auth_return_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.auth_allowed_return_origins.split(",") if origin.strip()]
 
 
 settings = Settings()

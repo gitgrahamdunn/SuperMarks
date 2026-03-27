@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -33,8 +33,37 @@ class ExamStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class AppUser(SQLModel, table=True):
+    __tablename__ = "appuser"
+    __table_args__ = (UniqueConstraint("auth_issuer", "auth_subject", name="uq_appuser_auth_identity"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    auth_issuer: str = Field(index=True)
+    auth_subject: str = Field(index=True)
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    given_name: Optional[str] = None
+    family_name: Optional[str] = None
+    picture_url: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AppLoginToken(SQLModel, table=True):
+    __tablename__ = "applogintoken"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="appuser.id", index=True)
+    email: str = Field(index=True)
+    token_hash: str = Field(index=True)
+    expires_at: datetime
+    used_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class Exam(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_user_id: Optional[int] = Field(default=None, foreign_key="appuser.id", index=True)
     name: str
     created_at: datetime = Field(default_factory=utcnow)
     teacher_style_profile_json: Optional[str] = None
@@ -46,6 +75,7 @@ class Exam(SQLModel, table=True):
 
 class ClassList(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    owner_user_id: Optional[int] = Field(default=None, foreign_key="appuser.id", index=True)
     name: str
     names_json: str = "[]"
     source_json: Optional[str] = None

@@ -21,8 +21,13 @@ class ReportingRepository(Protocol):
     pass
 
 
+class UserRepository(Protocol):
+    pass
+
+
 class RepositoryProvider(Protocol):
     exams: ExamRepository
     submissions: SubmissionRepository
     questions: QuestionRepository
     reporting: ReportingRepository
+    users: UserRepository

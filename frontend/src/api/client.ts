@@ -1,4 +1,5 @@
 import type {
+  AuthStatusRead,
   BulkFinalizePayloadCandidate,
   BulkFinalizeResponse,
   BulkUploadPreview,
@@ -30,6 +31,7 @@ import type {
 
 const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '';
 const API_KEY = import.meta.env.VITE_BACKEND_API_KEY?.trim() || '';
+const AUTH_TOKEN_STORAGE_KEY = 'sm_token';
 const APP_VERSION = import.meta.env.VITE_APP_VERSION?.trim() || import.meta.env.VITE_BUILD_ID?.trim() || `${import.meta.env.MODE} (${new Date(__APP_BUILD_TS__).toISOString()})`;
 const API_BASE_URL = configuredApiBaseUrl;
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -109,8 +111,31 @@ let openApiFetchErrorMessage: string | null = null;
 
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...(extra || {}) };
-  if (API_KEY) h['X-API-Key'] = API_KEY;
+  const authToken = getStoredAuthToken();
+  if (authToken) {
+    h.Authorization = `Bearer ${authToken}`;
+  } else if (API_KEY) {
+    h['X-API-Key'] = API_KEY;
+  }
   return h;
+}
+
+function getStoredAuthToken(): string {
+  try {
+    return window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY)?.trim() || '';
+  } catch {
+    return '';
+  }
+}
+
+function persistAuthToken(token: string): void {
+  const trimmed = token.trim();
+  if (!trimmed) return;
+  window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, trimmed);
+}
+
+function clearStoredAuthToken(): void {
+  window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
 }
 
 function normalizeHeaders(headers?: HeadersInit): Record<string, string> {
@@ -172,6 +197,23 @@ function buildApiUrl(path: string): string {
   return joinUrl(API_BASE_URL, path);
 }
 
+function buildAuthUrl(path: string): string {
+  if (API_CONFIG_ERROR) {
+    throw new Error(API_CONFIG_ERROR);
+  }
+  return joinUrl(API_BASE_URL.replace(/\/?api\/?$/i, ''), `auth/${path}`);
+}
+
+function buildAuthenticatedAssetUrl(path: string): string {
+  const url = buildApiUrl(path);
+  const authToken = getStoredAuthToken();
+  if (!authToken) {
+    return url;
+  }
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}access_token=${encodeURIComponent(authToken)}`;
+}
+
 type FetchWithTimeoutResult = {
   response: Response;
   clear: () => void;
@@ -211,17 +253,10 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   };
 }
 
-async function request<T>(path: string, options: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+async function requestAbsolute<T>(url: string, options: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   if (API_CONFIG_ERROR) {
     throw new Error(API_CONFIG_ERROR);
   }
-
-  const normalizedPath = path.replace(/^\/+/, '');
-  if (!normalizedPath) {
-    throw new Error(`Invalid API path: "${path}"`);
-  }
-
-  const url = buildApiUrl(normalizedPath);
   const method = (options.method || 'GET').toUpperCase();
   const requestOptions = buildRequestOptions(options);
   const { response, clear } = await fetchWithTimeout(url, requestOptions, timeoutMs);
@@ -239,6 +274,27 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = D
     return {} as T;
   } catch (error) {
     throw error;
+  } finally {
+    clear();
+  }
+}
+
+async function request<T>(path: string, options: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+  const normalizedPath = path.replace(/^\/+/, '');
+  if (!normalizedPath) {
+    throw new Error(`Invalid API path: "${path}"`);
+  }
+  return requestAbsolute<T>(buildApiUrl(normalizedPath), options, timeoutMs);
+}
+
+async function fetchAssetObjectUrl(absoluteUrl: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string> {
+  const { response, clear } = await fetchWithTimeout(absoluteUrl, buildRequestOptions(), timeoutMs);
+  try {
+    if (!response.ok) {
+      throw buildErrorDetailsFromResponse(absoluteUrl, 'GET', response.status, await response.text());
+    }
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
   } finally {
     clear();
   }
@@ -451,6 +507,23 @@ export function resetApiContractCheckCache(): void {
 
 export const api = {
   getExams: (options?: RequestInit) => request<ExamRead[]>('exams', options, EXAM_READ_TIMEOUT_MS),
+  getAuthStatus: () => requestAbsolute<AuthStatusRead>(buildAuthUrl('me')),
+  logout: () => requestAbsolute<{ ok: boolean }>(buildAuthUrl('logout'), { method: 'POST' }),
+  requestMagicLink: (email: string, returnTo?: string) => requestAbsolute<{ ok: boolean }>(
+    buildAuthUrl('magic-link/request'),
+    {
+      method: 'POST',
+      body: JSON.stringify({ email, return_to: returnTo }),
+    },
+  ),
+  persistAuthToken,
+  clearStoredAuthToken,
+  getStoredAuthToken,
+  buildAuthLoginUrl: (providerSlug: string, returnTo?: string) => {
+    const url = new URL(buildAuthUrl(`login/${providerSlug}`), window.location.origin);
+    if (returnTo) url.searchParams.set('return_to', returnTo);
+    return url.toString();
+  },
   createExam: (name = '', options?: RequestInit) => request<ExamRead>('exams', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -670,7 +743,7 @@ export const api = {
   },
   buildExamKeyPages: (examId: number, options?: RequestInit) => request<ExamKeyPage[]>(`exams/${examId}/key/build-pages`, { method: 'POST', ...options }, BUILD_PAGES_TIMEOUT_MS),
   listExamKeyPages: (examId: number) => request<ExamKeyPage[]>(`exams/${examId}/key/pages`),
-  getExamKeyPageUrl: (examId: number, pageNumber: number) => buildApiUrl(`exams/${examId}/key/page/${pageNumber}`),
+  getExamKeyPageUrl: (examId: number, pageNumber: number) => buildAuthenticatedAssetUrl(`exams/${examId}/key/page/${pageNumber}`),
   completeExamKeyReview: (examId: number) => request<{ exam_id: number; status: string; warnings: string[] }>(`exams/${examId}/key/review/complete`, { method: 'POST' }),
   parseExamKey: (examId: number, options?: RequestInit) => request<Record<string, unknown>>(`exams/${examId}/key/parse`, { method: 'POST', ...options }, KEY_PARSE_TIMEOUT_MS),
 
@@ -738,15 +811,16 @@ export const api = {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   }),
-  getPageImageUrl: (submissionId: number, pageNumber: number) => buildApiUrl(`submissions/${submissionId}/page/${pageNumber}`),
-  getPagePreviewUrl: (submissionId: number, pageNumber: number) => buildApiUrl(`submissions/${submissionId}/page/${pageNumber}/preview`),
-  getCropImageUrl: (submissionId: number, questionId: number) => buildApiUrl(`submissions/${submissionId}/crop/${questionId}`),
+  getPageImageUrl: (submissionId: number, pageNumber: number) => buildAuthenticatedAssetUrl(`submissions/${submissionId}/page/${pageNumber}`),
+  getPagePreviewUrl: (submissionId: number, pageNumber: number) => buildAuthenticatedAssetUrl(`submissions/${submissionId}/page/${pageNumber}/preview`),
+  fetchAssetObjectUrl,
+  getCropImageUrl: (submissionId: number, questionId: number) => buildAuthenticatedAssetUrl(`submissions/${submissionId}/crop/${questionId}`),
   getSignedBlobUrl: (pathname: string) => request<{ url: string }>('blob/signed-url', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pathname }),
   }),
-  getQuestionKeyVisualUrl: (examId: number, questionId: number) => buildApiUrl(`exams/${examId}/questions/${questionId}/key-visual`),
+  getQuestionKeyVisualUrl: (examId: number, questionId: number) => buildAuthenticatedAssetUrl(`exams/${examId}/questions/${questionId}/key-visual`),
   saveRegions: (questionId: number, regions: Region[]) => request<Region[]>(`questions/${questionId}/regions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -782,4 +856,4 @@ export const api = {
   },
 };
 
-export { API_BASE_URL, ApiError, authHeaders, buildApiUrl, checkBackendApiContract, getOpenApiPaths, joinUrl };
+export { API_BASE_URL, ApiError, authHeaders, buildApiUrl, buildAuthUrl, checkBackendApiContract, getOpenApiPaths, joinUrl };
