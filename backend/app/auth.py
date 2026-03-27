@@ -123,8 +123,41 @@ def magic_link_enabled() -> bool:
     return settings.magic_link_login_enabled and settings.email_delivery_enabled
 
 
+def _env_truthy(name: str) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def current_dev_login_key() -> str:
+    return (
+        os.getenv("SUPERMARKS_DEV_LOGIN_KEY")
+        or os.getenv("DEV_LOGIN_KEY")
+        or settings.dev_login_key
+        or ""
+    ).strip()
+
+
+def current_dev_login_email() -> str:
+    return (
+        os.getenv("SUPERMARKS_DEV_LOGIN_EMAIL")
+        or os.getenv("DEV_LOGIN_EMAIL")
+        or settings.dev_login_email
+        or "codex-dev@supermarks.local"
+    ).strip()
+
+
+def current_dev_login_name() -> str:
+    return (
+        os.getenv("SUPERMARKS_DEV_LOGIN_NAME")
+        or os.getenv("DEV_LOGIN_NAME")
+        or settings.dev_login_name
+        or "Codex Dev"
+    ).strip()
+
+
 def dev_login_enabled() -> bool:
-    return settings.dev_login_enabled and bool((settings.dev_login_key or "").strip())
+    enabled = _env_truthy("SUPERMARKS_DEV_LOGIN_ENABLED") or _env_truthy("DEV_LOGIN_ENABLED") or settings.dev_login_enabled
+    return enabled and bool(current_dev_login_key())
 
 
 def _token_secret() -> str:

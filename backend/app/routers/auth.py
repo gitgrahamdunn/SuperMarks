@@ -17,6 +17,9 @@ from app.auth import (
     build_magic_link_token,
     build_user_bearer_token,
     clear_browser_session,
+    current_dev_login_email,
+    current_dev_login_key,
+    current_dev_login_name,
     current_auth_context,
     dev_login_enabled,
     get_provider_or_404,
@@ -181,18 +184,18 @@ def login_with_dev_key(payload: DevLoginRequest, request: Request) -> DevLoginRe
     if not dev_login_enabled():
         raise HTTPException(status_code=404, detail="Developer login is not enabled")
 
-    expected_key = (settings.dev_login_key or "").strip()
+    expected_key = current_dev_login_key()
     if not expected_key or not hmac.compare_digest(payload.key.strip(), expected_key):
         raise HTTPException(status_code=401, detail="Invalid developer login key")
 
-    dev_email = normalize_email_address(settings.dev_login_email)
+    dev_email = normalize_email_address(current_dev_login_email())
     with open_repository_session() as session:
         user = user_repo.upsert_user_identity(
             session,
             auth_issuer="dev-login",
             auth_subject=dev_email,
             email=dev_email,
-            full_name=settings.dev_login_name.strip() or "Codex Dev",
+            full_name=current_dev_login_name() or "Codex Dev",
             given_name="Codex",
             family_name="Dev",
             picture_url=None,
