@@ -2176,8 +2176,10 @@ def _enqueue_intake_job_for_exam(
         raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
 
     normalized_thinking_level = _normalize_front_page_gemini_thinking_level(front_page_thinking_level)
-    exam_repo.update_exam(session, exam)
-    session.flush()
+    if exam.id is None:
+        exam = exam_repo.create_exam(session, name=_normalized_exam_name(exam.name))
+    else:
+        exam_repo.update_exam(session, exam)
 
     if selected_class_list_id:
         class_list = exam_repo.get_class_list(session, selected_class_list_id)
@@ -2245,10 +2247,12 @@ def _enqueue_intake_job_for_exam(
                 "class_list_count": len(_exam_known_student_names(exam)),
             }),
         )
-        session.commit()
+        if db.engine is not None:
+            session.commit()
         return job
     except Exception:
-        session.rollback()
+        if db.engine is not None:
+            session.rollback()
         if cleanup_root is not None:
             _remove_tree(cleanup_root)
         raise
@@ -2272,7 +2276,7 @@ def create_exam_with_intake(
     if class_list_file is not None:
         class_list_upload_files.append(class_list_file)
 
-    exam = Exam(name=_normalized_exam_name(name))
+    exam = exam_repo.create_exam(session, name=_normalized_exam_name(name))
     job = _enqueue_intake_job_for_exam(
         exam=exam,
         upload_files=upload_files,
