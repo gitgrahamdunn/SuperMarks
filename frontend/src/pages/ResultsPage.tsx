@@ -243,13 +243,13 @@ export function ResultsPage() {
         <p style={{ margin: 0 }}><Link to={`/submissions/${submissionId}`}>← Back to Submission</Link></p>
         <div className="page-header">
           <div>
-            <p className="page-eyebrow">Results review</p>
-            <h1 className="page-title">Marked results</h1>
-            <p className="page-subtitle">Check saved totals, objective breakdowns, and question-level details in one place.</p>
+            <p className="page-eyebrow">Results</p>
+            <h1 className="page-title">Student results</h1>
+            <p className="page-subtitle">Review saved totals, objective summaries, and marking details in one place.</p>
           </div>
           <div className="page-toolbar">
             <Link className="btn btn-secondary" to={results?.capture_mode === 'front_page_totals' ? `/submissions/${submissionId}/front-page-totals?examId=${examId}` : `/submissions/${submissionId}/mark?examId=${examId}`}>
-              {results?.capture_mode === 'front_page_totals' ? 'Open front-page totals' : 'Open marking workspace'}
+              {results?.capture_mode === 'front_page_totals' ? 'Open totals review' : 'Open marking workspace'}
             </Link>
             <span className="status-pill status-in-progress">{results?.capture_mode === 'front_page_totals' ? 'Front-page totals' : `${rows.length} questions`}</span>
           </div>
@@ -262,7 +262,7 @@ export function ResultsPage() {
             <div className="panel-title-row">
               <div>
                 <h2 className="section-title">Student summary</h2>
-                <p className="subtle-text">Teacher-facing total and objective breakdown for this submission.</p>
+                <p className="subtle-text">Saved total, objective breakdown, and review context for this submission.</p>
               </div>
               <span className="status-pill status-complete">{results.total_score} / {results.total_possible}</span>
             </div>

@@ -202,10 +202,10 @@ export function ExamDetailPage() {
     const blockedRow = blockedRows[0];
     if (blockedRow) {
       return {
-        title: `Unblock ${formatStudentName(blockedRow.student_name)}`,
+      title: `Resolve ${formatStudentName(blockedRow.student_name)}`,
         detail: blockedRow.next_action || blockedRow.summary_reasons[0] || 'Open the blocked submission and clear the first flagged question.',
         href: buildSubmissionWorkflowLink(blockedRow.submission_id, blockedRow.capture_mode, blockedRow.next_question_id),
-        cta: blockedRow.next_return_point ? `Open ${blockedRow.next_return_point}` : 'Open blocker',
+        cta: blockedRow.next_return_point ? `Open ${blockedRow.next_return_point}` : 'Open submission',
         tone: 'status-blocked',
       };
     }
@@ -213,10 +213,10 @@ export function ExamDetailPage() {
     const inProgressRow = inProgressRows[0];
     if (inProgressRow) {
       return {
-        title: `Resume ${formatStudentName(inProgressRow.student_name)}`,
+        title: `Continue ${formatStudentName(inProgressRow.student_name)}`,
         detail: inProgressRow.next_action || 'Continue the next question that still needs teacher entry.',
         href: buildSubmissionWorkflowLink(inProgressRow.submission_id, inProgressRow.capture_mode, inProgressRow.next_question_id),
-        cta: inProgressRow.next_return_point ? `Resume at ${inProgressRow.next_return_point}` : 'Resume marking',
+        cta: inProgressRow.next_return_point ? `Continue at ${inProgressRow.next_return_point}` : 'Continue review',
         tone: 'status-in-progress',
       };
     }
@@ -224,10 +224,10 @@ export function ExamDetailPage() {
     const readyRow = readyRows[0];
     if (readyRow) {
       return {
-        title: `Start ${formatStudentName(readyRow.student_name)}`,
-        detail: readyRow.next_action || 'This submission is prepared and ready for teacher marking.',
+        title: `Open ${formatStudentName(readyRow.student_name)}`,
+        detail: readyRow.next_action || 'This submission is ready for review.',
         href: buildSubmissionWorkflowLink(readyRow.submission_id, readyRow.capture_mode, readyRow.next_question_id),
-        cta: readyRow.next_return_point ? `Start at ${readyRow.next_return_point}` : 'Open marking',
+        cta: readyRow.next_return_point ? `Open ${readyRow.next_return_point}` : 'Open review',
         tone: 'status-ready',
       };
     }
@@ -282,10 +282,10 @@ export function ExamDetailPage() {
 
   const commandLanes = [
     {
-      title: 'Front-page totals lane',
-      description: 'Fast capture for papers that already show reporting totals.',
+      title: 'Front-page totals',
+      description: 'Fast review for papers that already show the student total on the front page.',
       summary: laneSummaries.frontPage,
-      ctaFallback: 'Open totals capture',
+      ctaFallback: 'Open totals review',
     },
   ];
 
@@ -300,12 +300,12 @@ export function ExamDetailPage() {
   const commandCenterTitle = firstFlaggedPageNumber
     ? 'Answer key review is the current bottleneck'
     : blockedRows.length > 0
-      ? 'A blocked submission is slowing the queue'
+      ? 'A submission needs attention'
       : inProgressRows.length > 0
-        ? 'Marking is underway'
+        ? 'Review is in progress'
         : readyRows.length > 0
-          ? 'The class is ready for the next marking pass'
-          : 'Class workflow is complete';
+          ? 'The class is ready for the next review pass'
+          : 'Class review is complete';
 
   const commandCenterDetail = firstFlaggedPageNumber
     ? `Clear flagged key page ${firstFlaggedPageNumber}, then return to the student lanes once the answer-key review is trustworthy again.`
@@ -997,11 +997,11 @@ export function ExamDetailPage() {
                             {lane.summary.nextRow.capture_mode === 'front_page_totals'
                               ? lane.ctaFallback
                               : lane.summary.nextRow.workflow_status === 'blocked'
-                                ? 'Open blocker'
+                                ? 'Open submission'
                                 : lane.summary.nextRow.workflow_status === 'in_progress'
-                                  ? 'Resume marking'
+                                  ? 'Continue review'
                                   : lane.summary.nextRow.workflow_status === 'ready'
-                                    ? 'Start marking'
+                                    ? 'Open review'
                                     : lane.ctaFallback}
                           </Link>
                         </div>
@@ -1505,7 +1505,7 @@ function statusClassName(status: string): string {
 }
 
 function workflowLaneLabel(captureMode: string): string {
-  return captureMode === 'front_page_totals' ? 'Front-page totals lane' : 'Question-level lane';
+  return captureMode === 'front_page_totals' ? 'Front-page totals' : 'Question-level review';
 }
 
 function objectiveExportReadyRatio(objective: ExamObjectiveRead): number {
@@ -1559,10 +1559,10 @@ function reportingNextActionLabel(row: SubmissionDashboardRow): string {
     return row.next_return_point ? `Open ${row.next_return_point} to clear the blocker.` : 'Resolve the first blocked question before continuing.';
   }
   if (row.workflow_status === 'in_progress') {
-    return row.next_return_point ? `Resume marking at ${row.next_return_point}.` : 'Continue the next question needing teacher entry.';
+    return row.next_return_point ? `Continue review at ${row.next_return_point}.` : 'Continue the next question that still needs review.';
   }
   if (row.workflow_status === 'ready') {
-    return row.next_return_point ? `Start marking at ${row.next_return_point}.` : 'Prepared and ready to start marking.';
+    return row.next_return_point ? `Open review at ${row.next_return_point}.` : 'Ready to open and review.';
   }
   return 'Review results or return to the class queue.';
 }
@@ -1576,15 +1576,15 @@ function primaryActionLabel(row: SubmissionDashboardRow): string {
     return row.export_ready ? 'Review confirmed totals' : 'Open totals capture';
   }
   if (row.workflow_status === 'blocked') {
-    return row.next_return_point ? `Open blocker: ${row.next_return_point}` : 'Open blocker';
+    return row.next_return_point ? `Open submission: ${row.next_return_point}` : 'Open submission';
   }
   if (row.workflow_status === 'in_progress') {
-    return row.next_return_point ? `Resume: ${row.next_return_point}` : 'Resume marking';
+    return row.next_return_point ? `Continue: ${row.next_return_point}` : 'Continue review';
   }
   if (row.workflow_status === 'ready') {
-    return row.next_return_point ? `Start: ${row.next_return_point}` : 'Start marking';
+    return row.next_return_point ? `Open: ${row.next_return_point}` : 'Open review';
   }
-  return 'Open marking';
+  return 'Open review';
 }
 
 

@@ -47,12 +47,12 @@ const MB = 1024 * 1024;
 const LARGE_FILE_BYTES = 8 * MB;
 const LARGE_TOTAL_BYTES = 12 * MB;
 const CHECKLIST_ORDER: Array<{ id: ParseChecklistStepId; label: string }> = [
-  { id: 'creating_exam', label: 'Creating test workspace' },
-  { id: 'uploading_key', label: 'Uploading test bundle' },
+  { id: 'creating_exam', label: 'Creating exam workspace' },
+  { id: 'uploading_key', label: 'Uploading source files' },
   { id: 'building_key_pages', label: 'Preparing page images' },
-  { id: 'reading_questions', label: 'Extracting student names' },
-  { id: 'detecting_marks', label: 'Building totals queue' },
-  { id: 'drafting_rubric', label: 'Preparing confirmation handoff' },
+  { id: 'reading_questions', label: 'Reading student names' },
+  { id: 'detecting_marks', label: 'Preparing the review queue' },
+  { id: 'drafting_rubric', label: 'Saving review data' },
   { id: 'finalizing', label: 'Finalizing exam workspace' },
 ];
 
@@ -135,15 +135,15 @@ const normalizeExamStatus = (exam: ExamRead) => {
   }
   if (normalized === 'draft') {
     if (!exam.intake_job) {
-      return { label: 'Upload interrupted', tone: 'status-blocked' };
+      return { label: 'Setup interrupted', tone: 'status-blocked' };
     }
     return { label: 'Working', tone: 'status-in-progress' };
   }
   if (normalized === 'ready' || normalized.includes('confirm')) {
-    return { label: 'Checked', tone: 'status-complete' };
+    return { label: 'Ready to review', tone: 'status-complete' };
   }
   if (normalized.includes('complete') || normalized.includes('done')) {
-    return { label: 'Checked', tone: 'status-complete' };
+    return { label: 'Ready to review', tone: 'status-complete' };
   }
   if (normalized.includes('progress') || normalized.includes('review')) {
     return { label: 'Ready', tone: 'status-ready' };
@@ -157,28 +157,28 @@ const normalizeExamStatus = (exam: ExamRead) => {
 const libraryStatusClassName = (label: string) => {
   if (label === 'Working') return 'status-library-working';
   if (label === 'Ready') return 'status-library-ready';
-  if (label === 'Checked') return 'status-library-checked';
+  if (label === 'Ready to review') return 'status-library-checked';
   return '';
 };
 
 const PREPARING_STAGE_LABELS: Record<string, string> = {
-  queued: 'Preparing files',
+  queued: 'Preparing workspace',
   resuming: 'Resuming',
   extracting_front_pages: 'Reading front pages',
   detecting_names: 'Reading names',
   creating_submissions: 'Building review queue',
-  warming_initial_review: 'Preparing first papers',
-  warming_remaining_review: 'Preparing remaining papers',
+  warming_initial_review: 'Preparing first submissions',
+  warming_remaining_review: 'Preparing remaining submissions',
   warming_review: 'Preparing review',
   finalizing_review: 'Finalizing review',
   complete: 'Ready to review',
   partial_ready: 'Review ready',
-  review_not_ready: 'Review blocked',
-  stalled: 'Needs retry',
+  review_not_ready: 'Review not ready',
+  stalled: 'Action needed',
 };
 
 const formatIntakeStage = (job: ExamIntakeJobRead | null | undefined) => {
-  if (!job) return 'Preparing';
+  if (!job) return 'Preparing workspace';
   return PREPARING_STAGE_LABELS[job.stage] || job.stage.replace(/_/g, ' ');
 };
 
@@ -189,12 +189,12 @@ const formatPreparingSummary = (job: ExamIntakeJobRead | null | undefined) => {
   const submissionsCreated = Math.max(job.submissions_created || 0, 0);
   const candidatesReady = Math.min(Math.max(job.candidates_ready || 0, 0), submissionsCreated || 0);
   const reviewOpenThreshold = Math.min(Math.max(job.review_open_threshold || 0, 0), submissionsCreated || 0);
-  const parts = [`${pagesBuilt}/${pageCount || 0} pages built`];
+  const parts = [`${pagesBuilt}/${pageCount || 0} pages prepared`];
   if (submissionsCreated > 0 && reviewOpenThreshold > 0 && !job.initial_review_ready) {
-    parts.push(`${Math.min(candidatesReady, reviewOpenThreshold)}/${reviewOpenThreshold} papers ready to open`);
+    parts.push(`${Math.min(candidatesReady, reviewOpenThreshold)}/${reviewOpenThreshold} submissions ready to open`);
   } else if (submissionsCreated > 0 && reviewOpenThreshold > 0 && !job.fully_warmed) {
-    parts.push(`${reviewOpenThreshold}/${reviewOpenThreshold} papers ready to open`);
-    parts.push(`${candidatesReady}/${submissionsCreated} total papers ready`);
+    parts.push(`${reviewOpenThreshold}/${reviewOpenThreshold} submissions ready to open`);
+    parts.push(`${candidatesReady}/${submissionsCreated} total submissions ready`);
   } else if (submissionsCreated > 0) {
     parts.push(`${candidatesReady}/${submissionsCreated} review items ready`);
   }
@@ -786,7 +786,7 @@ export function ExamsPage() {
                       <Link className="btn btn-secondary btn-sm" to={`/exams/${exam.id}`}>Open workspace</Link>
                     ) : (
                       <button type="button" className="btn btn-secondary btn-sm" disabled>
-                        {isPreparing ? 'Preparing…' : 'Unavailable'}
+                        {isPreparing ? 'Preparing workspace…' : 'Unavailable'}
                       </button>
                     )}
                     {(isFailed || (canOpenWorkspace && intakeJob && !fullyWarmed && intakeJob.status === 'failed')) && (
@@ -927,7 +927,7 @@ export function ExamsPage() {
 
             <div className="actions-row modal-actions-sticky">
               <button type="submit" className="btn btn-primary" disabled={isRunning}>
-                {isRunning ? 'Preparing…' : 'Create exam'}
+                {isRunning ? 'Preparing workspace…' : 'Create exam'}
               </button>
               <button
                 type="button"

@@ -222,7 +222,7 @@ export function SubmissionFrontPageTotalsPage() {
   const [searchParams] = useSearchParams();
   const examId = Number(searchParams.get('examId'));
   const returnTo = searchParams.get('returnTo')?.trim() || `/exams/${examId}`;
-  const returnLabel = searchParams.get('returnLabel')?.trim() || 'Back to Exam queue';
+  const returnLabel = searchParams.get('returnLabel')?.trim() || 'Back to exam workspace';
   const { showError, showSuccess } = useToast();
 
   const [submission, setSubmission] = useState<SubmissionRead | null>(routeState?.submission ?? null);

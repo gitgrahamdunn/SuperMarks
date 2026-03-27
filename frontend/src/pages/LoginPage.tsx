@@ -71,11 +71,11 @@ export function LoginPage({ providers, magicLinkEnabled = false, devLoginEnabled
     <main className="contract-error-page">
       <section className="contract-error-card" style={{ maxWidth: 460 }}>
         <h1 onClick={maybeRevealDevMode} style={{ cursor: devLoginEnabled ? 'pointer' : 'default' }}>Sign in to SuperMarks</h1>
-        <p>Use your school or personal account to access your exam workspaces.</p>
+        <p>Sign in to access your marking workspace, class results, and saved review queues.</p>
         {magicLinkEnabled ? (
           <form onSubmit={requestMagicLink} style={{ display: 'grid', gap: '.75rem', marginTop: '1rem' }}>
             <label style={{ display: 'grid', gap: '.35rem', textAlign: 'left' }}>
-              <span>Email link</span>
+              <span>Email address</span>
               <input
                 type="email"
                 value={email}
@@ -86,9 +86,9 @@ export function LoginPage({ providers, magicLinkEnabled = false, devLoginEnabled
               />
             </label>
             <button type="submit" className="btn btn-primary" disabled={emailPending}>
-              {emailPending ? 'Sending link…' : 'Email me a sign-in link'}
+              {emailPending ? 'Sending sign-in link…' : 'Send sign-in link'}
             </button>
-            {emailSent ? <p className="subtle-text">Check your inbox for the sign-in link.</p> : null}
+            {emailSent ? <p className="subtle-text">Check your inbox for a secure sign-in link.</p> : null}
             {errorMessage ? <p className="subtle-text" style={{ color: 'var(--danger-600, #b42318)' }}>{errorMessage}</p> : null}
           </form>
         ) : null}
@@ -105,7 +105,7 @@ export function LoginPage({ providers, magicLinkEnabled = false, devLoginEnabled
               />
             </label>
             <button type="submit" className="btn btn-secondary" disabled={devPending}>
-              {devPending ? 'Signing in…' : 'Developer sign-in'}
+              {devPending ? 'Signing in…' : 'Continue'}
             </button>
           </form>
         ) : null}
@@ -123,7 +123,7 @@ export function LoginPage({ providers, magicLinkEnabled = false, devLoginEnabled
         </div>
         {providers.length === 0 && !magicLinkEnabled ? (
           <p className="subtle-text" style={{ marginTop: '1rem' }}>
-            No login providers are configured on the backend yet.
+            No sign-in methods are available right now.
           </p>
         ) : null}
       </section>
