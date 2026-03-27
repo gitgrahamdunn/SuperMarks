@@ -24,7 +24,7 @@ async def send_magic_link_email(*, email: str, magic_link_url: str) -> None:
     )
 
     if provider == 'log':
-        logger.info('Magic link for %s: %s', email, magic_link_url)
+        logger.warning('Magic link for %s: %s', email, magic_link_url)
         return
 
     if provider == 'resend':
