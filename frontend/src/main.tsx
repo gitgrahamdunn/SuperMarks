@@ -4,7 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/ToastProvider';
-import { checkBackendApiContract, getApiConfigError } from './api/client';
+import { checkBackendApiContract, getApiConfigError, pingApiHealth } from './api/client';
 import { logEvent } from './logs/clientLogStore';
 import './styles.css';
 
@@ -29,6 +29,61 @@ function renderHostedApiConfigMessage(errorMessage: string): React.JSX.Element {
         ) : null}
       </div>
     </div>
+  );
+}
+
+function isHostedFrontend(): boolean {
+  const host = window.location.hostname.trim().toLowerCase();
+  return host !== 'localhost' && host !== '127.0.0.1';
+}
+
+function renderHostedBackendUnavailableMessage(
+  contractMessage: string,
+  details: {
+    openApiUrl?: string;
+    openApiStatus?: number | null;
+    healthStatus?: number | null;
+    healthBody?: string;
+  },
+): React.JSX.Element {
+  return (
+    <div className="contract-error-page">
+      <div className="contract-error-card">
+        <h1>Hosted backend is not reachable.</h1>
+        <p>{contractMessage}</p>
+        <p>This frontend is configured for a backend API, but the backend did not present a usable SuperMarks contract.</p>
+        <p><strong>Configured API base:</strong> <code>{import.meta.env.VITE_API_BASE_URL || '<missing>'}</code></p>
+        {details.openApiUrl ? (
+          <p><strong>OpenAPI check:</strong> <code>{details.openApiUrl}</code>{details.openApiStatus ? ` returned HTTP ${details.openApiStatus}` : ''}</p>
+        ) : null}
+        {details.healthStatus !== undefined ? (
+          <p><strong>Health check:</strong> {details.healthStatus === null ? 'request failed before a response was returned' : `HTTP ${details.healthStatus}`}</p>
+        ) : null}
+        {details.healthBody ? (
+          <p><strong>Health response:</strong> <code>{details.healthBody}</code></p>
+        ) : null}
+        <p>For the current deployment model, point the hosted frontend at a reachable public backend URL ending in <code>/api</code>.</p>
+      </div>
+    </div>
+  );
+}
+
+function renderApp(): void {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <BrowserRouter
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
+        <ErrorBoundary>
+          <ToastProvider>
+            <App />
+          </ToastProvider>
+        </ErrorBoundary>
+      </BrowserRouter>
+    </React.StrictMode>,
   );
 }
 
@@ -91,35 +146,53 @@ console.log('[SuperMarks] API_BASE=', import.meta.env.VITE_API_BASE_URL || '<mis
 console.log('[SuperMarks] HAS_API_KEY=', Boolean(import.meta.env.VITE_BACKEND_API_KEY));
 void reloadIfBuildIsStale();
 
-if (!apiConfigError) {
-  void checkBackendApiContract().then((result) => {
-    if (!result.ok) {
-      console.warn('[SuperMarks] Non-blocking backend contract warning', result);
+async function bootstrap(): Promise<void> {
+  if (import.meta.env.PROD && apiConfigError) {
+    ReactDOM.createRoot(document.getElementById('root')!).render(
+      <React.StrictMode>
+        {renderHostedApiConfigMessage(apiConfigError)}
+      </React.StrictMode>,
+    );
+    return;
+  }
+
+  if (!apiConfigError) {
+    const contractResult = await checkBackendApiContract();
+    if (!contractResult.ok) {
+      console.warn('[SuperMarks] Backend contract warning', contractResult);
+      logEvent({
+        type: 'app.info',
+        message: `${contractResult.message} (${contractResult.diagnostics.openApiUrl || 'no-openapi-url'})`,
+      });
+
+      if (import.meta.env.PROD && isHostedFrontend()) {
+        let healthStatus: number | null | undefined;
+        let healthBody = '';
+        try {
+          const healthResult = await pingApiHealth();
+          healthStatus = healthResult.status;
+          healthBody = healthResult.body;
+        } catch (error) {
+          healthStatus = null;
+          healthBody = error instanceof Error ? error.message : String(error);
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')!).render(
+          <React.StrictMode>
+            {renderHostedBackendUnavailableMessage(contractResult.message, {
+              openApiUrl: contractResult.diagnostics.openApiUrl,
+              openApiStatus: contractResult.diagnostics.statusCode,
+              healthStatus,
+              healthBody,
+            })}
+          </React.StrictMode>,
+        );
+        return;
+      }
     }
-  });
+  }
+
+  renderApp();
 }
 
-if (import.meta.env.PROD && apiConfigError) {
-  ReactDOM.createRoot(document.getElementById('root')!).render(
-    <React.StrictMode>
-      {renderHostedApiConfigMessage(apiConfigError)}
-    </React.StrictMode>,
-  );
-} else {
-  ReactDOM.createRoot(document.getElementById('root')!).render(
-    <React.StrictMode>
-      <BrowserRouter
-        future={{
-          v7_startTransition: true,
-          v7_relativeSplatPath: true,
-        }}
-      >
-        <ErrorBoundary>
-          <ToastProvider>
-            <App />
-          </ToastProvider>
-        </ErrorBoundary>
-      </BrowserRouter>
-    </React.StrictMode>,
-  );
-}
+void bootstrap();

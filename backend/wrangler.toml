@@ -1,28 +1,14 @@
-name = "supermarks-backend"
+name = "supermarks-d1-bridge2"
 main = "cloudflare/index.js"
 compatibility_date = "2026-03-25"
 workers_dev = true
 
 [vars]
 SUPERMARKS_ENV = "production"
-SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT = "1"
-SUPERMARKS_STORAGE_BACKEND = "s3"
-SUPERMARKS_S3_REGION = "auto"
-SUPERMARKS_SERVE_FRONTEND = "0"
 
-[[containers]]
-class_name = "SupermarksApiContainer"
-image = "./Dockerfile"
-max_instances = 1
-instance_type = "basic"
-
-  [containers.image_vars]
-  PORT = "8080"
-
-[[durable_objects.bindings]]
-name = "SUPERMARKS_API"
-class_name = "SupermarksApiContainer"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["SupermarksApiContainer"]
+[[d1_databases]]
+binding = "SUPERMARKS_DB"
+database_name = "supermarksdb"
+database_id = "381cadf9-ec1e-4eb1-ad27-38c8986bd114"
+preview_database_id = "381cadf9-ec1e-4eb1-ad27-38c8986bd114"
+migrations_dir = "d1/migrations"

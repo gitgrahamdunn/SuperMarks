@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: supermarks-backend
+    runtime: python
+    plan: starter
+    region: oregon
+    repo: https://github.com/gitgrahamdunn/SuperMarks
+    branch: main
+    autoDeployTrigger: commit
+    rootDir: backend
+    buildCommand: pip install -e .
+    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: SUPERMARKS_ENV
+        value: production
+      - key: SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT
+        value: "1"
+      - key: SUPERMARKS_REPOSITORY_BACKEND
+        value: d1-bridge
+      - key: SUPERMARKS_STORAGE_BACKEND
+        value: s3
+      - key: SUPERMARKS_SERVE_FRONTEND
+        value: "0"
+      - key: SUPERMARKS_S3_REGION
+        value: auto
+      - key: APP_VERSION
+        value: render-hosted-backend
+      - key: BACKEND_API_KEY
+        sync: false
+      - key: SUPERMARKS_D1_BRIDGE_TOKEN
+        sync: false
+      - key: SUPERMARKS_D1_BRIDGE_URL
+        sync: false
+      - key: SUPERMARKS_CORS_ALLOW_ORIGINS
+        sync: false
+      - key: SUPERMARKS_S3_ENDPOINT_URL
+        sync: false
+      - key: SUPERMARKS_S3_BUCKET
+        sync: false
+      - key: SUPERMARKS_S3_ACCESS_KEY_ID
+        sync: false
+      - key: SUPERMARKS_S3_SECRET_ACCESS_KEY
+        sync: false

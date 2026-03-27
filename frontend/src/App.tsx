@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
+import { SupportDiagnostics } from './components/SupportDiagnostics';
 
 const ExamsPage = lazy(async () => ({ default: (await import('./pages/ExamsPage')).ExamsPage }));
 const ClassListsPage = lazy(async () => ({ default: (await import('./pages/ClassListsPage')).ClassListsPage }));
@@ -81,6 +82,7 @@ export default function App() {
 
       {!isFocusedWorkflowRoute && (
         <footer className="app-shell-footer">
+          <SupportDiagnostics />
           <button
             type="button"
             className={`theme-switch ${theme === 'dark' ? 'is-dark' : ''}`}

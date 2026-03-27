@@ -1,6 +1,6 @@
 # SuperMarks Backend
 
-FastAPI backend service for SuperMarks, intended to run locally during development and in Cloudflare Containers for hosted deployment.
+FastAPI backend service for SuperMarks, intended to run locally during development and on Render for hosted deployment.
 
 ## Structure
 
@@ -56,7 +56,7 @@ The backend will keep clean pages on the fast path and only escalate suspicious 
 
 Persistence note:
 
-- Hosted production: Cloudflare R2 stores files and `DATABASE_URL` stores metadata.
+- Hosted production: Cloudflare R2 stores files and Cloudflare D1 stores metadata through a standalone Cloudflare Worker bridge.
 - Self-hosted low-cost production: local files plus SQLite on disk are supported.
 
 Recommended hosted storage shape:
@@ -71,47 +71,145 @@ SUPERMARKS_S3_REGION=auto
 SUPERMARKS_S3_PUBLIC_BASE_URL=https://<public-r2-domain>   # optional
 ```
 
-## Cloudflare hosted backend
+## Cloudflare D1 bridge worker
 
-The hosted backend target is Cloudflare Containers, fronted by a Worker.
+Cloudflare now hosts only the standalone D1 bridge Worker. The FastAPI backend runs on Render and calls that Worker over `SUPERMARKS_D1_BRIDGE_URL`.
 
 Files:
 
 - [wrangler.toml](/home/graham/repos/SuperMarks/backend/wrangler.toml)
 - [cloudflare/index.js](/home/graham/repos/SuperMarks/backend/cloudflare/index.js)
-- [Dockerfile](/home/graham/repos/SuperMarks/backend/Dockerfile)
 - [.dev.vars.example](/home/graham/repos/SuperMarks/backend/.dev.vars.example)
+- [deploy-cloudflare-d1-bridge.sh](/home/graham/repos/SuperMarks/backend/scripts/deploy-cloudflare-d1-bridge.sh)
+- [smoke-cloudflare-d1-bridge.sh](/home/graham/repos/SuperMarks/backend/scripts/smoke-cloudflare-d1-bridge.sh)
+- [.dev.vars.example](/home/graham/repos/SuperMarks/backend/.dev.vars.example)
+- [smoke-cloudflare-backend.sh](/home/graham/repos/SuperMarks/backend/scripts/smoke-cloudflare-backend.sh)
+- [render.yaml](/home/graham/repos/SuperMarks/render.yaml)
+- [.env.render.example](/home/graham/repos/SuperMarks/backend/.env.render.example)
 
-Deploy flow:
+Deploy the Worker:
 
 ```bash
 cd backend
 npm install
 wrangler login
-wrangler secret put DATABASE_URL
-wrangler secret put BACKEND_API_KEY
-wrangler secret put SUPERMARKS_S3_ACCESS_KEY_ID
-wrangler secret put SUPERMARKS_S3_SECRET_ACCESS_KEY
-wrangler deploy
+wrangler secret put SUPERMARKS_D1_BRIDGE_TOKEN
+./scripts/deploy-cloudflare-d1-bridge.sh
 ```
 
-Recommended hosted env shape:
+Recommended Worker env shape:
+
+```bash
+SUPERMARKS_ENV=production
+SUPERMARKS_D1_BRIDGE_TOKEN=<internal-bridge-token-or-backend-api-key>
+```
+
+Hosted D1 binding:
+
+- `wrangler.toml` now binds `SUPERMARKS_DB` to Cloudflare D1 database `supermarksdb`
+- the Worker exposes `/_supermarks/d1/*`
+- external FastAPI backends should point `SUPERMARKS_D1_BRIDGE_URL` at the deployed Worker URL plus `/_supermarks/d1`
+
+Bridge smoke check:
+
+```bash
+cd backend
+SUPERMARKS_D1_BRIDGE_TOKEN=<internal-bridge-token-or-backend-api-key> \
+./scripts/smoke-cloudflare-d1-bridge.sh https://<your-d1-bridge-worker-domain>/_supermarks/d1
+```
+
+## Hosted FastAPI backend on Render
+
+Render is now the canonical hosted backend target.
+
+Create one `web` service from [render.yaml](/home/graham/repos/SuperMarks/render.yaml), then set the hosted backend env from [`.env.render.example`](/home/graham/repos/SuperMarks/backend/.env.render.example).
+
+Current Render service shape:
+
+```yaml
+type: web
+name: supermarks-backend
+runtime: python
+plan: starter
+region: oregon
+rootDir: backend
+buildCommand: pip install -e .
+startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+healthCheckPath: /health
+```
+
+Hosted backend env:
 
 ```bash
 SUPERMARKS_ENV=production
 SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT=1
 SUPERMARKS_STORAGE_BACKEND=s3
+SUPERMARKS_REPOSITORY_BACKEND=d1-bridge
 SUPERMARKS_S3_ENDPOINT_URL=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
 SUPERMARKS_S3_BUCKET=<R2_BUCKET_NAME>
 SUPERMARKS_S3_ACCESS_KEY_ID=<R2_ACCESS_KEY_ID>
 SUPERMARKS_S3_SECRET_ACCESS_KEY=<R2_SECRET_ACCESS_KEY>
 SUPERMARKS_S3_REGION=auto
 SUPERMARKS_S3_PUBLIC_BASE_URL=https://<public-r2-domain>   # optional
-DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<database>
 BACKEND_API_KEY=<backend-api-key>
+SUPERMARKS_D1_BRIDGE_TOKEN=<internal-bridge-token-or-backend-api-key>
+SUPERMARKS_D1_BRIDGE_URL=https://<your-d1-bridge-worker-domain>/_supermarks/d1
 SUPERMARKS_CORS_ALLOW_ORIGINS=https://<your-pages-domain>
 SUPERMARKS_SERVE_FRONTEND=0
 ```
+
+Render deploy flow:
+
+```bash
+render blueprints validate
+```
+
+Then sync the Blueprint in Render and deploy the `supermarks-backend` service.
+
+Hosted backend smoke check:
+
+```bash
+cd backend
+SUPERMARKS_D1_BRIDGE_TOKEN=<internal-bridge-token-or-backend-api-key> \
+SUPERMARKS_D1_BRIDGE_URL=https://<your-d1-bridge-worker-domain>/_supermarks/d1 \
+./scripts/smoke-cloudflare-backend.sh https://<your-render-backend-domain>
+```
+
+Cloudflare Pages should then point:
+
+```bash
+VITE_API_BASE_URL=https://<your-render-backend-domain>/api
+VITE_BACKEND_API_KEY=<backend-api-key>
+```
+
+## Local hosted mode: local backend + hosted frontend
+
+This remains useful for local verification and troubleshooting, but it is no longer the canonical hosted path.
+
+Setup shape:
+
+1. copy [`.env.hosted-local.example`](/home/graham/repos/SuperMarks/backend/.env.hosted-local.example) to `backend/.env.hosted-local`
+2. fill in the D1 bridge, R2, API key, and production Pages origin values
+3. install/reinstall the reboot-safe service:
+
+```bash
+sudo /home/graham/repos/SuperMarks/scripts/install-supermarks-service.sh --system
+```
+
+4. verify local runtime:
+
+```bash
+/home/graham/repos/SuperMarks/scripts/verify-local-prod.sh http://127.0.0.1:8000
+```
+
+5. if you intentionally use this local mode, point Cloudflare Pages production `VITE_API_BASE_URL` at the machine's public Funnel URL ending in `/api`
+
+Notes:
+
+- this mode is `API-only`; the backend does not serve the SPA
+- support only the production Pages frontend in `SUPERMARKS_CORS_ALLOW_ORIGINS`
+- preview frontends remain intentionally unsupported in this mode
+- Render should be the only hosted backend target for normal production use
 
 ## Self-hosted low-cost mode
 

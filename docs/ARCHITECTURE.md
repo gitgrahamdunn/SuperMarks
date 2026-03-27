@@ -8,7 +8,7 @@ SuperMarks is locked to **Strategy B**:
 - `VITE_API_BASE_URL` must end with `/api`. In production this is an absolute URL; in local Vite dev it can be `/api` with proxy.
 - There are **no frontend `/api` proxy functions** for application logic.
 - Frontend deploy config is SPA-only; do not add `/api` rewrites.
-- Hosted target is Cloudflare Pages -> Cloudflare backend URL -> FastAPI container.
+- Hosted target is Cloudflare Pages -> Render backend URL -> FastAPI service.
 
 ## Rules and Guardrails
 
@@ -29,7 +29,7 @@ SuperMarks is locked to **Strategy B**:
 ### Backend
 
 - `BACKEND_API_KEY=<backend-api-key>`
-- `CORS_ALLOW_ORIGINS=https://<cloudflare-pages-frontend-domain>`
+- `SUPERMARKS_CORS_ALLOW_ORIGINS=https://<cloudflare-pages-frontend-domain>`
 
 ## Smoke Checks
 
@@ -41,5 +41,5 @@ SuperMarks is locked to **Strategy B**:
 ## Persistence model
 
 - Cloudflare R2 persists file content (exam keys, submission uploads, page images) in the hosted direction.
-- `DATABASE_URL` persists metadata (exams, questions, key files, submissions, pages, parse jobs).
-- Both systems are required in production for durable end-to-end exam data persistence.
+- Cloudflare D1 persists hosted metadata through the standalone Worker-side D1 bridge.
+- Render hosts the FastAPI compute layer that talks to both systems.

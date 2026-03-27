@@ -38,6 +38,10 @@ def _is_sqlite_url(url: str) -> bool:
 
 
 def _create_engine():
+    if settings.hosted_d1_bridge_enabled:
+        logger.info("database backend: d1-bridge")
+        logger.info("database url: <cloudflare-d1>")
+        return None
     database_url = settings.effective_database_url
     backend = "sqlite" if _is_sqlite_url(database_url) else "postgres"
     redacted_url = _redact_database_url(database_url)
@@ -58,10 +62,14 @@ def _create_engine():
 
 
 def get_database_backend_name() -> str:
+    if settings.hosted_d1_bridge_enabled:
+        return "d1-bridge"
     return "sqlite" if _is_sqlite_url(settings.effective_database_url) else "postgres"
 
 
 def get_redacted_database_url() -> str:
+    if settings.hosted_d1_bridge_enabled:
+        return "<cloudflare-d1>"
     return _redact_database_url(settings.effective_database_url)
 
 
@@ -69,6 +77,8 @@ engine = _create_engine()
 
 
 def _ensure_column(table: str, column: str, ddl: str) -> None:
+    if engine is None:
+        return
     with engine.begin() as conn:
         if _is_sqlite_url(settings.effective_database_url):
             rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
@@ -94,6 +104,8 @@ def _ensure_column(table: str, column: str, ddl: str) -> None:
 
 def create_db_and_tables() -> None:
     """Create all SQLModel tables if they do not exist."""
+    if engine is None:
+        return
     SQLModel.metadata.create_all(engine)
     _ensure_column("examkeyfile", "blob_url", "blob_url VARCHAR")
     _ensure_column("examkeyfile", "blob_pathname", "blob_pathname VARCHAR")
@@ -132,5 +144,10 @@ def create_db_and_tables() -> None:
 
 def get_session() -> Generator[Session, None, None]:
     """Yield a database session for request-scoped dependency injection."""
+    if engine is None:
+        raise RuntimeError(
+            "SQL session requested while hosted D1 bridge mode is active. "
+            "This route still depends on direct SQLModel session access."
+        )
     with Session(engine) as session:
         yield session

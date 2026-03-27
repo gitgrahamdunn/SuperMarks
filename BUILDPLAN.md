@@ -62,15 +62,15 @@ The job is now “finish the teacher workstation, harden it, and make it trustwo
 
 ### Phase 2 — Hosted backend verification
 
-- Optional: point `VITE_API_BASE_URL` to hosted backend for targeted checks.
+- Optional: point `VITE_API_BASE_URL` to the Render backend for targeted checks.
 - Keep this as a short verification slice, not the default loop.
 
-### Phase 3 — Cloudflare Pages release
+### Phase 3 — Cloudflare Pages + Render release
 
 - Use Cloudflare Pages for the hosted static frontend only when a release bundle is ready.
-- Run the backend in Cloudflare Containers behind a Worker entrypoint.
+- Run the backend on Render as a native Python web service.
+- Store hosted metadata in Cloudflare D1 through the Worker-side bridge.
 - Move durable uploaded-file storage to Cloudflare R2.
-- Keep `DATABASE_URL` in place for metadata persistence.
 
 ---
 

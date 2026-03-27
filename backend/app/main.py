@@ -1,5 +1,6 @@
 """FastAPI application entrypoint."""
 
+from contextlib import asynccontextmanager
 import logging
 import os
 from datetime import datetime, timezone
@@ -12,16 +13,15 @@ from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy import text
-from sqlmodel import Session
 
 from app.auth import SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS, build_api_session_cookie_value, require_api_key
-from app import db
 from app.ai.openai_vision import (
     _front_page_provider_api_key,
     _front_page_provider_base_url,
     _front_page_provider_name,
 )
 from app.db import create_db_and_tables, get_database_backend_name, get_redacted_database_url
+from app.persistence import open_repository_session
 from app.routers.exams import public_router as public_exams_router
 from app.routers.exams import _resume_pending_exam_intake_jobs
 from app.routers.exams import class_lists_router
@@ -33,9 +33,7 @@ from app.routers.blob import router as blob_router
 from app.settings import settings
 from app.storage import ensure_dir
 from app.cors_safe import SafeCORSMiddleware
-
-
-app = FastAPI(title=settings.app_name, version="0.1.0")
+from app.d1_bridge import get_d1_bridge_client
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +73,35 @@ def resolve_app_version() -> str:
         return app_version
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    ensure_dir(settings.data_path)
+    if settings.hosted_d1_bridge_enabled and not settings.has_d1_bridge:
+        raise RuntimeError(
+            "Hosted d1-bridge runtime requires SUPERMARKS_D1_BRIDGE_URL and SUPERMARKS_D1_BRIDGE_TOKEN."
+        )
+    logger.info(
+        "Database backend: %s (%s)",
+        get_database_backend_name(),
+        get_redacted_database_url(),
+    )
+    logger.info(
+        "Frontend serving: %s (%s)",
+        "enabled" if _should_serve_frontend() else "disabled",
+        settings.frontend_dist_dir,
+    )
+    if settings.hosted_d1_bridge_enabled:
+        logger.info("Skipping SQLModel bootstrap in hosted d1-bridge mode")
+        logger.info("Skipping intake auto-resume at startup in hosted d1-bridge mode")
+    else:
+        create_db_and_tables()
+        _resume_pending_exam_intake_jobs()
+    yield
+
+
+app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+
 app.add_middleware(SafeCORSMiddleware)
 
 
@@ -102,23 +129,6 @@ app.include_router(questions_router, prefix="/api", dependencies=[Depends(requir
 app.include_router(submissions_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(files_router, prefix="/api", dependencies=[Depends(require_api_key)])
 app.include_router(blob_router, prefix="/api", dependencies=[Depends(require_api_key)])
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    ensure_dir(settings.data_path)
-    logger.info(
-        "Database backend: %s (%s)",
-        get_database_backend_name(),
-        get_redacted_database_url(),
-    )
-    logger.info(
-        "Frontend serving: %s (%s)",
-        "enabled" if _should_serve_frontend() else "disabled",
-        settings.frontend_dist_dir,
-    )
-    create_db_and_tables()
-    _resume_pending_exam_intake_jobs()
 
 
 @app.get("/", tags=["meta"], response_model=None)
@@ -177,9 +187,13 @@ def deep_health() -> dict[str, bool | str]:
 
     db_ok = False
     try:
-        with Session(db.engine) as session:
-            session.exec(text("SELECT 1"))
-        db_ok = True
+        if settings.hosted_d1_bridge_enabled:
+            bridge_health = get_d1_bridge_client().health()
+            db_ok = bool(bridge_health.get("ok"))
+        else:
+            with open_repository_session() as session:
+                session.exec(text("SELECT 1"))
+            db_ok = True
     except Exception:
         db_ok = False
 

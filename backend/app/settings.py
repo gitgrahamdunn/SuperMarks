@@ -59,6 +59,18 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("SUPERMARKS_DATABASE_URL", "DATABASE_URL"),
     )
+    d1_bridge_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_D1_BRIDGE_URL", "D1_BRIDGE_URL"),
+    )
+    d1_bridge_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_D1_BRIDGE_TOKEN", "D1_BRIDGE_TOKEN", "BACKEND_API_KEY"),
+    )
+    d1_bridge_timeout_seconds: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("SUPERMARKS_D1_BRIDGE_TIMEOUT_SECONDS", "D1_BRIDGE_TIMEOUT_SECONDS"),
+    )
     allow_production_sqlite: bool = Field(
         default=False,
         validation_alias=AliasChoices("SUPERMARKS_ALLOW_PRODUCTION_SQLITE", "ALLOW_PRODUCTION_SQLITE"),
@@ -136,7 +148,19 @@ class Settings(BaseSettings):
         return self.managed_runtime_environment or env in {"prod", "production"}
 
     @property
+    def repository_backend(self) -> str:
+        return (os.getenv("SUPERMARKS_REPOSITORY_BACKEND", "sqlmodel") or "sqlmodel").strip().lower()
+
+    @property
+    def hosted_d1_bridge_enabled(self) -> bool:
+        return self.managed_runtime_environment and self.repository_backend == "d1-bridge"
+
+    @property
     def effective_database_url(self) -> str:
+        if self.hosted_d1_bridge_enabled:
+            raise RuntimeError(
+                "DATABASE_URL is not used when SUPERMARKS_REPOSITORY_BACKEND=d1-bridge on the managed runtime."
+            )
         if self.is_production:
             if self.database_url and self.database_url.strip():
                 return _normalize_database_url(self.database_url)
@@ -158,6 +182,10 @@ class Settings(BaseSettings):
         if self.cors_allow_origins.strip() == "*":
             return ["*"]
         return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+
+    @property
+    def has_d1_bridge(self) -> bool:
+        return bool((self.d1_bridge_url or "").strip() and (self.d1_bridge_token or "").strip())
 
 
 settings = Settings()

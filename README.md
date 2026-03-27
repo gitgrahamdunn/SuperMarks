@@ -1,16 +1,16 @@
 # SuperMarks Monorepo
 
-SuperMarks now targets a Cloudflare-hosted stack with a local-first development loop.
+SuperMarks now targets a Cloudflare-plus-Render stack with a local-first development loop.
 
 ## Deployment Plan (Current)
 
 - Phase 1 (active): run local backend + local frontend for iteration and verification.
-- Phase 2: expose the local backend publicly from your machine when a hosted frontend needs it.
-- Phase 3: host the frontend on Cloudflare Pages, run the backend in Cloudflare Containers, and use Cloudflare R2 for uploaded files.
+- Phase 2: expose the local backend publicly from your machine only when you need temporary hosted verification.
+- Phase 3: host the frontend on Cloudflare Pages, run the backend on Render, use a Cloudflare Worker for the D1 bridge, use Cloudflare D1 for metadata, and use Cloudflare R2 for uploaded files.
 
-Today, normal development still runs locally first. Hosted direction is Cloudflare end to end.
+Today, normal development still runs locally first. Hosted direction is Cloudflare for frontend/data edge and Render for FastAPI compute.
 
-- `backend/`: FastAPI + SQLModel API with local-first development and Cloudflare Containers as the hosted backend target.
+- `backend/`: FastAPI + SQLModel API with local-first development and a Render + Cloudflare D1 bridge hosted target.
 - `frontend/`: Vite + React SPA hosted statically on Cloudflare Pages.
 
 ## Strategy Lock
@@ -37,9 +37,9 @@ See `docs/ARCHITECTURE.md` for guardrails and `docs/EXPERIMENTATION.md` for the 
 ### Backend
 
 - `BACKEND_API_KEY=<backend-api-key>`
-- `CORS_ALLOW_ORIGINS=https://<cloudflare-pages-frontend-domain>`
+- `SUPERMARKS_CORS_ALLOW_ORIGINS=https://<cloudflare-pages-frontend-domain>`
 - `APP_VERSION=<git-sha-or-build-id>` (optional, served by `GET /version`)
-- `DATABASE_URL=<postgres-connection-url>` (required for hosted Cloudflare deployment)
+- `SUPERMARKS_REPOSITORY_BACKEND=d1-bridge` (hosted Cloudflare default)
 - `SUPERMARKS_STORAGE_BACKEND=s3`
 - `SUPERMARKS_S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com`
 - `SUPERMARKS_S3_BUCKET=<r2-bucket-name>`
@@ -143,6 +143,35 @@ What this does:
 - re-applies Tailscale Funnel to the backend on boot
 - avoids `vite dev`, `npm install`, and `uvicorn --reload` in the runtime boot path
 
+### 3) Local hosted verification stack: Cloudflare Pages + local backend
+
+Use this only when you intentionally need local public verification. It is not the canonical hosted path.
+
+Backend setup:
+
+1. copy [`.env.hosted-local.example`](/home/graham/repos/SuperMarks/backend/.env.hosted-local.example) to `backend/.env.hosted-local`
+2. fill in:
+   - D1 bridge URL/token
+   - R2 credentials
+   - `BACKEND_API_KEY`
+   - production Pages origin in `SUPERMARKS_CORS_ALLOW_ORIGINS`
+3. install or refresh the reboot-safe backend service:
+
+```bash
+sudo /home/graham/repos/SuperMarks/scripts/install-supermarks-service.sh --system
+```
+
+4. verify the local API runtime:
+
+```bash
+./scripts/verify-local-prod.sh http://127.0.0.1:8000
+```
+
+Frontend setup:
+
+- point Cloudflare Pages production `VITE_API_BASE_URL` at the machine's public Tailscale Funnel URL ending in `/api`
+- keep preview frontends unsupported in this temporary mode
+
 ### Current local verification status
 
 - Frontend build passes locally
@@ -151,26 +180,27 @@ What this does:
 
 ## Hosted frontend deployment
 
-This is Phase 3 and should only be used once the local/public backend path is stable.
+This is Phase 3 and should only be used once the backend is deployed on Render.
 
 ### Static frontend host
 
 - Host `frontend/` as a static SPA on Cloudflare Pages.
 - Build command: `npm run build`
 - Output directory: `dist`
-- Keep `VITE_API_BASE_URL` pointed at the Cloudflare backend URL, ending in `/api`.
+- Keep `VITE_API_BASE_URL` pointed at the Render backend URL, ending in `/api`.
 - Hosted previews are only usable when that backend URL is reachable and allowed by backend CORS.
 - SPA fallback routing is provided by `frontend/public/_redirects`.
 - `frontend/wrangler.toml` is the canonical hosted frontend config.
 
 ## Deployment policy note
 
-Cloudflare Pages is the canonical hosted frontend, Cloudflare Containers is the canonical hosted backend, and Cloudflare R2 is the canonical durable object store.
+Cloudflare Pages is the canonical hosted frontend, Render is the canonical hosted FastAPI backend, Cloudflare Workers host the D1 bridge, Cloudflare D1 is the canonical hosted metadata store, and Cloudflare R2 is the canonical durable object store.
 When you are ready to ship:
 
-1. deploy the backend from `backend/` with Wrangler
-2. set backend secrets for `DATABASE_URL`, `BACKEND_API_KEY`, and R2 credentials
-3. point frontend `VITE_API_BASE_URL` at the backend Worker URL or custom domain
+1. deploy the D1 bridge Worker from `backend/` with Wrangler
+2. deploy the FastAPI backend on Render from [render.yaml](/home/graham/repos/SuperMarks/render.yaml) with `SUPERMARKS_D1_BRIDGE_URL` pointed at that Worker
+3. set backend secrets for `BACKEND_API_KEY`, `SUPERMARKS_D1_BRIDGE_TOKEN`, CORS, and R2 credentials
+4. point frontend `VITE_API_BASE_URL` at the Render backend URL or custom domain
 
 ## Recommended improvement loop
 
@@ -199,7 +229,7 @@ For easier deploy verification, set `VITE_APP_VERSION` on the Cloudflare Pages d
 
 ## Hosted backend deployment
 
-Backend hosting now lives under [backend/wrangler.toml](/home/graham/repos/SuperMarks/backend/wrangler.toml) and [backend/cloudflare/index.js](/home/graham/repos/SuperMarks/backend/cloudflare/index.js).
+Cloudflare-side D1 bridge hosting now lives under [backend/wrangler.toml](/home/graham/repos/SuperMarks/backend/wrangler.toml) and [backend/cloudflare/index.js](/home/graham/repos/SuperMarks/backend/cloudflare/index.js). The canonical hosted backend deployment spec is [render.yaml](/home/graham/repos/SuperMarks/render.yaml).
 
 One-time setup:
 
@@ -209,27 +239,28 @@ npm install
 wrangler login
 ```
 
-Set secrets and deploy:
+Set Worker secrets and deploy the D1 bridge:
 
 ```bash
-wrangler secret put DATABASE_URL
-wrangler secret put BACKEND_API_KEY
-wrangler secret put SUPERMARKS_S3_ACCESS_KEY_ID
-wrangler secret put SUPERMARKS_S3_SECRET_ACCESS_KEY
-wrangler secret put SUPERMARKS_S3_BUCKET
-wrangler secret put SUPERMARKS_S3_ENDPOINT_URL
-wrangler secret put SUPERMARKS_S3_PUBLIC_BASE_URL
-wrangler secret put SUPERMARKS_CORS_ALLOW_ORIGINS
-wrangler deploy
+wrangler secret put SUPERMARKS_D1_BRIDGE_TOKEN
+./scripts/deploy-cloudflare-d1-bridge.sh
 ```
 
 Non-secret defaults and local Wrangler examples live in [backend/.dev.vars.example](/home/graham/repos/SuperMarks/backend/.dev.vars.example).
 
+Render backend setup:
+
+```bash
+render blueprints validate
+```
+
+Then create or sync the `supermarks-backend` web service from [render.yaml](/home/graham/repos/SuperMarks/render.yaml) and load the hosted env values from [backend/.env.render.example](/home/graham/repos/SuperMarks/backend/.env.render.example).
+
 ## Persistence requirements
 
 - Cloudflare R2 stores uploaded files/binaries in the hosted direction.
-- `DATABASE_URL` stores all metadata (exams, questions, key files, submissions, pages, parse jobs).
-- Hosted production should use R2 plus `DATABASE_URL`.
+- Cloudflare D1 stores hosted metadata (exams, questions, key files, submissions, pages, parse jobs) through the Worker-side bridge.
+- Hosted production should use R2 plus D1.
 - Self-hosted low-cost production can use local files plus SQLite on disk instead.
 
 ## Low-cost self-hosted mode

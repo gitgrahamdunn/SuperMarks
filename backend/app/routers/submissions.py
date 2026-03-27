@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlmodel import Session, delete, select
 
-from app.db import get_session
+from app.persistence import DbSession, get_repository_session, repository_provider
 from app.blob_service import create_signed_blob_url, normalize_blob_path
 from app.blob_service import BlobDownloadError
 from app.blob_store import BlobUploadError, upload_bytes
@@ -77,6 +77,8 @@ from app.storage_provider import get_storage_signed_url, materialize_object_to_p
 
 router = APIRouter(prefix="/submissions", tags=["submissions"])
 logger = logging.getLogger(__name__)
+exam_repo = repository_provider().exams
+submission_repo = repository_provider().submissions
 
 _RATIO_VALUE_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$")
 _ALLOWED_SUBMISSION_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
@@ -90,7 +92,7 @@ _FRONT_PAGE_TEMPLATE_FILL_THRESHOLD = float(os.getenv("SUPERMARKS_FRONT_PAGE_TEM
 _FRONT_PAGE_EXTRACT_ATTEMPTS = max(1, int(os.getenv("SUPERMARKS_FRONT_PAGE_EXTRACT_ATTEMPTS", "3") or "3"))
 
 
-def _exam_known_student_names(exam_id: int, session: Session) -> list[str]:
+def _exam_known_student_names(exam_id: int, session: DbSession) -> list[str]:
     exam = session.get(Exam, exam_id)
     if not exam:
         return []
@@ -319,7 +321,7 @@ def apply_front_page_template_fill(
     )
 
 
-def _sync_exam_front_page_status(exam_id: int, session: Session) -> None:
+def _sync_exam_front_page_status(exam_id: int, session: DbSession) -> None:
     exam = session.get(Exam, exam_id)
     if not exam:
         return
@@ -404,13 +406,13 @@ def _normalize_objective_candidate(
 
 
 
-def _build_pages_for_submission(submission: Submission, session: Session) -> list[SubmissionPageRead]:
-    files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == submission.id)).all()
+def _build_pages_for_submission(submission: Submission, session: DbSession) -> list[SubmissionPageRead]:
+    files = submission_repo.list_submission_files(session, submission.id)
     if not files:
         raise HTTPException(status_code=400, detail="No files available for submission")
 
     out_dir = reset_dir(pages_dir(submission.exam_id, submission.id))
-    session.exec(delete(SubmissionPage).where(SubmissionPage.submission_id == submission.id))
+    submission_repo.clear_submission_pages(session, submission.id)
 
     created: list[SubmissionPageRead] = []
     if files[0].file_kind == "pdf":
@@ -427,9 +429,14 @@ def _build_pages_for_submission(submission: Submission, session: Session) -> lis
         for idx, page_path in enumerate(page_paths, 1):
             w, h = normalize_image_to_png(page_path, page_path)
             build_page_preview_image(page_path)
-            row = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=str(page_path), width=w, height=h)
-            session.add(row)
-            session.flush()
+            row = submission_repo.create_submission_page(
+                session,
+                submission_id=submission.id,
+                page_number=idx,
+                image_path=str(page_path),
+                width=w,
+                height=h,
+            )
             created.append(SubmissionPageRead(id=row.id, page_number=idx, image_path=relative_to_data(page_path), width=w, height=h))
     else:
         for idx, file in enumerate(files, 1):
@@ -441,34 +448,38 @@ def _build_pages_for_submission(submission: Submission, session: Session) -> lis
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             w, h = normalize_image_to_png(source_path, out_path)
             build_page_preview_image(out_path)
-            row = SubmissionPage(submission_id=submission.id, page_number=idx, image_path=str(out_path), width=w, height=h)
-            session.add(row)
-            session.flush()
+            row = submission_repo.create_submission_page(
+                session,
+                submission_id=submission.id,
+                page_number=idx,
+                image_path=str(out_path),
+                width=w,
+                height=h,
+            )
             created.append(SubmissionPageRead(id=row.id, page_number=idx, image_path=relative_to_data(out_path), width=w, height=h))
 
-    submission.status = SubmissionStatus.PAGES_READY
-    session.add(submission)
+    submission_repo.update_submission_status(session, submission, SubmissionStatus.PAGES_READY)
     session.commit()
     return created
 
 
-def _build_crops_for_submission(submission: Submission, session: Session) -> dict:
+def _build_crops_for_submission(submission: Submission, session: DbSession) -> dict:
     if submission.status not in (SubmissionStatus.PAGES_READY, SubmissionStatus.CROPS_READY, SubmissionStatus.TRANSCRIBED, SubmissionStatus.GRADED):
         raise HTTPException(status_code=400, detail="Submission must be at least PAGES_READY")
 
-    questions = session.exec(select(Question).where(Question.exam_id == submission.exam_id)).all()
+    questions = submission_repo.list_exam_questions(session, submission.exam_id)
     if not questions:
         raise HTTPException(status_code=400, detail="No questions configured for exam")
 
-    pages = session.exec(select(SubmissionPage).where(SubmissionPage.submission_id == submission.id)).all()
+    pages = submission_repo.list_submission_pages(session, submission.id)
     page_path_map = {p.page_number: Path(p.image_path) for p in pages}
 
     out_dir = reset_dir(crops_dir(submission.exam_id, submission.id))
-    session.exec(delete(AnswerCrop).where(AnswerCrop.submission_id == submission.id))
+    submission_repo.clear_submission_crops(session, submission.id)
 
     count = 0
     for question in questions:
-        regions = session.exec(select(QuestionRegion).where(QuestionRegion.question_id == question.id)).all()
+        regions = submission_repo.list_question_regions(session, question.id)
         if not regions:
             continue
         region_payload = [
@@ -481,17 +492,20 @@ def _build_crops_for_submission(submission: Submission, session: Session) -> dic
 
         out_path = out_dir / f"{question.label}.png"
         crop_regions_and_stitch(page_path_map, region_payload, out_path)
-        row = AnswerCrop(submission_id=submission.id, question_id=question.id, image_path=str(out_path))
-        session.add(row)
+        submission_repo.create_submission_crop(
+            session,
+            submission_id=submission.id,
+            question_id=question.id,
+            image_path=str(out_path),
+        )
         count += 1
 
-    submission.status = SubmissionStatus.CROPS_READY
-    session.add(submission)
+    submission_repo.update_submission_status(session, submission, SubmissionStatus.CROPS_READY)
     session.commit()
     return {"message": "Crops built", "count": count}
 
 
-def _transcribe_submission(submission: Submission, provider: str, session: Session) -> dict:
+def _transcribe_submission(submission: Submission, provider: str, session: DbSession) -> dict:
     if submission.status not in (SubmissionStatus.CROPS_READY, SubmissionStatus.TRANSCRIBED, SubmissionStatus.GRADED):
         raise HTTPException(status_code=400, detail="Submission must be CROPS_READY")
 
@@ -502,34 +516,32 @@ def _transcribe_submission(submission: Submission, provider: str, session: Sessi
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    crops = session.exec(select(AnswerCrop).where(AnswerCrop.submission_id == submission.id)).all()
-    session.exec(delete(Transcription).where(Transcription.submission_id == submission.id))
+    crops = submission_repo.list_submission_crops(session, submission.id)
+    submission_repo.clear_submission_transcriptions(session, submission.id)
 
     for crop in crops:
         result = ocr.transcribe(Path(crop.image_path))
-        session.add(
-            Transcription(
-                submission_id=submission.id,
-                question_id=crop.question_id,
-                provider=provider,
-                text=result.text,
-                confidence=result.confidence,
-                raw_json=json.dumps(result.raw),
-            )
+        submission_repo.create_submission_transcription(
+            session,
+            submission_id=submission.id,
+            question_id=crop.question_id,
+            provider=provider,
+            text=result.text,
+            confidence=result.confidence,
+            raw_json=json.dumps(result.raw),
         )
 
-    submission.status = SubmissionStatus.TRANSCRIBED
-    session.add(submission)
+    submission_repo.update_submission_status(session, submission, SubmissionStatus.TRANSCRIBED)
     session.commit()
     return {"message": "Transcription complete", "count": len(crops), "provider": provider}
 
 
-def _prepare_status(submission: Submission, session: Session, actions_run: list[str] | None = None) -> SubmissionPrepareStatus:
-    questions = session.exec(select(Question).where(Question.exam_id == submission.exam_id).order_by(Question.id)).all()
-    pages = session.exec(select(SubmissionPage).where(SubmissionPage.submission_id == submission.id)).all()
-    crops = session.exec(select(AnswerCrop).where(AnswerCrop.submission_id == submission.id)).all()
-    transcriptions = session.exec(select(Transcription).where(Transcription.submission_id == submission.id)).all()
-    grades = session.exec(select(GradeResult).where(GradeResult.submission_id == submission.id)).all()
+def _prepare_status(submission: Submission, session: DbSession, actions_run: list[str] | None = None) -> SubmissionPrepareStatus:
+    questions = submission_repo.list_exam_questions(session, submission.exam_id)
+    pages = submission_repo.list_submission_pages(session, submission.id)
+    crops = submission_repo.list_submission_crops(session, submission.id)
+    transcriptions = submission_repo.list_submission_transcriptions(session, submission.id)
+    grades = submission_repo.list_submission_grades(session, submission.id)
 
     page_numbers = {page.page_number for page in pages if Path(page.image_path).exists()}
     crop_map = {crop.question_id: crop for crop in crops if Path(crop.image_path).exists()}
@@ -548,7 +560,7 @@ def _prepare_status(submission: Submission, session: Session, actions_run: list[
         suggested_actions.append("build_pages")
 
     for question in questions:
-        regions = session.exec(select(QuestionRegion).where(QuestionRegion.question_id == question.id)).all()
+        regions = submission_repo.list_question_regions(session, question.id)
         flagged_reasons: list[str] = []
         blocking_reasons: list[str] = []
         asset_state = "ready"
@@ -666,23 +678,23 @@ def _prepare_status(submission: Submission, session: Session, actions_run: list[
     )
 
 @router.get("/{submission_id}", response_model=SubmissionRead)
-def get_submission(submission_id: int, session: Session = Depends(get_session)) -> SubmissionRead:
-    submission = session.get(Submission, submission_id)
+def get_submission(submission_id: int, session: DbSession = Depends(get_repository_session)) -> SubmissionRead:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
-    files = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == submission_id)).all()
-    pages = session.exec(select(SubmissionPage).where(SubmissionPage.submission_id == submission_id)).all()
+    files = submission_repo.list_submission_files(session, submission_id)
+    pages = submission_repo.list_submission_pages(session, submission_id)
 
     return _submission_read(submission, files, pages)
 
 
 @router.get("/{submission_id}/files", response_model=list[StoredFileRead])
-def list_submission_files(submission_id: int, session: Session = Depends(get_session)) -> list[StoredFileRead]:
-    submission = session.get(Submission, submission_id)
+def list_submission_files(submission_id: int, session: DbSession = Depends(get_repository_session)) -> list[StoredFileRead]:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    rows = session.exec(select(SubmissionFile).where(SubmissionFile.submission_id == submission_id).order_by(SubmissionFile.id)).all()
+    rows = submission_repo.list_submission_files(session, submission_id)
     return [
         StoredFileRead(
             id=row.id,
@@ -699,31 +711,35 @@ def list_submission_files(submission_id: int, session: Session = Depends(get_ses
 
 
 @router.post("/{submission_id}/files/register", response_model=BlobRegisterResponse)
-def register_submission_files(submission_id: int, payload: BlobRegisterRequest, session: Session = Depends(get_session)) -> BlobRegisterResponse:
-    submission = session.get(Submission, submission_id)
+def register_submission_files(submission_id: int, payload: BlobRegisterRequest, session: DbSession = Depends(get_repository_session)) -> BlobRegisterResponse:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    registered = 0
-    for file in payload.files:
-        lower_name = file.original_filename.lower()
-        if lower_name.endswith(".pdf"):
-            kind = "pdf"
-        elif lower_name.endswith((".png", ".jpg", ".jpeg")):
-            kind = "image"
-        else:
-            kind = "image" if file.content_type.startswith("image/") else "pdf" if file.content_type == "application/pdf" else "binary"
-
-        row = SubmissionFile(
-            submission_id=submission_id,
-            file_kind=kind,
-            original_filename=file.original_filename,
-            stored_path=normalize_blob_path(file.blob_pathname),
-            content_type=file.content_type,
-            size_bytes=file.size_bytes,
-        )
-        session.add(row)
-        registered += 1
+    registered = submission_repo.register_submission_files(
+        session,
+        submission_id=submission_id,
+        files=[
+            {
+                "file_kind": (
+                    "pdf"
+                    if file.original_filename.lower().endswith(".pdf")
+                    else "image"
+                    if file.original_filename.lower().endswith((".png", ".jpg", ".jpeg"))
+                    else "image"
+                    if file.content_type.startswith("image/")
+                    else "pdf"
+                    if file.content_type == "application/pdf"
+                    else "binary"
+                ),
+                "original_filename": file.original_filename,
+                "stored_path": normalize_blob_path(file.blob_pathname),
+                "content_type": file.content_type,
+                "size_bytes": file.size_bytes,
+            }
+            for file in payload.files
+        ],
+    )
 
     session.commit()
     return BlobRegisterResponse(registered=registered)
@@ -733,9 +749,9 @@ def register_submission_files(submission_id: int, payload: BlobRegisterRequest, 
 def upload_submission_files(
     submission_id: int,
     files: list[UploadFile] = File(...),
-    session: Session = Depends(get_session),
+    session: DbSession = Depends(get_repository_session),
 ) -> ExamKeyUploadResponse:
-    submission = session.get(Submission, submission_id)
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -763,7 +779,8 @@ def upload_submission_files(
             raise HTTPException(status_code=500, detail=f"Blob upload failed: {exc}") from exc
 
         kind = "pdf" if extension == ".pdf" else "image"
-        row = SubmissionFile(
+        submission_repo.create_submission_file(
+            session,
             submission_id=submission_id,
             file_kind=kind,
             original_filename=filename,
@@ -773,7 +790,6 @@ def upload_submission_files(
             content_type=stored["contentType"],
             size_bytes=len(payload),
         )
-        session.add(row)
         uploaded += 1
         urls.append(stored["url"])
 
@@ -782,16 +798,16 @@ def upload_submission_files(
 
 
 @router.post("/{submission_id}/build-pages", response_model=list[SubmissionPageRead])
-def build_pages(submission_id: int, session: Session = Depends(get_session)) -> list[SubmissionPageRead]:
-    submission = session.get(Submission, submission_id)
+def build_pages(submission_id: int, session: DbSession = Depends(get_repository_session)) -> list[SubmissionPageRead]:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return _build_pages_for_submission(submission, session)
 
 
 @router.post("/{submission_id}/build-crops")
-def build_crops(submission_id: int, session: Session = Depends(get_session)) -> dict:
-    submission = session.get(Submission, submission_id)
+def build_crops(submission_id: int, session: DbSession = Depends(get_repository_session)) -> dict:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return _build_crops_for_submission(submission, session)
@@ -801,9 +817,9 @@ def build_crops(submission_id: int, session: Session = Depends(get_session)) -> 
 def transcribe_submission(
     submission_id: int,
     provider: str = Query("stub"),
-    session: Session = Depends(get_session),
+    session: DbSession = Depends(get_repository_session),
 ) -> dict:
-    submission = session.get(Submission, submission_id)
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return _transcribe_submission(submission, provider, session)
@@ -813,9 +829,9 @@ def transcribe_submission(
 def grade_submission(
     submission_id: int,
     grader: str = Query("rule_based"),
-    session: Session = Depends(get_session),
+    session: DbSession = Depends(get_repository_session),
 ) -> dict:
-    submission = session.get(Submission, submission_id)
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     if submission.status not in (SubmissionStatus.TRANSCRIBED, SubmissionStatus.GRADED):
@@ -826,12 +842,12 @@ def grade_submission(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    transcriptions = session.exec(select(Transcription).where(Transcription.submission_id == submission_id)).all()
+    transcriptions = submission_repo.list_submission_transcriptions(session, submission_id)
     question_map = {
         q.id: q
-        for q in session.exec(select(Question).where(Question.exam_id == submission.exam_id)).all()
+        for q in submission_repo.list_exam_questions(session, submission.exam_id)
     }
-    session.exec(delete(GradeResult).where(GradeResult.submission_id == submission_id))
+    submission_repo.clear_submission_grades(session, submission_id)
 
     for transcription in transcriptions:
         question = question_map.get(transcription.question_id)
@@ -843,19 +859,17 @@ def grade_submission(
         except NotImplementedError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        session.add(
-            GradeResult(
-                submission_id=submission_id,
-                question_id=question.id,
-                marks_awarded=outcome.marks_awarded,
-                breakdown_json=json.dumps(outcome.breakdown),
-                feedback_json=json.dumps(outcome.feedback),
-                model_name=outcome.model_name,
-            )
+        submission_repo.upsert_submission_grade(
+            session,
+            submission_id=submission_id,
+            question_id=question.id,
+            marks_awarded=outcome.marks_awarded,
+            breakdown_json=json.dumps(outcome.breakdown),
+            feedback_json=json.dumps(outcome.feedback),
+            model_name=outcome.model_name,
         )
 
-    submission.status = SubmissionStatus.GRADED
-    session.add(submission)
+    submission_repo.update_submission_status(session, submission, SubmissionStatus.GRADED)
     session.commit()
     return {"message": "Grading complete", "grader": grader}
 
@@ -863,8 +877,8 @@ def grade_submission(
 
 
 @router.get("/{submission_id}/prepare-status", response_model=SubmissionPrepareStatus)
-def get_prepare_status(submission_id: int, session: Session = Depends(get_session)) -> SubmissionPrepareStatus:
-    submission = session.get(Submission, submission_id)
+def get_prepare_status(submission_id: int, session: DbSession = Depends(get_repository_session)) -> SubmissionPrepareStatus:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return _prepare_status(submission, session)
@@ -874,16 +888,16 @@ def get_prepare_status(submission_id: int, session: Session = Depends(get_sessio
 def prepare_submission_for_marking(
     submission_id: int,
     provider: str = Query("stub"),
-    session: Session = Depends(get_session),
+    session: DbSession = Depends(get_repository_session),
 ) -> SubmissionPrepareStatus:
-    submission = session.get(Submission, submission_id)
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
     actions_run: list[str] = []
     status = _prepare_status(submission, session, actions_run=actions_run)
 
-    pages = session.exec(select(SubmissionPage).where(SubmissionPage.submission_id == submission_id)).all()
+    pages = submission_repo.list_submission_pages(session, submission_id)
     if not status.ready_for_marking and not pages:
         _build_pages_for_submission(submission, session)
         session.refresh(submission)
@@ -917,26 +931,22 @@ def _ensure_page_preview(image_path: Path) -> Path:
 def _ensure_submission_page_image(
     submission: Submission,
     page_number: int,
-    session: Session,
+    session: DbSession,
 ) -> SubmissionPage:
-    page = session.exec(
-        select(SubmissionPage).where(SubmissionPage.submission_id == submission.id, SubmissionPage.page_number == page_number)
-    ).first()
+    page = submission_repo.get_submission_page(session, submission.id, page_number)
     if page and Path(page.image_path).exists():
         return page
 
     _build_pages_for_submission(submission, session)
-    rebuilt = session.exec(
-        select(SubmissionPage).where(SubmissionPage.submission_id == submission.id, SubmissionPage.page_number == page_number)
-    ).first()
+    rebuilt = submission_repo.get_submission_page(session, submission.id, page_number)
     if not rebuilt or not Path(rebuilt.image_path).exists():
         raise HTTPException(status_code=404, detail="Page image not found")
     return rebuilt
 
 
 @router.get("/{submission_id}/page/{page_number}")
-def get_page_image(submission_id: int, page_number: int, session: Session = Depends(get_session)) -> FileResponse:
-    submission = session.get(Submission, submission_id)
+def get_page_image(submission_id: int, page_number: int, session: DbSession = Depends(get_repository_session)) -> FileResponse:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -947,8 +957,8 @@ def get_page_image(submission_id: int, page_number: int, session: Session = Depe
 
 
 @router.get("/{submission_id}/page/{page_number}/preview")
-def get_page_preview_image(submission_id: int, page_number: int, session: Session = Depends(get_session)) -> FileResponse:
-    submission = session.get(Submission, submission_id)
+def get_page_preview_image(submission_id: int, page_number: int, session: DbSession = Depends(get_repository_session)) -> FileResponse:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -958,14 +968,12 @@ def get_page_preview_image(submission_id: int, page_number: int, session: Sessio
 
 
 @router.get("/{submission_id}/crop/{question_id}")
-def get_crop_image(submission_id: int, question_id: int, session: Session = Depends(get_session)) -> FileResponse:
-    submission = session.get(Submission, submission_id)
+def get_crop_image(submission_id: int, question_id: int, session: DbSession = Depends(get_repository_session)) -> FileResponse:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    crop = session.exec(
-        select(AnswerCrop).where(AnswerCrop.submission_id == submission_id, AnswerCrop.question_id == question_id)
-    ).first()
+    crop = submission_repo.get_submission_crop(session, submission_id, question_id)
     if not crop:
         raise HTTPException(status_code=404, detail="Crop not found")
 
@@ -977,8 +985,8 @@ def get_crop_image(submission_id: int, question_id: int, session: Session = Depe
 
 
 @router.get("/{submission_id}/front-page-totals", response_model=FrontPageTotalsRead | None)
-def get_front_page_totals(submission_id: int, session: Session = Depends(get_session)) -> FrontPageTotalsRead | None:
-    submission = session.get(Submission, submission_id)
+def get_front_page_totals(submission_id: int, session: DbSession = Depends(get_repository_session)) -> FrontPageTotalsRead | None:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     return front_page_totals_read(submission)
@@ -1049,12 +1057,8 @@ def _front_page_candidate_is_retryable_failure(candidate: FrontPageTotalsCandida
     return (candidate.source or "").startswith("extractor_unavailable")
 
 
-def _latest_exam_front_page_thinking_level(exam_id: int, session: Session) -> str | None:
-    latest_job = session.exec(
-        select(ExamIntakeJob)
-        .where(ExamIntakeJob.exam_id == exam_id)
-        .order_by(ExamIntakeJob.created_at.desc(), ExamIntakeJob.id.desc())
-    ).first()
+def _latest_exam_front_page_thinking_level(exam_id: int, session: DbSession) -> str | None:
+    latest_job = exam_repo.get_latest_exam_intake_job(session, exam_id)
     if not latest_job:
         return None
     return _normalize_front_page_gemini_thinking_level(latest_job.thinking_level)
@@ -1063,7 +1067,7 @@ def _latest_exam_front_page_thinking_level(exam_id: int, session: Session) -> st
 def _extract_front_page_candidates(
     submission: Submission,
     *,
-    session: Session,
+    session: DbSession,
     model_override: str | None = None,
     template: dict[str, object] | None = None,
     phase: str,
@@ -1081,9 +1085,7 @@ def _extract_front_page_candidates(
             session.commit()
             session.refresh(submission)
 
-        page = session.exec(
-            select(SubmissionPage).where(SubmissionPage.submission_id == submission.id).order_by(SubmissionPage.page_number)
-        ).first()
+        page = next(iter(submission_repo.list_submission_pages(session, submission.id)), None)
         if not page:
             raise HTTPException(status_code=400, detail="Build submission pages first")
 
@@ -1215,17 +1217,12 @@ def _extract_front_page_candidates(
         return candidate_payload
 
 
-def _ensure_exam_front_page_template(exam_id: int, session: Session) -> tuple[dict[str, object] | None, list[int]]:
-    exam = session.get(Exam, exam_id)
+def _ensure_exam_front_page_template(exam_id: int, session: DbSession) -> tuple[dict[str, object] | None, list[int]]:
+    exam = exam_repo.get_exam(session, exam_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
 
-    front_page_submissions = session.exec(
-        select(Submission).where(
-            Submission.exam_id == exam_id,
-            Submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS,
-        ).order_by(Submission.id)
-    ).all()
+    front_page_submissions = submission_repo.list_exam_front_page_total_submissions(session, exam_id)
     seed_ids = [submission.id for submission in front_page_submissions[:_FRONT_PAGE_TEMPLATE_SEED_LIMIT] if submission.id is not None]
     if not seed_ids:
         return _front_page_template_cache_read(exam), []
@@ -1264,7 +1261,7 @@ def _ensure_exam_front_page_template(exam_id: int, session: Session) -> tuple[di
     return template_payload, seed_ids
 
 
-def get_or_create_front_page_totals_candidates(submission_id: int, session: Session) -> FrontPageTotalsCandidateRead:
+def get_or_create_front_page_totals_candidates(submission_id: int, session: DbSession) -> FrontPageTotalsCandidateRead:
     submission = session.get(Submission, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -1308,7 +1305,7 @@ def get_or_create_front_page_totals_candidates(submission_id: int, session: Sess
 
 
 @router.get("/{submission_id}/front-page-totals-candidates", response_model=FrontPageTotalsCandidateRead)
-def get_front_page_totals_candidates(submission_id: int, session: Session = Depends(get_session)) -> FrontPageTotalsCandidateRead:
+def get_front_page_totals_candidates(submission_id: int, session: DbSession = Depends(get_repository_session)) -> FrontPageTotalsCandidateRead:
     return get_or_create_front_page_totals_candidates(submission_id, session)
 
 
@@ -1316,7 +1313,7 @@ def get_front_page_totals_candidates(submission_id: int, session: Session = Depe
 def upsert_front_page_totals(
     submission_id: int,
     payload: FrontPageTotalsUpsert,
-    session: Session = Depends(get_session),
+    session: DbSession = Depends(get_repository_session),
 ) -> FrontPageTotalsRead:
     submission = session.get(Submission, submission_id)
     if not submission:
@@ -1369,13 +1366,13 @@ def upsert_manual_grade(
     submission_id: int,
     question_id: int,
     payload: ManualGradeUpsert,
-    session: Session = Depends(get_session),
+    session: DbSession = Depends(get_repository_session),
 ) -> GradeResultRead:
     submission = session.get(Submission, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    question = session.get(Question, question_id)
+    question = next((item for item in submission_repo.list_exam_questions(session, submission.exam_id) if item.id == question_id), None)
     if not question or question.exam_id != submission.exam_id:
         raise HTTPException(status_code=404, detail="Question not found for submission exam")
 
@@ -1392,28 +1389,17 @@ def upsert_manual_grade(
         "teacher_note": teacher_note,
     }
 
-    grade = session.exec(
-        select(GradeResult).where(GradeResult.submission_id == submission_id, GradeResult.question_id == question_id)
-    ).first()
-    if grade:
-        grade.marks_awarded = marks_awarded
-        grade.breakdown_json = json.dumps(breakdown)
-        grade.feedback_json = json.dumps(feedback)
-        grade.model_name = "teacher_manual"
-    else:
-        grade = GradeResult(
-            submission_id=submission_id,
-            question_id=question_id,
-            marks_awarded=marks_awarded,
-            breakdown_json=json.dumps(breakdown),
-            feedback_json=json.dumps(feedback),
-            model_name="teacher_manual",
-        )
-
-    session.add(grade)
-    submission.capture_mode = SubmissionCaptureMode.QUESTION_LEVEL
-    submission.status = SubmissionStatus.GRADED
-    session.add(submission)
+    grade = submission_repo.upsert_submission_grade(
+        session,
+        submission_id=submission_id,
+        question_id=question_id,
+        marks_awarded=marks_awarded,
+        breakdown_json=json.dumps(breakdown),
+        feedback_json=json.dumps(feedback),
+        model_name="teacher_manual",
+    )
+    submission_repo.update_submission_capture_mode(session, submission, SubmissionCaptureMode.QUESTION_LEVEL)
+    submission_repo.update_submission_status(session, submission, SubmissionStatus.GRADED)
     session.commit()
     invalidate_exam_reporting_cache(submission.exam_id)
     session.refresh(grade)
@@ -1430,8 +1416,8 @@ def upsert_manual_grade(
 
 
 @router.get("/{submission_id}/results", response_model=SubmissionResults)
-def get_results(submission_id: int, session: Session = Depends(get_session)) -> SubmissionResults:
-    submission = session.get(Submission, submission_id)
+def get_results(submission_id: int, session: DbSession = Depends(get_repository_session)) -> SubmissionResults:
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -1454,9 +1440,9 @@ def get_results(submission_id: int, session: Session = Depends(get_session)) -> 
             grades=[],
         )
 
-    transcriptions = session.exec(select(Transcription).where(Transcription.submission_id == submission_id)).all()
-    grades = session.exec(select(GradeResult).where(GradeResult.submission_id == submission_id)).all()
-    questions = session.exec(select(Question).where(Question.exam_id == submission.exam_id).order_by(Question.id)).all()
+    transcriptions = submission_repo.list_submission_transcriptions(session, submission_id)
+    grades = submission_repo.list_submission_grades(session, submission_id)
+    questions = submission_repo.list_exam_questions(session, submission.exam_id)
     grade_map = {grade.question_id: grade for grade in grades}
     objective_totals: dict[str, dict[str, float | int]] = {}
     for question in questions:

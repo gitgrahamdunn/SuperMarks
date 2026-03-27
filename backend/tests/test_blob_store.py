@@ -71,7 +71,16 @@ def test_build_pages_download_uses_stored_pathname_not_blob_url(tmp_path: Path, 
 
     async def _fake_download(pathname: str) -> tuple[bytes, str | None]:
         captured["pathname"] = pathname
-        return b"png-bytes", "image/png"
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+            b"\x90wS\xde"
+            b"\x00\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01"
+            b"\x0b\xe7\x02\x9d"
+            b"\x00\x00\x00\x00IEND\xaeB`\x82",
+            "image/png",
+        )
 
     monkeypatch.setattr("app.storage_provider.download_blob_bytes", _fake_download)
     with TestClient(app) as client:

@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 from xml.sax.saxutils import escape as xml_escape
 
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from app.models import AnswerCrop, Exam, GradeResult, Question, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionPage, Transcription
 from app.name_utils import normalize_student_name, student_name_sort_key
+from app.persistence import DbSession, repository_provider
 from app.reporting import accumulate_objective_totals, build_exam_objective_report, front_page_objective_totals, front_page_totals_read, objective_summary_text, objective_totals_read, question_objective_codes
 from app.schemas import ExamCompletionSummary, ExamMarkingDashboardResponse, SubmissionDashboardRow
 
@@ -24,6 +25,7 @@ from app.schemas import ExamCompletionSummary, ExamMarkingDashboardResponse, Sub
 _EXAM_REPORTING_CONTEXT_CACHE: "OrderedDict[int, ExamReportingContext]" = OrderedDict()
 _EXAM_REPORTING_CONTEXT_CACHE_LOCK = threading.Lock()
 _EXAM_REPORTING_CONTEXT_CACHE_MAX = 32
+reporting_repo = repository_provider().reporting
 
 
 @dataclass
@@ -514,32 +516,26 @@ def load_exam_reporting_snapshot(
     *,
     questions: list[Question],
     submissions: list[Submission],
-    session: Session,
+    session: DbSession,
 ) -> ExamReportingSnapshot:
-    _ = exam_id
-    question_ids = [question.id for question in questions]
-    submission_ids = [submission.id for submission in submissions]
-
     question_regions_by_question_id: dict[int, list[QuestionRegion]] = defaultdict(list)
-    if question_ids:
-        regions = session.exec(select(QuestionRegion).where(QuestionRegion.question_id.in_(question_ids))).all()
-        for region in regions:
-            question_regions_by_question_id[region.question_id].append(region)
+    collections = reporting_repo.load_exam_reporting_collections(session, exam_id)
+    for region in collections.question_regions:
+        question_regions_by_question_id[region.question_id].append(region)
 
     pages_by_submission_id: dict[int, list[SubmissionPage]] = defaultdict(list)
     crops_by_submission_id: dict[int, list[AnswerCrop]] = defaultdict(list)
     transcriptions_by_submission_id: dict[int, list[Transcription]] = defaultdict(list)
     grades_by_submission_id: dict[int, list[GradeResult]] = defaultdict(list)
 
-    if submission_ids:
-        for page in session.exec(select(SubmissionPage).where(SubmissionPage.submission_id.in_(submission_ids))).all():
-            pages_by_submission_id[page.submission_id].append(page)
-        for crop in session.exec(select(AnswerCrop).where(AnswerCrop.submission_id.in_(submission_ids))).all():
-            crops_by_submission_id[crop.submission_id].append(crop)
-        for transcription in session.exec(select(Transcription).where(Transcription.submission_id.in_(submission_ids))).all():
-            transcriptions_by_submission_id[transcription.submission_id].append(transcription)
-        for grade in session.exec(select(GradeResult).where(GradeResult.submission_id.in_(submission_ids))).all():
-            grades_by_submission_id[grade.submission_id].append(grade)
+    for page in collections.pages:
+        pages_by_submission_id[page.submission_id].append(page)
+    for crop in collections.crops:
+        crops_by_submission_id[crop.submission_id].append(crop)
+    for transcription in collections.transcriptions:
+        transcriptions_by_submission_id[transcription.submission_id].append(transcription)
+    for grade in collections.grades:
+        grades_by_submission_id[grade.submission_id].append(grade)
 
     submission_data_by_submission_id = {
         submission.id: ExamSubmissionReportingData(
@@ -626,7 +622,7 @@ def build_submission_reporting_projection(
 
 
 
-def load_exam_reporting_context(exam_id: int, session: Session) -> ExamReportingContext | None:
+def load_exam_reporting_context(exam_id: int, session: DbSession) -> ExamReportingContext | None:
     with _EXAM_REPORTING_CONTEXT_CACHE_LOCK:
         cached = _EXAM_REPORTING_CONTEXT_CACHE.get(exam_id)
     if cached is not None:
@@ -641,12 +637,9 @@ def load_exam_reporting_context(exam_id: int, session: Session) -> ExamReporting
     if not exam:
         return None
 
-    questions = session.exec(select(Question).where(Question.exam_id == exam_id).order_by(Question.id)).all()
-    submissions = session.exec(
-        select(Submission)
-        .where(Submission.exam_id == exam_id)
-        .order_by(Submission.created_at.asc(), Submission.id.asc())
-    ).all()
+    collections = reporting_repo.load_exam_reporting_collections(session, exam_id)
+    questions = collections.questions
+    submissions = collections.submissions
     snapshot = load_exam_reporting_snapshot(exam_id, questions=questions, submissions=submissions, session=session)
     dashboard_rows = [build_submission_dashboard_row(submission, session, questions=questions, snapshot=snapshot) for submission in submissions]
     submission_projections = [
@@ -675,12 +668,12 @@ def invalidate_exam_reporting_cache(exam_id: int) -> None:
 
 def build_submission_dashboard_row(
     submission: Submission,
-    session: Session,
+    session: DbSession,
     *,
     questions: list[Question] | None = None,
     snapshot: ExamReportingSnapshot | None = None,
 ) -> SubmissionDashboardRow:
-    questions = questions or session.exec(select(Question).where(Question.exam_id == submission.exam_id).order_by(Question.id)).all()
+    questions = questions or reporting_repo.load_exam_reporting_collections(session, submission.exam_id).questions
     total_possible = float(sum(question.max_marks for question in questions))
     if submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS:
         front_page_totals = front_page_totals_read(submission)
@@ -716,10 +709,12 @@ def build_submission_dashboard_row(
         ))
 
     submission_data = snapshot.submission_data_by_submission_id.get(submission.id) if snapshot else None
-    pages = submission_data.pages if submission_data is not None else session.exec(select(SubmissionPage).where(SubmissionPage.submission_id == submission.id)).all()
-    crops = submission_data.crops if submission_data is not None else session.exec(select(AnswerCrop).where(AnswerCrop.submission_id == submission.id)).all()
-    transcriptions = submission_data.transcriptions if submission_data is not None else session.exec(select(Transcription).where(Transcription.submission_id == submission.id)).all()
-    grades = submission_data.grades if submission_data is not None else session.exec(select(GradeResult).where(GradeResult.submission_id == submission.id)).all()
+    if submission_data is None:
+        submission_data = reporting_repo.load_submission_reporting_collections(session, submission.id, submission.exam_id)
+    pages = submission_data.pages
+    crops = submission_data.crops
+    transcriptions = submission_data.transcriptions
+    grades = submission_data.grades
 
     page_numbers = {page.page_number for page in pages if page.image_path}
     crop_map = {crop.question_id: crop for crop in crops if crop.image_path}
@@ -1023,7 +1018,7 @@ def _build_exam_marks_export_row(
     )
 
 
-def build_exam_marks_export_spec(context: ExamReportingContext, session: Session) -> CsvExportSpec[ExamMarksExportRow]:
+def build_exam_marks_export_spec(context: ExamReportingContext, session: DbSession) -> CsvExportSpec[ExamMarksExportRow]:
     _ = session
     export_plan = _build_exam_marks_export_plan(context)
     return CsvExportSpec(
@@ -1038,7 +1033,7 @@ def build_exam_marks_export_spec(context: ExamReportingContext, session: Session
     )
 
 
-def build_exam_marks_export_artifact(exam_id: int, session: Session) -> CsvExportArtifact[ExamMarksExportRow] | None:
+def build_exam_marks_export_artifact(exam_id: int, session: DbSession) -> CsvExportArtifact[ExamMarksExportRow] | None:
     context = load_exam_reporting_context(exam_id, session)
     if context is None:
         return None
@@ -1062,7 +1057,7 @@ def build_exam_summary_export_spec(context: ExamReportingContext) -> CsvExportSp
     )
 
 
-def build_exam_summary_export_artifact(exam_id: int, session: Session) -> CsvExportArtifact[ExamSummaryExportRow] | None:
+def build_exam_summary_export_artifact(exam_id: int, session: DbSession) -> CsvExportArtifact[ExamSummaryExportRow] | None:
     context = load_exam_reporting_context(exam_id, session)
     if context is None:
         return None
@@ -1244,7 +1239,7 @@ def build_exam_gradebook_xlsx_bytes(context: ExamReportingContext) -> bytes:
     return buffer.getvalue()
 
 
-def build_exam_gradebook_xlsx_artifact(exam_id: int, session: Session) -> tuple[str, bytes] | None:
+def build_exam_gradebook_xlsx_artifact(exam_id: int, session: DbSession) -> tuple[str, bytes] | None:
     context = load_exam_reporting_context(exam_id, session)
     if context is None:
         return None
@@ -1296,7 +1291,7 @@ def build_exam_objectives_summary_export_spec(context: ExamReportingContext) -> 
     )
 
 
-def build_exam_objectives_summary_export_artifact(exam_id: int, session: Session) -> CsvExportArtifact[ExamObjectiveSummaryExportRow] | None:
+def build_exam_objectives_summary_export_artifact(exam_id: int, session: DbSession) -> CsvExportArtifact[ExamObjectiveSummaryExportRow] | None:
     context = load_exam_reporting_context(exam_id, session)
     if context is None:
         return None
@@ -1306,7 +1301,7 @@ def build_exam_objectives_summary_export_artifact(exam_id: int, session: Session
     )
 
 
-def build_exam_marking_dashboard_response(exam_id: int, session: Session) -> ExamMarkingDashboardResponse | None:
+def build_exam_marking_dashboard_response(exam_id: int, session: DbSession) -> ExamMarkingDashboardResponse | None:
     context = load_exam_reporting_context(exam_id, session)
     if context is None:
         return None
@@ -2006,7 +2001,7 @@ def build_zip_export_content(artifact_specs: list[ZipArtifactSpec]) -> bytes:
     return archive_buffer.getvalue()
 
 
-def build_exam_student_summaries_zip_export_artifact(exam_id: int, session: Session) -> ZipExportArtifact | None:
+def build_exam_student_summaries_zip_export_artifact(exam_id: int, session: DbSession) -> ZipExportArtifact | None:
     context = load_exam_reporting_context(exam_id, session)
     if context is None:
         return None
@@ -2018,7 +2013,7 @@ def build_exam_student_summaries_zip_export_artifact(exam_id: int, session: Sess
     )
 
 
-def build_exam_student_summaries_zip(exam_id: int, session: Session) -> ExamStudentSummaryZipArtifact | None:
+def build_exam_student_summaries_zip(exam_id: int, session: DbSession) -> ExamStudentSummaryZipArtifact | None:
     artifact = build_exam_student_summaries_zip_export_artifact(exam_id, session)
     if artifact is None:
         return None

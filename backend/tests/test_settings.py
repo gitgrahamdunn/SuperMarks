@@ -61,6 +61,7 @@ def test_database_url_defaults_to_sqlite_locally(monkeypatch) -> None:
 
 def test_database_url_required_in_production(monkeypatch) -> None:
     monkeypatch.setenv("SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT", "1")
+    monkeypatch.setenv("SUPERMARKS_REPOSITORY_BACKEND", "sqlmodel")
     monkeypatch.delenv("SUPERMARKS_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("SUPERMARKS_ALLOW_PRODUCTION_SQLITE", raising=False)
@@ -86,6 +87,7 @@ def test_database_url_allows_sqlite_for_self_hosted_production(monkeypatch) -> N
 
 def test_database_url_does_not_allow_sqlite_on_managed_runtime_even_when_opted_in(monkeypatch) -> None:
     monkeypatch.setenv("SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT", "1")
+    monkeypatch.setenv("SUPERMARKS_REPOSITORY_BACKEND", "sqlmodel")
     monkeypatch.setenv("SUPERMARKS_ALLOW_PRODUCTION_SQLITE", "1")
     monkeypatch.delenv("SUPERMARKS_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -93,6 +95,19 @@ def test_database_url_does_not_allow_sqlite_on_managed_runtime_even_when_opted_i
     settings = Settings()
 
     with pytest.raises(RuntimeError, match="DATABASE_URL is required in production unless"):
+        _ = settings.effective_database_url
+
+
+def test_database_url_not_required_for_hosted_d1_bridge_runtime(monkeypatch) -> None:
+    monkeypatch.setenv("SUPERMARKS_MANAGED_RUNTIME_ENVIRONMENT", "1")
+    monkeypatch.setenv("SUPERMARKS_REPOSITORY_BACKEND", "d1-bridge")
+    monkeypatch.delenv("SUPERMARKS_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    settings = Settings()
+
+    assert settings.hosted_d1_bridge_enabled is True
+    with pytest.raises(RuntimeError, match="DATABASE_URL is not used when SUPERMARKS_REPOSITORY_BACKEND=d1-bridge"):
         _ = settings.effective_database_url
 
 
