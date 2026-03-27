@@ -243,6 +243,8 @@ export function SubmissionFrontPageTotalsPage() {
   const [saving, setSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [previewImageFailed, setPreviewImageFailed] = useState(false);
+  const [isBuildingPages, setIsBuildingPages] = useState(false);
+  const [resolvedPageImageUrl, setResolvedPageImageUrl] = useState('');
 
   const getOrderedFrontPageSubmissions = (rows: SubmissionRead[]) =>
     rows
@@ -283,6 +285,7 @@ export function SubmissionFrontPageTotalsPage() {
     setIsCandidateLoading(cachedSubmission?.front_page_totals?.confirmed ? false : true);
     setCandidateLoadSeconds(0);
     setPreviewImageFailed(false);
+    setIsBuildingPages(false);
 
     if (cachedSubmission) {
       const initialNameParts = initialEditableNameParts(cachedSubmission, initialCandidateTotals);
@@ -327,11 +330,25 @@ export function SubmissionFrontPageTotalsPage() {
         ]);
         if (cancelled) return;
 
-        const initialState = buildInitialFrontPageFormState(questionData, submissionData.front_page_totals, null, submissionData.student_name);
-        const initialNameParts = initialEditableNameParts(submissionData, routeState?.candidateTotals ?? null);
-        rememberCacheEntry(frontPageSubmissionValueCache, submissionId, submissionData);
-        setSubmission(submissionData);
-        setExamSubmissions(submissionRows);
+        let hydratedSubmissionData = submissionData;
+        if (submissionData.pages.length === 0 && submissionData.files.length > 0) {
+          setIsBuildingPages(true);
+          await api.buildPages(submissionId);
+          hydratedSubmissionData = await api.getSubmission(submissionId);
+          if (cancelled) return;
+        }
+
+        const initialState = buildInitialFrontPageFormState(questionData, hydratedSubmissionData.front_page_totals, null, hydratedSubmissionData.student_name);
+        const initialNameParts = initialEditableNameParts(hydratedSubmissionData, routeState?.candidateTotals ?? null);
+        rememberCacheEntry(frontPageSubmissionValueCache, submissionId, hydratedSubmissionData);
+        setSubmission(hydratedSubmissionData);
+        setExamSubmissions(
+          submissionRows.map((row) => (
+            row.id === hydratedSubmissionData.id
+              ? { ...row, pages: hydratedSubmissionData.pages, status: hydratedSubmissionData.status }
+              : row
+          )),
+        );
         setQuestions(questionData);
         setFirstNameInput(initialNameParts.firstName);
         setLastNameInput(initialNameParts.lastName);
@@ -342,13 +359,17 @@ export function SubmissionFrontPageTotalsPage() {
         setCandidateTotals(routeState?.candidateTotals ?? null);
         setCandidateError(null);
         setSelectedPageNumber((current) => (
-          submissionData.pages.some((page) => page.page_number === current)
+          hydratedSubmissionData.pages.some((page) => page.page_number === current)
             ? current
-            : (submissionData.pages[0]?.page_number ?? 1)
+            : (hydratedSubmissionData.pages[0]?.page_number ?? 1)
         ));
       } catch (error) {
         if (cancelled) return;
         showError(error instanceof Error ? error.message : 'Failed to load front-page totals');
+      } finally {
+        if (!cancelled) {
+          setIsBuildingPages(false);
+        }
       }
     };
 
@@ -359,7 +380,7 @@ export function SubmissionFrontPageTotalsPage() {
   }, [examId, routeState, showError, submissionId]);
 
   useEffect(() => {
-    if (!submission) return;
+    if (!submission || isBuildingPages) return;
     let cancelled = false;
 
     const loadCandidates = async () => {
@@ -426,7 +447,7 @@ export function SubmissionFrontPageTotalsPage() {
     return () => {
       cancelled = true;
     };
-  }, [questions, submission, submissionId]);
+  }, [isBuildingPages, questions, submission, submissionId]);
 
   useEffect(() => {
     if (!isCandidateLoading) return undefined;
@@ -446,7 +467,6 @@ export function SubmissionFrontPageTotalsPage() {
   );
   const pagePreviewUrl = selectedPage ? api.getPagePreviewUrl(submissionId, selectedPage.page_number) : '';
   const fullPageImageUrl = selectedPage ? api.getPageImageUrl(submissionId, selectedPage.page_number) : '';
-  const pageImageUrl = previewImageFailed ? fullPageImageUrl : pagePreviewUrl;
   const selectedPageIndex = useMemo(
     () => submission?.pages.findIndex((page) => page.page_number === selectedPageNumber) ?? -1,
     [selectedPageNumber, submission?.pages],
@@ -490,7 +510,43 @@ export function SubmissionFrontPageTotalsPage() {
 
   useEffect(() => {
     setPreviewImageFailed(false);
-  }, [pagePreviewUrl]);
+    setResolvedPageImageUrl('');
+    if (!selectedPage) return undefined;
+
+    let cancelled = false;
+    let objectUrlToRevoke: string | null = null;
+
+    const loadPageImage = async () => {
+      const candidates = [pagePreviewUrl, fullPageImageUrl].filter(Boolean);
+      for (const candidateUrl of candidates) {
+        try {
+          const objectUrl = await api.fetchAssetObjectUrl(candidateUrl);
+          if (cancelled) {
+            URL.revokeObjectURL(objectUrl);
+            return;
+          }
+          objectUrlToRevoke = objectUrl;
+          setResolvedPageImageUrl(objectUrl);
+          setPreviewImageFailed(candidateUrl === fullPageImageUrl);
+          return;
+        } catch {
+          continue;
+        }
+      }
+
+      if (!cancelled) {
+        setPreviewImageFailed(true);
+      }
+    };
+
+    void loadPageImage();
+    return () => {
+      cancelled = true;
+      if (objectUrlToRevoke) {
+        URL.revokeObjectURL(objectUrlToRevoke);
+      }
+    };
+  }, [fullPageImageUrl, pagePreviewUrl, selectedPage]);
 
   useEffect(() => {
     const pendingFrontPageSubmissionIds = frontPageSubmissions
@@ -814,18 +870,17 @@ export function SubmissionFrontPageTotalsPage() {
           {selectedPage ? (
             <>
               <div className="image-frame front-page-swipe-image">
-                <img
-                  src={pageImageUrl}
-                  alt={`Page ${selectedPage.page_number} for ${formatStudentName(submission.student_name)}`}
-                  className="front-page-swipe-page-image"
-                  loading="eager"
-                  fetchPriority="high"
-                  onError={() => {
-                    if (!previewImageFailed && pagePreviewUrl) {
-                      setPreviewImageFailed(true);
-                    }
-                  }}
-                />
+                {resolvedPageImageUrl ? (
+                  <img
+                    src={resolvedPageImageUrl}
+                    alt={`Page ${selectedPage.page_number} for ${formatStudentName(submission.student_name)}`}
+                    className="front-page-swipe-page-image"
+                    loading="eager"
+                    fetchPriority="high"
+                  />
+                ) : (
+                  <div className="review-readonly-block">Loading page preview…</div>
+                )}
               </div>
               {orderedFrontPageSubmissions.length > 1 && (
                 <div className="front-page-preview-nav" aria-label="Test navigation">
@@ -884,6 +939,8 @@ export function SubmissionFrontPageTotalsPage() {
                 </div>
               )}
             </>
+          ) : isBuildingPages ? (
+            <div className="review-readonly-block">Building page preview…</div>
           ) : (
             <div className="review-readonly-block">No built page image yet. Add photos or a PDF, then rebuild this paper preview.</div>
           )}
@@ -919,16 +976,6 @@ export function SubmissionFrontPageTotalsPage() {
           <div className="front-page-swipe-actions">
             <button
               type="button"
-              className="btn btn-primary front-page-swipe-pass"
-              onClick={() => void save(true)}
-              disabled={saving || (!isEditing && !hasPassableInterpretation)}
-              aria-label="Accept parsed read"
-              title="Accept parsed read"
-            >
-              {saving ? '…' : '✓'}
-            </button>
-            <button
-              type="button"
               className="btn btn-secondary front-page-swipe-fail"
               onClick={() => setIsEditing((current) => !current)}
               disabled={saving}
@@ -936,6 +983,16 @@ export function SubmissionFrontPageTotalsPage() {
               title={isEditing ? 'Hide correction panel' : 'Correct parsed read'}
             >
               {isEditing ? '−' : '✕'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary front-page-swipe-pass"
+              onClick={() => void save(true)}
+              disabled={saving || (!isEditing && !hasPassableInterpretation)}
+              aria-label="Accept parsed read"
+              title="Accept parsed read"
+            >
+              {saving ? '…' : '✓'}
             </button>
           </div>
 

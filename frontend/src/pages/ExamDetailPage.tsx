@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
 import { compareStudentNamesByLastName, formatStudentName } from '../lib/nameFormat';
 import { useToast } from '../components/ToastProvider';
@@ -23,7 +23,6 @@ export function ExamDetailPage() {
   const params = useParams();
   const examId = Number(params.examId);
   const navigate = useNavigate();
-  const location = useLocation();
   const [detail, setDetail] = useState<ExamDetail | null>(null);
   const [latestIntakeJob, setLatestIntakeJob] = useState<ExamIntakeJobRead | null>(null);
   const [questions, setQuestions] = useState<QuestionRead[]>([]);
@@ -45,8 +44,8 @@ export function ExamDetailPage() {
   const [activeCandidateId, setActiveCandidateId] = useState<string>('');
   const [isUploading, setIsUploading] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
-  const [isExporting, setIsExporting] = useState(false);
   const [isExportingSummary, setIsExportingSummary] = useState(false);
+  const [isSharingSummary, setIsSharingSummary] = useState(false);
   const [isExportingObjectivesSummary, setIsExportingObjectivesSummary] = useState(false);
   const [isExportingStudentSummaries, setIsExportingStudentSummaries] = useState(false);
   const [isCreatingClassList, setIsCreatingClassList] = useState(false);
@@ -54,11 +53,6 @@ export function ExamDetailPage() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const { showError, showSuccess, showWarning } = useToast();
-  const showCostDebug = useMemo(() => {
-    if (import.meta.env.VITE_ENABLE_COST_DEBUG !== '1') return false;
-    const params = new URLSearchParams(location.search);
-    return params.get('debug') === 'cost';
-  }, [location.search]);
 
   const loadDetail = async () => {
     setIsLoading(true);
@@ -556,29 +550,48 @@ export function ExamDetailPage() {
     URL.revokeObjectURL(url);
   };
 
-  const onExportWorkbook = async () => {
-    try {
-      setIsExporting(true);
-      const { blob, filename } = await api.downloadExamExportWorkbook(examId);
-      downloadBlob(blob, filename);
-      showSuccess('Excel grade export downloaded.');
-    } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to export Excel file');
-    } finally {
-      setIsExporting(false);
-    }
-  };
-
   const onExportSummaryCsv = async () => {
     try {
       setIsExportingSummary(true);
       const { blob, filename } = await api.downloadExamSummaryCsv(examId);
       downloadBlob(blob, filename);
-      showSuccess('Summary CSV export downloaded.');
+      showSuccess('Table downloaded.');
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to export summary CSV');
+      showError(error instanceof Error ? error.message : 'Failed to download table');
     } finally {
       setIsExportingSummary(false);
+    }
+  };
+
+  const onShareSummaryCsv = async () => {
+    try {
+      setIsSharingSummary(true);
+      const { blob, filename } = await api.downloadExamSummaryCsv(examId);
+      const file = new File([blob], filename, { type: blob.type || 'text/csv' });
+
+      if (!('share' in navigator)) {
+        downloadBlob(blob, filename);
+        showWarning('Share is not available on this device. Downloaded the table instead.');
+        return;
+      }
+
+      const sharePayload: ShareData = {
+        title: `${detail?.exam.name || 'SuperMarks'} table`,
+        text: 'SuperMarks class table export',
+      };
+
+      if ('canShare' in navigator && navigator.canShare?.({ files: [file] })) {
+        sharePayload.files = [file];
+      }
+
+      await navigator.share(sharePayload);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return;
+      }
+      showError(error instanceof Error ? error.message : 'Failed to share table');
+    } finally {
+      setIsSharingSummary(false);
     }
   };
 
@@ -718,7 +731,7 @@ export function ExamDetailPage() {
 
       {!preview && (
         <>
-          {showCostDebug && usageEntryCount > 0 && (
+          {usageEntryCount > 0 && (
             <section className="card stack">
               <details className="review-readonly-block surface-muted" style={{ margin: 0 }}>
                 <summary style={{ cursor: 'pointer', fontWeight: 700 }}>
@@ -788,10 +801,10 @@ export function ExamDetailPage() {
             </div>
             <div className="actions-row" style={{ marginTop: 0 }}>
               <button type="button" className="btn btn-secondary" onClick={() => void onExportSummaryCsv()} disabled={isExportingSummary}>
-                {isExportingSummary ? 'Exporting…' : 'Export class summary CSV'}
+                {isExportingSummary ? 'Downloading…' : 'Download table'}
               </button>
-              <button type="button" className="btn btn-primary" onClick={() => void onExportWorkbook()} disabled={isExporting}>
-                {isExporting ? 'Exporting…' : 'Export grades Excel'}
+              <button type="button" className="btn btn-primary" onClick={() => void onShareSummaryCsv()} disabled={isSharingSummary}>
+                {isSharingSummary ? 'Sharing…' : 'Share Table'}
               </button>
             </div>
           </section>

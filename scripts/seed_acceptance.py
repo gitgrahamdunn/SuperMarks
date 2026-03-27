@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 from sqlmodel import Session, SQLModel, create_engine
 
 from app import db
-from app.models import AnswerCrop, Exam, ExamKeyPage, GradeResult, Question, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionPage, SubmissionStatus, Transcription
+from app.models import AnswerCrop, Exam, ExamKeyPage, GradeResult, Question, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription
 from app.settings import settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +38,25 @@ def make_image(path: Path, *, title: str, subtitle: str, accent: tuple[int, int,
     image.save(path)
 
 
+def make_pdf(path: Path, *, title: str, subtitle: str, accent: tuple[int, int, int]) -> None:
+    import fitz  # pymupdf
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    shape = page.new_shape()
+    shape.draw_rect(fitz.Rect(48, 48, 564, 744))
+    shape.finish(color=tuple(channel / 255 for channel in accent), width=3)
+    shape.commit()
+    page.insert_text((72, 92), title, fontsize=24)
+    page.insert_text((72, 124), subtitle, fontsize=14)
+    for index in range(6):
+        top = 180 + index * 78
+        page.draw_rect(fitz.Rect(72, top, 540, top + 48), color=(0.75, 0.75, 0.75), width=1)
+        page.insert_text((88, top + 28), f"Visible worksheet content block {index + 1}", fontsize=12)
+    doc.save(path)
+    doc.close()
+
+
 def main() -> None:
     ensure_clean_dir(ARTIFACT_ROOT)
     ensure_clean_dir(DATA_DIR)
@@ -52,13 +71,13 @@ def main() -> None:
     question1_crop_path = DATA_DIR / "submission-1-q1.png"
     question2_crop_path = DATA_DIR / "submission-1-q2.png"
     submission_page_path = DATA_DIR / "submission-1-page-1.png"
-    front_page_path = DATA_DIR / "submission-2-front-page.png"
+    front_page_pdf_path = DATA_DIR / "submission-2-front-page.pdf"
 
     make_image(key_page_path, title="SuperMarks acceptance key", subtitle="Q1 and Q2 answer-key visual", accent=(34, 102, 204))
     make_image(question1_crop_path, title="Avery — Q1 crop", subtitle="Factor x^2 - 9", accent=(46, 125, 50))
     make_image(question2_crop_path, title="Avery — Q2 crop", subtitle="Solve the linear equation", accent=(198, 83, 44))
     make_image(submission_page_path, title="Avery — full submission page", subtitle="Contains both answer regions", accent=(114, 77, 171))
-    make_image(front_page_path, title="Jordan — front page", subtitle="Totals page for acceptance testing", accent=(0, 121, 107))
+    make_pdf(front_page_pdf_path, title="Jordan — front page", subtitle="Totals page for acceptance testing", accent=(0, 121, 107))
 
     with Session(db.engine) as session:
         exam = Exam(name="Acceptance Seed Exam", status="READY")
@@ -117,7 +136,16 @@ def main() -> None:
         session.refresh(front_page_submission)
 
         session.add(SubmissionPage(submission_id=question_level_submission.id, page_number=1, image_path=str(submission_page_path), width=1280, height=1660))
-        session.add(SubmissionPage(submission_id=front_page_submission.id, page_number=1, image_path=str(front_page_path), width=1280, height=1660))
+        session.add(
+            SubmissionFile(
+                submission_id=front_page_submission.id,
+                file_kind="pdf",
+                original_filename=front_page_pdf_path.name,
+                stored_path=str(front_page_pdf_path),
+                content_type="application/pdf",
+                size_bytes=front_page_pdf_path.stat().st_size,
+            )
+        )
         session.add(AnswerCrop(submission_id=question_level_submission.id, question_id=q1.id, image_path=str(question1_crop_path)))
         session.add(AnswerCrop(submission_id=question_level_submission.id, question_id=q2.id, image_path=str(question2_crop_path)))
         session.add(Transcription(submission_id=question_level_submission.id, question_id=q1.id, provider="stub", text="(x-3)(x+3)", confidence=0.99, raw_json=json.dumps({"source": "seed"})))

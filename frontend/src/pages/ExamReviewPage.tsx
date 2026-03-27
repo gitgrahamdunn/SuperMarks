@@ -322,9 +322,15 @@ export function ExamReviewPage() {
 
   if (!currentQuestion) {
     return (
-      <div className="card">
-        <p>No parsed questions available.</p>
-        <p><Link to="/">Back to Home</Link></p>
+      <div className="card stack">
+        <p>No answer-key review items are available for this exam.</p>
+        <p className="subtle-text" style={{ margin: 0 }}>
+          This review screen is only for parsed answer-key questions. If this exam is using the totals workflow, open the exam workspace and use the front-page totals queue to review page previews and confirm the extracted totals.
+        </p>
+        <div className="actions-row" style={{ marginTop: 0 }}>
+          <Link className="btn btn-primary" to={`/exams/${examId}`}>Back to exam workspace</Link>
+          <Link className="btn btn-secondary" to="/">Back to Home</Link>
+        </div>
       </div>
     );
   }
