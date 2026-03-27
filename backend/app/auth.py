@@ -112,15 +112,19 @@ def oidc_oauth_registry() -> OAuth:
 
 
 def auth_is_required() -> bool:
-    return bool(_expected_api_key() or configured_oidc_providers() or magic_link_enabled())
+    return bool(_expected_api_key() or configured_oidc_providers() or magic_link_enabled() or dev_login_enabled())
 
 
 def auth_is_enabled() -> bool:
-    return bool(configured_oidc_providers() or magic_link_enabled())
+    return bool(configured_oidc_providers() or magic_link_enabled() or dev_login_enabled())
 
 
 def magic_link_enabled() -> bool:
     return settings.magic_link_login_enabled and settings.email_delivery_enabled
+
+
+def dev_login_enabled() -> bool:
+    return settings.dev_login_enabled and bool((settings.dev_login_key or "").strip())
 
 
 def _token_secret() -> str:

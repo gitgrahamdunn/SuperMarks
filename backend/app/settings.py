@@ -147,6 +147,22 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("SUPERMARKS_MAGIC_LINK_LOGIN_ENABLED", "MAGIC_LINK_LOGIN_ENABLED"),
     )
+    dev_login_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SUPERMARKS_DEV_LOGIN_ENABLED", "DEV_LOGIN_ENABLED"),
+    )
+    dev_login_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPERMARKS_DEV_LOGIN_KEY", "DEV_LOGIN_KEY"),
+    )
+    dev_login_email: str = Field(
+        default="codex-dev@supermarks.local",
+        validation_alias=AliasChoices("SUPERMARKS_DEV_LOGIN_EMAIL", "DEV_LOGIN_EMAIL"),
+    )
+    dev_login_name: str = Field(
+        default="Codex Dev",
+        validation_alias=AliasChoices("SUPERMARKS_DEV_LOGIN_NAME", "DEV_LOGIN_NAME"),
+    )
     email_provider: str = Field(
         default="log",
         validation_alias=AliasChoices("SUPERMARKS_EMAIL_PROVIDER", "EMAIL_PROVIDER"),

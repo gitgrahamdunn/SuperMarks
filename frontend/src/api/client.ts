@@ -516,6 +516,13 @@ export const api = {
       body: JSON.stringify({ email, return_to: returnTo }),
     },
   ),
+  loginWithDevKey: (key: string) => requestAbsolute<{ ok: boolean; token: string }>(
+    buildAuthUrl('dev-login'),
+    {
+      method: 'POST',
+      body: JSON.stringify({ key }),
+    },
+  ),
   persistAuthToken,
   clearStoredAuthToken,
   getStoredAuthToken,

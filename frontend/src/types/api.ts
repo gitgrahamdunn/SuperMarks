@@ -25,6 +25,7 @@ export interface AuthUserRead {
 export interface AuthStatusRead {
   auth_enabled: boolean;
   magic_link_enabled?: boolean;
+  dev_login_enabled?: boolean;
   authenticated: boolean;
   auth_method: string;
   user?: AuthUserRead | null;

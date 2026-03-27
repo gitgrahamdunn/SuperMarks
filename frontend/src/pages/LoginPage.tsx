@@ -6,17 +6,35 @@ import type { AuthProviderRead } from '../types/api';
 type LoginPageProps = {
   providers: AuthProviderRead[];
   magicLinkEnabled?: boolean;
+  devLoginEnabled?: boolean;
+  onAuthenticated?: () => Promise<void> | void;
 };
 
-export function LoginPage({ providers, magicLinkEnabled = false }: LoginPageProps) {
+export function LoginPage({ providers, magicLinkEnabled = false, devLoginEnabled = false, onAuthenticated }: LoginPageProps) {
   const [email, setEmail] = useState('');
   const [emailPending, setEmailPending] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [devRevealTapCount, setDevRevealTapCount] = useState(0);
+  const [devModeRevealed, setDevModeRevealed] = useState(false);
+  const [devKey, setDevKey] = useState('');
+  const [devPending, setDevPending] = useState(false);
 
   const startLogin = (providerSlug: string) => {
     const callbackUrl = `${window.location.origin}/auth/callback`;
     window.location.assign(api.buildAuthLoginUrl(providerSlug, callbackUrl));
+  };
+
+  const maybeRevealDevMode = () => {
+    if (!devLoginEnabled) return;
+    setDevRevealTapCount((current) => {
+      const next = current + 1;
+      if (next >= 5) {
+        setDevModeRevealed(true);
+        return 0;
+      }
+      return next;
+    });
   };
 
   const requestMagicLink = async (event: FormEvent<HTMLFormElement>) => {
@@ -34,10 +52,25 @@ export function LoginPage({ providers, magicLinkEnabled = false }: LoginPageProp
     }
   };
 
+  const requestDevLogin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setErrorMessage('');
+    setDevPending(true);
+    try {
+      const response = await api.loginWithDevKey(devKey);
+      api.persistAuthToken(response.token);
+      await onAuthenticated?.();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Developer sign-in failed');
+    } finally {
+      setDevPending(false);
+    }
+  };
+
   return (
     <main className="contract-error-page">
       <section className="contract-error-card" style={{ maxWidth: 460 }}>
-        <h1>Sign in to SuperMarks</h1>
+        <h1 onClick={maybeRevealDevMode} style={{ cursor: devLoginEnabled ? 'pointer' : 'default' }}>Sign in to SuperMarks</h1>
         <p>Use your school or personal account to access your exam workspaces.</p>
         {magicLinkEnabled ? (
           <form onSubmit={requestMagicLink} style={{ display: 'grid', gap: '.75rem', marginTop: '1rem' }}>
@@ -57,6 +90,23 @@ export function LoginPage({ providers, magicLinkEnabled = false }: LoginPageProp
             </button>
             {emailSent ? <p className="subtle-text">Check your inbox for the sign-in link.</p> : null}
             {errorMessage ? <p className="subtle-text" style={{ color: 'var(--danger-600, #b42318)' }}>{errorMessage}</p> : null}
+          </form>
+        ) : null}
+        {devModeRevealed && devLoginEnabled ? (
+          <form onSubmit={requestDevLogin} style={{ display: 'grid', gap: '.75rem', marginTop: '1rem' }}>
+            <label style={{ display: 'grid', gap: '.35rem', textAlign: 'left' }}>
+              <span>Developer access key</span>
+              <input
+                type="password"
+                value={devKey}
+                onChange={(event) => setDevKey(event.target.value)}
+                autoComplete="off"
+                required
+              />
+            </label>
+            <button type="submit" className="btn btn-secondary" disabled={devPending}>
+              {devPending ? 'Signing in…' : 'Developer sign-in'}
+            </button>
           </form>
         ) : null}
         <div style={{ display: 'grid', gap: '.75rem', marginTop: '1rem' }}>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta, timezone
+import hmac
 from typing import Any
 
 from fastapi import APIRouter
@@ -17,6 +18,7 @@ from app.auth import (
     build_user_bearer_token,
     clear_browser_session,
     current_auth_context,
+    dev_login_enabled,
     get_provider_or_404,
     hash_magic_link_token,
     magic_link_enabled,
@@ -52,6 +54,7 @@ class AuthUserRead(BaseModel):
 class AuthStatusRead(BaseModel):
     auth_enabled: bool
     magic_link_enabled: bool
+    dev_login_enabled: bool
     authenticated: bool
     auth_method: str
     user: AuthUserRead | None = None
@@ -69,6 +72,15 @@ class MagicLinkRequest(BaseModel):
 
 class MagicLinkRequestResponse(BaseModel):
     ok: bool
+
+
+class DevLoginRequest(BaseModel):
+    key: str
+
+
+class DevLoginResponse(BaseModel):
+    ok: bool
+    token: str
 
 
 def _oauth_client(provider_slug: str):
@@ -104,6 +116,7 @@ def get_auth_status() -> AuthStatusRead:
     return AuthStatusRead(
         auth_enabled=auth_is_enabled(),
         magic_link_enabled=magic_link_enabled(),
+        dev_login_enabled=dev_login_enabled(),
         authenticated=context.is_authenticated,
         auth_method=context.kind,
         user=_user_info_payload({}),
@@ -161,6 +174,35 @@ async def request_magic_link(payload: MagicLinkRequest, request: Request) -> Mag
     magic_link_url = f"{verify_url}?token={raw_token}&return_to={return_to}"
     await send_magic_link_email(email=normalized_email, magic_link_url=magic_link_url)
     return MagicLinkRequestResponse(ok=True)
+
+
+@router.post("/dev-login", response_model=DevLoginResponse)
+def login_with_dev_key(payload: DevLoginRequest, request: Request) -> DevLoginResponse:
+    if not dev_login_enabled():
+        raise HTTPException(status_code=404, detail="Developer login is not enabled")
+
+    expected_key = (settings.dev_login_key or "").strip()
+    if not expected_key or not hmac.compare_digest(payload.key.strip(), expected_key):
+        raise HTTPException(status_code=401, detail="Invalid developer login key")
+
+    dev_email = normalize_email_address(settings.dev_login_email)
+    with open_repository_session() as session:
+        user = user_repo.upsert_user_identity(
+            session,
+            auth_issuer="dev-login",
+            auth_subject=dev_email,
+            email=dev_email,
+            full_name=settings.dev_login_name.strip() or "Codex Dev",
+            given_name="Codex",
+            family_name="Dev",
+            picture_url=None,
+        )
+        user_id = int(user.id or 0)
+        commit_repository_session(session)
+
+    set_browser_user_session(request, user_id=user_id)
+    token = build_user_bearer_token(user_id)
+    return DevLoginResponse(ok=True, token=token)
 
 
 @router.get("/login/{provider_slug}")

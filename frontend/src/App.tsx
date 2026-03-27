@@ -110,7 +110,12 @@ export default function App() {
   if (shouldRenderLogin) {
     return (
       <Suspense fallback={<LoadingShell />}>
-        <LoginPage providers={authState?.providers ?? []} magicLinkEnabled={authState?.magic_link_enabled ?? false} />
+        <LoginPage
+          providers={authState?.providers ?? []}
+          magicLinkEnabled={authState?.magic_link_enabled ?? false}
+          devLoginEnabled={authState?.dev_login_enabled ?? false}
+          onAuthenticated={refreshAuthState}
+        />
       </Suspense>
     );
   }
