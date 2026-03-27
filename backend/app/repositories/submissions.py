@@ -47,6 +47,13 @@ def create_submission(
     return submission
 
 
+def update_submission(session: DbSession, submission: Submission, **fields) -> Submission:
+    for key, value in fields.items():
+        setattr(submission, key, value)
+    session.add(submission)
+    return submission
+
+
 def update_submission_front_page_data(
     session: DbSession,
     submission: Submission,

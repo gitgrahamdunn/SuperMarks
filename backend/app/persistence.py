@@ -85,6 +85,31 @@ def open_repository_session() -> Generator[DbSession, None, None]:
         yield session
 
 
+def commit_repository_session(session: DbSession) -> None:
+    if db.engine is None:
+        return
+    session.commit()
+
+
+def flush_repository_session(session: DbSession) -> None:
+    if db.engine is None:
+        return
+    session.flush()
+
+
+def rollback_repository_session(session: DbSession) -> None:
+    if db.engine is None:
+        return
+    session.rollback()
+
+
+def refresh_repository_instance(session: DbSession, instance: Any) -> Any:
+    if db.engine is None:
+        return instance
+    session.refresh(instance)
+    return instance
+
+
 def get_repository_backend() -> str:
     """Configured repository backend name."""
 

@@ -49,6 +49,21 @@ def _hydrate_many(model_cls, rows: list[dict[str, Any]]) -> list[Any]:
     return result
 
 
+def _update_row(table: str, row_id: int, fields: dict[str, Any], returning: str) -> dict[str, Any] | None:
+    assignments = ", ".join(f"{column} = ?" for column in fields)
+    values = [_normalize_value(value) for value in fields.values()]
+    values.append(row_id)
+    return _bridge().query_first(
+        f"""
+        UPDATE {table}
+        SET {assignments}
+        WHERE id = ?
+        RETURNING {returning}
+        """,
+        values,
+    )
+
+
 def get_submission(session: DbSession, submission_id: int) -> Submission | None:
     _ = session
     return _hydrate(
@@ -102,6 +117,24 @@ def create_submission(
     if created is None:
         raise RuntimeError("D1 bridge did not return the created submission row")
     return created
+
+
+def update_submission(session: DbSession, submission: Submission, **fields) -> Submission:
+    _ = session
+    if not fields:
+        return submission
+    row = _update_row(
+        "submission",
+        int(submission.id or 0),
+        fields,
+        "id, exam_id, student_name, first_name, last_name, status, capture_mode, "
+        "front_page_totals_json, front_page_candidates_json, front_page_usage_json, "
+        "front_page_reviewed_at, created_at",
+    )
+    updated = _hydrate(Submission, row)
+    if updated is None:
+        raise RuntimeError("D1 bridge did not return the updated submission row")
+    return updated
 
 
 def update_submission_front_page_data(

@@ -42,7 +42,15 @@ from app.ai.openai_vision import (
     get_bulk_name_detector,
     get_front_page_totals_extractor,
 )
-from app.persistence import DbSession, get_repository_session, open_repository_session, repository_provider
+from app.persistence import (
+    DbSession,
+    commit_repository_session,
+    flush_repository_session,
+    get_repository_session,
+    open_repository_session,
+    repository_provider,
+    rollback_repository_session,
+)
 from app.models import AnswerCrop, BulkUploadPage, ClassList, Exam, ExamBulkUploadFile, ExamIntakeJob, ExamKeyFile, ExamKeyPage, ExamKeyParseJob, ExamKeyParsePage, ExamStatus, GradeResult, Question, QuestionParseEvidence, QuestionRegion, Submission, SubmissionCaptureMode, SubmissionFile, SubmissionPage, SubmissionStatus, Transcription, utcnow
 from app.class_lists import build_class_list_payload, nearest_known_student_name, normalize_class_list_names, parse_class_list_names_json, parse_class_list_tabular_bytes
 from app.reporting import front_page_totals_read
@@ -468,17 +476,18 @@ def _claim_exam_intake_job(job_id: int, runner_id: str, session: DbSession) -> b
     lease_expires_at = _coerce_utc(job.lease_expires_at)
     if job.status == "running" and job.runner_id and job.runner_id != runner_id and lease_expires_at and lease_expires_at > now:
         return False
-    job.status = "running"
-    job.runner_id = runner_id
-    job.attempt_count = int(job.attempt_count or 0) + 1
-    job.started_at = job.started_at or now
-    job.updated_at = now
-    job.last_progress_at = now
-    job.lease_expires_at = _exam_intake_lease_deadline()
-    exam_repo.update_exam_intake_job(session, job)
-    if db.engine is not None:
-        session.commit()
-        session.refresh(job)
+    exam_repo.update_exam_intake_job(
+        session,
+        job,
+        status="running",
+        runner_id=runner_id,
+        attempt_count=int(job.attempt_count or 0) + 1,
+        started_at=job.started_at or now,
+        updated_at=now,
+        last_progress_at=now,
+        lease_expires_at=_exam_intake_lease_deadline(),
+    )
+    commit_repository_session(session)
     return True
 
 
@@ -496,17 +505,20 @@ def _auto_resume_exam_intake_job_if_needed(job: ExamIntakeJob | None, session: D
         return job
 
     now = utcnow()
-    job.status = "queued"
-    job.stage = "resuming"
-    job.fully_warmed = False
-    job.review_ready = bool(job.initial_review_ready)
-    job.error_message = None
-    job.updated_at = now
-    job.finished_at = None
-    job.runner_id = None
-    job.lease_expires_at = None
-    job.last_progress_at = now
-    exam_repo.update_exam_intake_job(session, job)
+    job = exam_repo.update_exam_intake_job(
+        session,
+        job,
+        status="queued",
+        stage="resuming",
+        fully_warmed=False,
+        review_ready=bool(job.initial_review_ready),
+        error_message=None,
+        updated_at=now,
+        finished_at=None,
+        runner_id=None,
+        lease_expires_at=None,
+        last_progress_at=now,
+    )
 
     exam = exam_repo.get_exam(session, job.exam_id)
     if exam and exam.status != ExamStatus.READY:
@@ -516,9 +528,7 @@ def _auto_resume_exam_intake_job_if_needed(job: ExamIntakeJob | None, session: D
             status=ExamStatus.REVIEWING if job.initial_review_ready else ExamStatus.DRAFT,
         )
 
-    if db.engine is not None:
-        session.commit()
-        session.refresh(job)
+    commit_repository_session(session)
     if job.id is not None:
         _spawn_exam_intake_job_thread(job.id)
     return job
@@ -537,19 +547,22 @@ def _resume_pending_exam_intake_jobs() -> None:
                 resumable_ids.append(job.id)
                 continue
             if job.status == "running" and (lease_expires_at is None or lease_expires_at <= now):
-                job.status = "queued"
-                job.stage = "resuming"
-                job.fully_warmed = False
-                job.review_ready = bool(job.initial_review_ready)
-                job.error_message = None
-                job.runner_id = None
-                job.lease_expires_at = None
-                job.finished_at = None
-                job.updated_at = now
-                job.last_progress_at = now
-                exam_repo.update_exam_intake_job(session, job)
+                exam_repo.update_exam_intake_job(
+                    session,
+                    job,
+                    status="queued",
+                    stage="resuming",
+                    fully_warmed=False,
+                    review_ready=bool(job.initial_review_ready),
+                    error_message=None,
+                    runner_id=None,
+                    lease_expires_at=None,
+                    finished_at=None,
+                    updated_at=now,
+                    last_progress_at=now,
+                )
                 resumable_ids.append(job.id)
-        session.commit()
+        commit_repository_session(session)
     for job_id in resumable_ids:
         _spawn_exam_intake_job_thread(job_id)
 
@@ -635,19 +648,22 @@ def _set_exam_initial_review_ready(
         if not job:
             return
         now = utcnow()
-        job.review_open_threshold = threshold
-        job.candidates_ready = max(job.candidates_ready, candidates_ready)
-        job.initial_review_ready = True
-        job.review_ready = True
-        job.stage = stage
-        job.updated_at = now
-        job.last_progress_at = now
-        job.lease_expires_at = _exam_intake_lease_deadline()
-        job.metrics_json = json.dumps(metrics)
-        exam_repo.update_exam_intake_job(session, job)
+        exam_repo.update_exam_intake_job(
+            session,
+            job,
+            review_open_threshold=threshold,
+            candidates_ready=max(job.candidates_ready, candidates_ready),
+            initial_review_ready=True,
+            review_ready=True,
+            stage=stage,
+            updated_at=now,
+            last_progress_at=now,
+            lease_expires_at=_exam_intake_lease_deadline(),
+            metrics_json=json.dumps(metrics),
+        )
         if exam and exam.status != ExamStatus.READY:
             exam_repo.update_exam(session, exam, status=ExamStatus.REVIEWING)
-        session.commit()
+        commit_repository_session(session)
 
 
 def _mark_exam_review_ready_if_possible(exam_id: int, submission_ids: list[int], *, failed_submission_ids: list[int] | None = None) -> None:
@@ -666,11 +682,11 @@ def _mark_exam_review_ready_if_possible(exam_id: int, submission_ids: list[int],
         if readiness_failures:
             if exam.status != ExamStatus.READY:
                 exam_repo.update_exam(session, exam, status=ExamStatus.FAILED)
-                session.commit()
+                commit_repository_session(session)
             raise RuntimeError("; ".join(readiness_failures))
         if exam.status != ExamStatus.READY:
             exam_repo.update_exam(session, exam, status=ExamStatus.REVIEWING)
-            session.commit()
+            commit_repository_session(session)
 
 
 def _warm_and_promote_front_page_review_background(exam_id: int, submission_ids: list[int]) -> None:
@@ -762,19 +778,22 @@ def _detect_bulk_pages(
             processed_pages += 1
             if job:
                 now = utcnow()
-                job.pages_processed = processed_pages
-                job.updated_at = now
-                job.last_progress_at = now
-                job.lease_expires_at = _exam_intake_lease_deadline()
-                exam_repo.update_exam_intake_job(session, job)
-                session.commit()
+                job = exam_repo.update_exam_intake_job(
+                    session,
+                    job,
+                    pages_processed=processed_pages,
+                    updated_at=now,
+                    last_progress_at=now,
+                    lease_expires_at=_exam_intake_lease_deadline(),
+                )
+                commit_repository_session(session)
             else:
-                session.flush()
+                flush_repository_session(session)
 
     if detected_exam_titles:
         exam_repo.update_exam(session, exam, name=max(detected_exam_titles, key=len))
     if not job:
-        session.commit()
+        commit_repository_session(session)
     return [item for item in detections if item is not None]
 
 
@@ -941,7 +960,7 @@ def _extract_image_upload_front_page_pages(
                     name=exam_name or exam.name,
                     front_page_template_json=json.dumps(grouped_template),
                 )
-                session.commit()
+                commit_repository_session(session)
         except Exception:
             logger.exception("grouped front-page template extraction failed for exam %s", exam_id)
 
@@ -1080,15 +1099,18 @@ def _extract_image_upload_front_page_pages(
                 now = utcnow()
                 current_metrics = job_metrics if job_metrics is not None else {}
                 _record_front_page_usage_metrics(current_metrics, usage)
-                job.pages_processed = processed_pages
-                job.updated_at = now
-                job.last_progress_at = now
-                job.lease_expires_at = _exam_intake_lease_deadline()
-                job.metrics_json = json.dumps(current_metrics)
-                exam_repo.update_exam_intake_job(session, job)
-                session.commit()
+                job = exam_repo.update_exam_intake_job(
+                    session,
+                    job,
+                    pages_processed=processed_pages,
+                    updated_at=now,
+                    last_progress_at=now,
+                    lease_expires_at=_exam_intake_lease_deadline(),
+                    metrics_json=json.dumps(current_metrics),
+                )
+                commit_repository_session(session)
             else:
-                session.flush()
+                flush_repository_session(session)
 
     if candidate_payloads:
         from app.routers.submissions import apply_front_page_template_fill, build_front_page_consensus_template_from_candidates
@@ -1107,7 +1129,7 @@ def _extract_image_upload_front_page_pages(
     if detected_exam_titles and not grouped_template:
         exam_repo.update_exam(session, exam, name=max(detected_exam_titles, key=len))
     if not job:
-        session.commit()
+        commit_repository_session(session)
     return [item for item in detections if item is not None], candidate_payloads, usage_payloads
 
 
@@ -1313,8 +1335,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                     lease_expires_at=None,
                     finished_at=failed_at,
                 )
-                if db.engine is not None:
-                    session.commit()
+                commit_repository_session(session)
                 return
             intake_metrics["front_page_thinking_level"] = _normalize_front_page_gemini_thinking_level(job.thinking_level)
             running_at = utcnow()
@@ -1329,8 +1350,8 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 lease_expires_at=_exam_intake_lease_deadline(),
                 metrics_json=_job_metrics_payload(job, intake_metrics),
             )
-            if db.engine is not None:
-                session.commit()
+            job = exam_repo.get_exam_intake_job(session, job_id) or job
+            commit_repository_session(session)
 
             render_stage_started = time.perf_counter()
             rendered_paths, rendered_page_count = _render_stored_bulk_upload_files(bulk, _bulk_pages_dir(exam_id, bulk.id or 0))
@@ -1350,34 +1371,45 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                     detection_evidence_json="{}",
                 )
             now = utcnow()
-            job.page_count = rendered_page_count
-            job.pages_built = rendered_page_count
-            job.updated_at = now
-            job.last_progress_at = now
-            job.lease_expires_at = _exam_intake_lease_deadline()
             intake_metrics["render_upload_ms"] = round((time.perf_counter() - render_stage_started) * 1000, 1)
             intake_metrics["page_count"] = rendered_page_count
-            job.metrics_json = _job_metrics_payload(job, intake_metrics)
-            exam_repo.update_exam_intake_job(session, job)
-            session.commit()
+            job = exam_repo.update_exam_intake_job(
+                session,
+                job,
+                page_count=rendered_page_count,
+                pages_built=rendered_page_count,
+                updated_at=now,
+                last_progress_at=now,
+                lease_expires_at=_exam_intake_lease_deadline(),
+                metrics_json=_job_metrics_payload(job, intake_metrics),
+            )
+            commit_repository_session(session)
 
-            job.stage = "detecting_names"
-            job.updated_at = utcnow()
-            job.last_progress_at = job.updated_at
-            job.lease_expires_at = _exam_intake_lease_deadline()
-            job.metrics_json = _job_metrics_payload(job, intake_metrics)
-            exam_repo.update_exam_intake_job(session, job)
-            session.commit()
+            next_stage_at = utcnow()
+            job = exam_repo.update_exam_intake_job(
+                session,
+                job,
+                stage="detecting_names",
+                updated_at=next_stage_at,
+                last_progress_at=next_stage_at,
+                lease_expires_at=_exam_intake_lease_deadline(),
+                metrics_json=_job_metrics_payload(job, intake_metrics),
+            )
+            commit_repository_session(session)
 
             prefilled_candidate_payloads: dict[int, FrontPageTotalsCandidateRead] = {}
             prefilled_usage_payloads: dict[int, dict[str, object]] = {}
             if not bulk.stored_path:
-                job.stage = "extracting_front_pages"
-                job.updated_at = utcnow()
-                job.last_progress_at = job.updated_at
-                job.lease_expires_at = _exam_intake_lease_deadline()
-                exam_repo.update_exam_intake_job(session, job)
-                session.commit()
+                extracting_at = utcnow()
+                job = exam_repo.update_exam_intake_job(
+                    session,
+                    job,
+                    stage="extracting_front_pages",
+                    updated_at=extracting_at,
+                    last_progress_at=extracting_at,
+                    lease_expires_at=_exam_intake_lease_deadline(),
+                )
+                commit_repository_session(session)
                 detections, prefilled_candidate_payloads, prefilled_usage_payloads = _extract_image_upload_front_page_pages(
                     exam=exam,
                     bulk=bulk,
@@ -1389,13 +1421,17 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             else:
                 detections = _detect_bulk_pages(exam=exam, bulk=bulk, rendered_paths=rendered_paths, session=session, job=job)
                 intake_metrics["detecting_names_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
-            job.stage = "creating_submissions"
-            job.updated_at = utcnow()
-            job.lease_expires_at = _exam_intake_lease_deadline()
             stage_started = time.perf_counter()
-            job.metrics_json = _job_metrics_payload(job, intake_metrics)
-            exam_repo.update_exam_intake_job(session, job)
-            session.commit()
+            creating_at = utcnow()
+            job = exam_repo.update_exam_intake_job(
+                session,
+                job,
+                stage="creating_submissions",
+                updated_at=creating_at,
+                lease_expires_at=_exam_intake_lease_deadline(),
+                metrics_json=_job_metrics_payload(job, intake_metrics),
+            )
+            commit_repository_session(session)
 
             candidates, _warnings = _build_bulk_preview_from_detections(upload_files=None, bulk=bulk, detections=detections, roster=None)
             created = _finalize_bulk_candidates(
@@ -1408,18 +1444,22 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             )
             intake_metrics["creating_submissions_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
             intake_metrics["candidate_count"] = len(candidates)
-            job.submissions_created = len(created)
-            job.candidates_ready = 0
-            job.review_ready = False
-            job.stage = "warming_initial_review"
-            job.updated_at = utcnow()
-            job.last_progress_at = job.updated_at
-            job.lease_expires_at = _exam_intake_lease_deadline()
             stage_started = time.perf_counter()
-            job.metrics_json = _job_metrics_payload(job, intake_metrics)
-            exam_repo.update_exam_intake_job(session, job)
-            exam_repo.update_exam(session, exam, status=ExamStatus.DRAFT)
-            session.commit()
+            warming_at = utcnow()
+            job = exam_repo.update_exam_intake_job(
+                session,
+                job,
+                submissions_created=len(created),
+                candidates_ready=0,
+                review_ready=False,
+                stage="warming_initial_review",
+                updated_at=warming_at,
+                last_progress_at=warming_at,
+                lease_expires_at=_exam_intake_lease_deadline(),
+                metrics_json=_job_metrics_payload(job, intake_metrics),
+            )
+            exam = exam_repo.update_exam(session, exam, status=ExamStatus.DRAFT)
+            commit_repository_session(session)
 
         created_submission_ids = [item.id for item in created if item.id is not None]
         initial_submission_ids, remaining_submission_ids, review_open_threshold = _split_initial_and_remaining_review_ids(created_submission_ids)
@@ -1440,7 +1480,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                     lease_expires_at=_exam_intake_lease_deadline(),
                     metrics_json=_job_metrics_payload(job, intake_metrics),
                 )
-                session.commit()
+                commit_repository_session(session)
 
         def record_candidate_progress(ready_submission_id: int) -> None:
             with candidate_progress_lock:
@@ -1461,7 +1501,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                     lease_expires_at=_exam_intake_lease_deadline(),
                     metrics_json=_job_metrics_payload(progress_job, intake_metrics),
                 )
-                progress_session.commit()
+                commit_repository_session(progress_session)
 
         def warm_submission_ids(submission_ids: list[int]) -> list[int]:
             if not submission_ids:
@@ -1561,7 +1601,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                     exam,
                     status=ExamStatus.REVIEWING if partial_ready else (ExamStatus.FAILED if readiness_failures else ExamStatus.REVIEWING),
                 )
-            session.commit()
+            commit_repository_session(session)
             invalidate_exam_reporting_cache(exam_id)
         logger.info("exam intake finished exam=%s job=%s metrics=%s", exam_id, job_id, intake_metrics)
     except Exception as exc:
@@ -1594,8 +1634,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                     exam,
                     status=ExamStatus.REVIEWING if (job and (job.initial_review_ready or job.review_ready)) else ExamStatus.FAILED,
                 )
-            if db.engine is not None:
-                session.commit()
+            commit_repository_session(session)
         logger.error("exam intake failed exam=%s job=%s metrics=%s", exam_id, job_id, intake_metrics)
     finally:
         lock.release()
@@ -1944,7 +1983,7 @@ def _delete_exam_resources(exam_id: int, session: DbSession) -> None:
 
         parse_job_ids = exam_repo.delete_exam_data(session, exam=exam)
         if db.engine is not None:
-            session.commit()
+            commit_repository_session(session)
 
         _exam_question_locks.pop(exam_id, None)
         for job_id in parse_job_ids:
@@ -1990,7 +2029,7 @@ def build_key_pages_for_exam(exam_id: int, session: DbSession) -> list[Path]:
                 needs_commit = True
 
             if needs_commit:
-                session.commit()
+                commit_repository_session(session)
                 existing_rows = exam_repo.list_exam_key_pages(session, exam_id)
                 if existing_rows and all((row.blob_pathname or "").strip() for row in existing_rows):
                     return [Path(f"blob://{row.blob_pathname}") for row in existing_rows]
@@ -2069,7 +2108,7 @@ def build_key_pages_for_exam(exam_id: int, session: DbSession) -> list[Path]:
                     created_paths.append(rendered)
                     page_num += 1
 
-        session.commit()
+        commit_repository_session(session)
 
         if not created_paths:
             raise HTTPException(
@@ -2156,9 +2195,8 @@ def create_exam(payload: ExamCreate, session: DbSession = Depends(get_repository
     normalized_name = " ".join(str(payload.name or "").strip().split())
     if normalized_name:
         exam_name = normalized_name
-    exam = exam_repo.create_exam(session, name=exam_name)
-    if db.engine is not None:
-        session.commit()
+        exam = exam_repo.create_exam(session, name=exam_name)
+    commit_repository_session(session)
     return exam
 
 
@@ -2183,9 +2221,6 @@ def _enqueue_intake_job_for_exam(
     normalized_thinking_level = _normalize_front_page_gemini_thinking_level(front_page_thinking_level)
     if exam.id is None:
         exam = exam_repo.create_exam(session, name=_normalized_exam_name(exam.name))
-    else:
-        exam_repo.update_exam(session, exam)
-
     if selected_class_list_id:
         class_list = exam_repo.get_class_list(session, selected_class_list_id)
         if not class_list:
@@ -2252,12 +2287,10 @@ def _enqueue_intake_job_for_exam(
                 "class_list_count": len(_exam_known_student_names(exam)),
             }),
         )
-        if db.engine is not None:
-            session.commit()
+        commit_repository_session(session)
         return job
     except Exception:
-        if db.engine is not None:
-            session.rollback()
+        rollback_repository_session(session)
         if cleanup_root is not None:
             _remove_tree(cleanup_root)
         raise
@@ -2372,7 +2405,7 @@ def upload_exam_class_list(
         raise HTTPException(status_code=400, detail="No student names could be extracted from the class list files")
     _persist_exam_class_list(exam=exam, names=names, source="uploaded_files", filenames=filenames, session=session)
     _invalidate_exam_front_page_candidate_cache_for_class_list(exam_id, session)
-    session.commit()
+    commit_repository_session(session)
     return _exam_read(exam)
 
 
@@ -2394,7 +2427,7 @@ def create_exam_class_list_from_confirmed_names(exam_id: int, session: DbSession
         raise HTTPException(status_code=400, detail="No confirmed student names are available yet")
     _persist_exam_class_list(exam=exam, names=names, source="confirmed_names", filenames=[], session=session)
     _invalidate_exam_front_page_candidate_cache_for_class_list(exam_id, session)
-    session.commit()
+    commit_repository_session(session)
     return _exam_read(exam)
 
 
@@ -2430,7 +2463,7 @@ def create_class_list_from_uploads(
         filenames=filenames,
         session=session,
     )
-    session.commit()
+    commit_repository_session(session)
     payload = _class_list_resource_read(class_list)
     if not payload:
         raise HTTPException(status_code=500, detail="Class list could not be read after save")
@@ -2477,7 +2510,7 @@ def create_class_list_from_exam(
         session=session,
     )
     _select_class_list_for_exam(exam=exam, class_list=class_list, session=session)
-    session.commit()
+    commit_repository_session(session)
     payload = _class_list_resource_read(class_list)
     if not payload:
         raise HTTPException(status_code=500, detail="Class list could not be read after save")
@@ -2526,7 +2559,7 @@ def append_names_to_class_list(
         _select_class_list_for_exam(exam=exam, class_list=class_list, session=session)
         _invalidate_exam_front_page_candidate_cache_for_class_list(exam_id, session)
 
-    session.commit()
+    commit_repository_session(session)
     updated_payload = _class_list_resource_read(class_list)
     if not updated_payload:
         raise HTTPException(status_code=500, detail="Class list could not be read after update")
@@ -2539,7 +2572,7 @@ def delete_class_list(class_list_id: int, session: DbSession = Depends(get_repos
     if not class_list:
         raise HTTPException(status_code=404, detail="Class list not found")
     exam_repo.delete_class_list(session, class_list=class_list)
-    session.commit()
+    commit_repository_session(session)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -2580,7 +2613,7 @@ def retry_exam_intake_job(exam_id: int, session: DbSession = Depends(get_reposit
         }),
     )
     exam_repo.update_exam(session, exam, status=ExamStatus.DRAFT)
-    session.commit()
+    commit_repository_session(session)
     if retry_job.id is not None:
         _spawn_exam_intake_job_thread(retry_job.id)
     return _exam_intake_job_read(retry_job)
@@ -2939,7 +2972,7 @@ async def create_submission(
         status=SubmissionStatus.UPLOADED,
         capture_mode=capture_mode,
     )
-    session.commit()
+    commit_repository_session(session)
     invalidate_exam_reporting_cache(exam_id)
 
     created_files: list[SubmissionFileRead] = []
@@ -2973,7 +3006,7 @@ async def create_submission(
                 size_bytes=size,
             )
             created_files.append(SubmissionFileRead(id=row.id, file_kind=row.file_kind, original_filename=row.original_filename, stored_path=row.stored_path))
-        session.commit()
+        commit_repository_session(session)
 
     submission_first_name, submission_last_name = submission_name_parts(submission.first_name, submission.last_name, submission.student_name)
     return SubmissionRead(
@@ -3014,7 +3047,7 @@ def register_exam_key_files(exam_id: int, payload: BlobRegisterRequest, session:
 
     if registered > 0:
         exam_repo.update_exam(session, exam, status=ExamStatus.KEY_UPLOADED)
-    session.commit()
+    commit_repository_session(session)
     return BlobRegisterResponse(registered=registered)
 
 
@@ -3181,12 +3214,12 @@ def create_bulk_submission_preview(
         raise HTTPException(status_code=400, detail="At least one bulk upload file is required")
 
     bulk = exam_repo.create_exam_bulk_upload(session, exam_id=exam_id, original_filename="bulk-upload", stored_path="")
-    session.commit()
+    commit_repository_session(session)
 
     output_dir = reset_dir(_bulk_pages_dir(exam_id, bulk.id))
     rendered_paths, filename, stored_path = _render_bulk_upload_files(upload_files, output_dir)
     exam_repo.update_exam_bulk_upload(session, bulk=bulk, original_filename=filename, stored_path=stored_path)
-    session.commit()
+    commit_repository_session(session)
     exam_repo.clear_bulk_upload_pages(session, bulk_upload_id=bulk.id)
 
     detections: list[BulkNameDetectionResult] = []
@@ -3222,7 +3255,7 @@ def create_bulk_submission_preview(
         exam_repo.update_exam(session, exam, name=detected_exam_title)
     exam_repo.update_exam(session, exam, status=ExamStatus.REVIEWING)
 
-    session.commit()
+    commit_repository_session(session)
 
     roster_list: list[str] = []
     if roster:
@@ -3323,7 +3356,7 @@ def finalize_bulk_submission_preview(
     created_submission_ids = [item.id for item in created if item.id is not None]
 
     exam_repo.update_exam(session, exam, status=ExamStatus.DRAFT)
-    session.commit()
+    commit_repository_session(session)
     invalidate_exam_reporting_cache(exam_id)
     if created_submission_ids:
         thread = threading.Thread(
@@ -3381,7 +3414,7 @@ def upload_exam_key_files(
         urls.append(stored["url"])
 
     exam_repo.update_exam(session, exam, status=ExamStatus.KEY_UPLOADED)
-    session.commit()
+    commit_repository_session(session)
     return ExamKeyUploadResponse(uploaded=uploaded, urls=urls)
 
 
@@ -3417,7 +3450,7 @@ def build_exam_key_pages(exam_id: int, session: DbSession = Depends(get_reposito
     try:
         build_key_pages_for_exam(exam_id, session)
         exam_repo.update_exam(session, exam, status=ExamStatus.KEY_PAGES_READY)
-        session.commit()
+        commit_repository_session(session)
 
         rows = exam_repo.list_exam_key_pages(session, exam_id)
         return [
@@ -3492,7 +3525,7 @@ def create_question(exam_id: int, payload: QuestionCreate, session: DbSession = 
         max_marks=payload.max_marks,
         rubric_json=json.dumps(rubric),
     )
-    session.commit()
+    commit_repository_session(session)
     invalidate_exam_reporting_cache(exam_id)
 
     return QuestionRead(
@@ -3549,7 +3582,7 @@ def update_question(
         max_marks=payload.max_marks,
         rubric_json=json.dumps(rubric) if payload.rubric_json is not None else None,
     )
-    session.commit()
+    commit_repository_session(session)
     invalidate_exam_reporting_cache(exam_id)
 
     regions = submission_repo.list_question_regions(session, question.id)
@@ -3759,7 +3792,7 @@ def _clear_parse_artifacts_for_page(exam_id: int, page_number: int, session: DbS
     for question in _questions_for_parse_page(exam_id, page_number, session):
         question_repo.delete_question_dependencies(session, question.id)
         question_repo.delete_question(session, question)
-    session.flush()
+    flush_repository_session(session)
 
 
 def _upsert_questions_for_page(exam_id: int, page_number: int, questions_payload: list[dict[str, Any]], session: DbSession) -> list[dict[str, Any]]:
@@ -3894,7 +3927,7 @@ def _process_single_parse_page_task(
             status="running",
             updated_at=queued_started_at,
         )
-        session.commit()
+        commit_repository_session(session)
 
         logger.info("parse_page_start job_id=%s page=%s", job.id, page_number)
         parse_started_at = time.perf_counter()
@@ -3907,7 +3940,7 @@ def _process_single_parse_page_task(
                 error_json={"detail": "Key page not found"},
                 updated_at=utcnow(),
             )
-            session.commit()
+            commit_repository_session(session)
             elapsed_ms = int((time.perf_counter() - parse_started_at) * 1000)
             logger.info("parse_page_done job_id=%s page=%s status=%s model=%s ms=%s", job.id, page_number, "failed", "n/a", elapsed_ms)
             return {"page_number": page_number, "status": "failed", "cost": 0.0, "input_tokens": 0, "output_tokens": 0}
@@ -3930,7 +3963,7 @@ def _process_single_parse_page_task(
                 error_json={"detail": "Page image missing"},
                 updated_at=utcnow(),
             )
-            session.commit()
+            commit_repository_session(session)
             elapsed_ms = int((time.perf_counter() - parse_started_at) * 1000)
             logger.info("parse_page_done job_id=%s page=%s status=%s model=%s ms=%s", job.id, page_number, "failed", "n/a", elapsed_ms)
             return {"page_number": page_number, "status": "failed", "cost": 0.0, "input_tokens": 0, "output_tokens": 0}
@@ -3991,7 +4024,7 @@ def _process_single_parse_page_task(
             with _get_exam_question_lock(exam_id):
                 with open_repository_session() as question_session:
                     _upsert_questions_for_page(exam_id, page_number, questions_payload, question_session)
-                    question_session.commit()
+                    commit_repository_session(question_session)
 
         elapsed_ms = int((time.perf_counter() - parse_started_at) * 1000)
         finished_at = utcnow()
@@ -4026,7 +4059,7 @@ def _process_single_parse_page_task(
             error_json=error_payload,
             updated_at=finished_at,
         )
-        session.commit()
+        commit_repository_session(session)
 
         logger.info("parse_page_done job_id=%s page=%s status=%s model=%s ms=%s", job.id, page_number, page_status, used_model, elapsed_ms)
         return {
@@ -4122,7 +4155,7 @@ def _recompute_parse_job_state(exam_id: int, job_id: int) -> dict[str, Any]:
             status=job.status,
             updated_at=job.updated_at,
         )
-        recompute_session.commit()
+        commit_repository_session(recompute_session)
 
         logger.info(
             "parse_job_totals job_id=%s pages_done=%s/%s status=%s input_tokens_total=%s output_tokens_total=%s cost_total=%s",
@@ -4180,7 +4213,7 @@ def start_answer_key_parse(exam_id: int, session: DbSession = Depends(get_reposi
     for page in page_rows:
         exam_repo.create_exam_parse_page(session, job_id=job.id, page_number=page.page_number, status="pending", updated_at=utcnow())
 
-    session.commit()
+    commit_repository_session(session)
 
     reused = False
     logger.info("parse_start exam_id=%s reused_job=%s job_id=%s", exam_id, reused, job.id)
@@ -4343,7 +4376,7 @@ def retry_answer_key_parse_page(
             output_tokens=0,
             updated_at=utcnow(),
         )
-        session.commit()
+        commit_repository_session(session)
 
     page_result = _process_single_parse_page_task(
         exam_id=exam_id,
@@ -4359,7 +4392,7 @@ def retry_answer_key_parse_page(
 
     if job_state["status"] == "done":
         exam_repo.update_exam(session, exam, status=ExamStatus.REVIEWING)
-        session.commit()
+        commit_repository_session(session)
 
     return {
         "job_id": job.id,
@@ -4482,5 +4515,5 @@ def complete_key_review(exam_id: int, session: DbSession = Depends(get_repositor
     if question_count == 0:
         warnings.append("No questions exist. Exam marked READY for manual setup.")
     exam_repo.update_exam(session, exam, status=ExamStatus.READY)
-    session.commit()
+    commit_repository_session(session)
     return {"exam_id": exam_id, "status": exam.status, "warnings": warnings}

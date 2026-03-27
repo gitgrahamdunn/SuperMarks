@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlmodel import Session, delete, select
 
-from app.persistence import DbSession, get_repository_session, repository_provider
+from app.persistence import DbSession, commit_repository_session, get_repository_session, refresh_repository_instance, repository_provider
 from app.blob_service import create_signed_blob_url, normalize_blob_path
 from app.blob_service import BlobDownloadError
 from app.blob_store import BlobUploadError, upload_bytes
@@ -93,7 +93,7 @@ _FRONT_PAGE_EXTRACT_ATTEMPTS = max(1, int(os.getenv("SUPERMARKS_FRONT_PAGE_EXTRA
 
 
 def _exam_known_student_names(exam_id: int, session: DbSession) -> list[str]:
-    exam = session.get(Exam, exam_id)
+    exam = exam_repo.get_exam(session, exam_id)
     if not exam:
         return []
     raw_payload = (exam.class_list_json or "").strip()
@@ -322,16 +322,11 @@ def apply_front_page_template_fill(
 
 
 def _sync_exam_front_page_status(exam_id: int, session: DbSession) -> None:
-    exam = session.get(Exam, exam_id)
+    exam = exam_repo.get_exam(session, exam_id)
     if not exam:
         return
 
-    front_page_submissions = session.exec(
-        select(Submission).where(
-            Submission.exam_id == exam_id,
-            Submission.capture_mode == SubmissionCaptureMode.FRONT_PAGE_TOTALS,
-        )
-    ).all()
+    front_page_submissions = submission_repo.list_exam_front_page_total_submissions(session, exam_id)
     if not front_page_submissions:
         return
 
@@ -339,8 +334,11 @@ def _sync_exam_front_page_status(exam_id: int, session: DbSession) -> None:
         bool(front_page_totals_read(item) and front_page_totals_read(item).confirmed)
         for item in front_page_submissions
     )
-    exam.status = ExamStatus.READY if all_confirmed else ExamStatus.REVIEWING
-    session.add(exam)
+    exam_repo.update_exam(
+        session,
+        exam,
+        status=ExamStatus.READY if all_confirmed else ExamStatus.REVIEWING,
+    )
 
 def _submission_read(submission: Submission, files: list[SubmissionFile], pages: list[SubmissionPage]) -> SubmissionRead:
     first_name, last_name = submission_name_parts(submission.first_name, submission.last_name, submission.student_name)
@@ -459,7 +457,7 @@ def _build_pages_for_submission(submission: Submission, session: DbSession) -> l
             created.append(SubmissionPageRead(id=row.id, page_number=idx, image_path=relative_to_data(out_path), width=w, height=h))
 
     submission_repo.update_submission_status(session, submission, SubmissionStatus.PAGES_READY)
-    session.commit()
+    commit_repository_session(session)
     return created
 
 
@@ -501,7 +499,7 @@ def _build_crops_for_submission(submission: Submission, session: DbSession) -> d
         count += 1
 
     submission_repo.update_submission_status(session, submission, SubmissionStatus.CROPS_READY)
-    session.commit()
+    commit_repository_session(session)
     return {"message": "Crops built", "count": count}
 
 
@@ -532,7 +530,7 @@ def _transcribe_submission(submission: Submission, provider: str, session: DbSes
         )
 
     submission_repo.update_submission_status(session, submission, SubmissionStatus.TRANSCRIBED)
-    session.commit()
+    commit_repository_session(session)
     return {"message": "Transcription complete", "count": len(crops), "provider": provider}
 
 
@@ -741,7 +739,7 @@ def register_submission_files(submission_id: int, payload: BlobRegisterRequest, 
         ],
     )
 
-    session.commit()
+    commit_repository_session(session)
     return BlobRegisterResponse(registered=registered)
 
 
@@ -793,7 +791,7 @@ def upload_submission_files(
         uploaded += 1
         urls.append(stored["url"])
 
-    session.commit()
+    commit_repository_session(session)
     return ExamKeyUploadResponse(uploaded=uploaded, urls=urls)
 
 
@@ -870,7 +868,7 @@ def grade_submission(
         )
 
     submission_repo.update_submission_status(session, submission, SubmissionStatus.GRADED)
-    session.commit()
+    commit_repository_session(session)
     return {"message": "Grading complete", "grader": grader}
 
 
@@ -900,19 +898,19 @@ def prepare_submission_for_marking(
     pages = submission_repo.list_submission_pages(session, submission_id)
     if not status.ready_for_marking and not pages:
         _build_pages_for_submission(submission, session)
-        session.refresh(submission)
+        submission = submission_repo.get_submission(session, submission_id)
         actions_run.append("build_pages")
         status = _prepare_status(submission, session, actions_run=actions_run)
 
     if not status.ready_for_marking and status.can_prepare_now and "build_crops" in status.suggested_actions:
         _build_crops_for_submission(submission, session)
-        session.refresh(submission)
+        submission = submission_repo.get_submission(session, submission_id)
         actions_run.append("build_crops")
         status = _prepare_status(submission, session, actions_run=actions_run)
 
     if not status.ready_for_marking and status.can_prepare_now and "transcribe" in status.suggested_actions:
         _transcribe_submission(submission, provider, session)
-        session.refresh(submission)
+        submission = submission_repo.get_submission(session, submission_id)
         actions_run.append("transcribe")
         status = _prepare_status(submission, session, actions_run=actions_run)
 
@@ -1074,16 +1072,21 @@ def _extract_front_page_candidates(
 ) -> FrontPageTotalsCandidateRead:
     extraction_lock = _front_page_candidate_lock(submission.id or 0)
     with extraction_lock:
-        session.refresh(submission)
+        submission = submission_repo.get_submission(session, submission.id or 0) or submission
+        submission = refresh_repository_instance(session, submission)
         cached_payload = _front_page_candidate_cache_read(submission)
         if cached_payload is not None and not _front_page_candidate_is_retryable_failure(cached_payload):
             return cached_payload
         if cached_payload is not None:
-            submission.front_page_candidates_json = None
-            submission.front_page_usage_json = None
-            session.add(submission)
-            session.commit()
-            session.refresh(submission)
+            submission = submission_repo.update_submission_front_page_data(
+                session,
+                submission,
+                front_page_candidates_json=None,
+                front_page_usage_json=None,
+            )
+            commit_repository_session(session)
+            submission = submission_repo.get_submission(session, submission.id or 0) or submission
+            submission = refresh_repository_instance(session, submission)
 
         page = next(iter(submission_repo.list_submission_pages(session, submission.id)), None)
         if not page:
@@ -1210,10 +1213,13 @@ def _extract_front_page_candidates(
             if matched_name and matched_name != candidate_payload.student_name.value_text:
                 candidate_payload.student_name.value_text = matched_name
         candidate_payload = apply_front_page_template_fill(candidate_payload, template)
-        submission.front_page_candidates_json = candidate_payload.model_dump_json()
-        submission.front_page_usage_json = json.dumps(result.usage) if result.usage else None
-        session.add(submission)
-        session.commit()
+        submission_repo.update_submission_front_page_data(
+            session,
+            submission,
+            front_page_candidates_json=candidate_payload.model_dump_json(),
+            front_page_usage_json=json.dumps(result.usage) if result.usage else None,
+        )
+        commit_repository_session(session)
         return candidate_payload
 
 
@@ -1255,14 +1261,13 @@ def _ensure_exam_front_page_template(exam_id: int, session: DbSession) -> tuple[
                 break
 
     if changed and template_payload is not None:
-        exam.front_page_template_json = json.dumps(template_payload)
-        session.add(exam)
-        session.commit()
+        exam_repo.update_exam(session, exam, front_page_template_json=json.dumps(template_payload))
+        commit_repository_session(session)
     return template_payload, seed_ids
 
 
 def get_or_create_front_page_totals_candidates(submission_id: int, session: DbSession) -> FrontPageTotalsCandidateRead:
-    submission = session.get(Submission, submission_id)
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -1271,7 +1276,8 @@ def get_or_create_front_page_totals_candidates(submission_id: int, session: DbSe
         return cached_payload
 
     template_payload, seed_ids = _ensure_exam_front_page_template(submission.exam_id, session)
-    session.refresh(submission)
+    submission = submission_repo.get_submission(session, submission_id) or submission
+    submission = refresh_repository_instance(session, submission)
     cached_payload = _front_page_candidate_cache_read(submission)
     if cached_payload is not None and not _front_page_candidate_is_retryable_failure(cached_payload):
         return cached_payload
@@ -1315,7 +1321,7 @@ def upsert_front_page_totals(
     payload: FrontPageTotalsUpsert,
     session: DbSession = Depends(get_repository_session),
 ) -> FrontPageTotalsRead:
-    submission = session.get(Submission, submission_id)
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -1343,21 +1349,26 @@ def upsert_front_page_totals(
             "max_marks": float(score.max_marks) if score.max_marks is not None else None,
         })
 
-    submission.capture_mode = SubmissionCaptureMode.FRONT_PAGE_TOTALS
-    submission.front_page_totals_json = json.dumps({
-        "overall_marks_awarded": float(payload.overall_marks_awarded),
-        "overall_max_marks": float(payload.overall_max_marks) if payload.overall_max_marks is not None else None,
-        "objective_scores": cleaned_scores,
-        "teacher_note": payload.teacher_note.strip(),
-        "confirmed": bool(payload.confirmed),
-    })
-    submission.front_page_reviewed_at = utcnow() if payload.confirmed else None
-    submission.status = SubmissionStatus.GRADED if payload.confirmed else SubmissionStatus.UPLOADED
-    session.add(submission)
+    update_fields = {
+        "capture_mode": SubmissionCaptureMode.FRONT_PAGE_TOTALS,
+        "front_page_totals_json": json.dumps({
+            "overall_marks_awarded": float(payload.overall_marks_awarded),
+            "overall_max_marks": float(payload.overall_max_marks) if payload.overall_max_marks is not None else None,
+            "objective_scores": cleaned_scores,
+            "teacher_note": payload.teacher_note.strip(),
+            "confirmed": bool(payload.confirmed),
+        }),
+        "front_page_reviewed_at": utcnow() if payload.confirmed else None,
+        "status": SubmissionStatus.GRADED if payload.confirmed else SubmissionStatus.UPLOADED,
+    }
+    if payload.first_name is not None or payload.last_name is not None or payload.student_name is not None:
+        update_fields["first_name"] = first_name
+        update_fields["last_name"] = last_name
+        update_fields["student_name"] = normalized_student_name
+    submission = submission_repo.update_submission(session, submission, **update_fields)
     _sync_exam_front_page_status(submission.exam_id, session)
-    session.commit()
+    commit_repository_session(session)
     invalidate_exam_reporting_cache(submission.exam_id)
-    session.refresh(submission)
     return front_page_totals_read(submission)
 
 
@@ -1368,7 +1379,7 @@ def upsert_manual_grade(
     payload: ManualGradeUpsert,
     session: DbSession = Depends(get_repository_session),
 ) -> GradeResultRead:
-    submission = session.get(Submission, submission_id)
+    submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -1400,9 +1411,8 @@ def upsert_manual_grade(
     )
     submission_repo.update_submission_capture_mode(session, submission, SubmissionCaptureMode.QUESTION_LEVEL)
     submission_repo.update_submission_status(session, submission, SubmissionStatus.GRADED)
-    session.commit()
+    commit_repository_session(session)
     invalidate_exam_reporting_cache(submission.exam_id)
-    session.refresh(grade)
 
     return GradeResultRead(
         id=grade.id,

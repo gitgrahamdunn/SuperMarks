@@ -25,6 +25,8 @@ from app.schemas import ExamCompletionSummary, ExamMarkingDashboardResponse, Sub
 _EXAM_REPORTING_CONTEXT_CACHE: "OrderedDict[int, ExamReportingContext]" = OrderedDict()
 _EXAM_REPORTING_CONTEXT_CACHE_LOCK = threading.Lock()
 _EXAM_REPORTING_CONTEXT_CACHE_MAX = 32
+exam_repo = repository_provider().exams
+submission_repo = repository_provider().submissions
 reporting_repo = repository_provider().reporting
 
 
@@ -633,7 +635,7 @@ def load_exam_reporting_context(exam_id: int, session: DbSession) -> ExamReporti
                 return cached_again
         return cached
 
-    exam = session.get(Exam, exam_id)
+    exam = exam_repo.get_exam(session, exam_id)
     if not exam:
         return None
 
@@ -735,7 +737,7 @@ def build_submission_dashboard_row(
         summary_reasons.append("No submission pages have been built yet.")
 
     for question in questions:
-        regions = snapshot.question_regions_by_question_id.get(question.id, []) if snapshot else session.exec(select(QuestionRegion).where(QuestionRegion.question_id == question.id)).all()
+        regions = snapshot.question_regions_by_question_id.get(question.id, []) if snapshot else submission_repo.list_question_regions(session, question.id)
         flagged_reasons: list[str] = []
         if not regions:
             flagged_reasons.append("No template regions saved for this question.")
