@@ -475,9 +475,10 @@ def _claim_exam_intake_job(job_id: int, runner_id: str, session: DbSession) -> b
     job.updated_at = now
     job.last_progress_at = now
     job.lease_expires_at = _exam_intake_lease_deadline()
-    session.add(job)
-    session.commit()
-    session.refresh(job)
+    exam_repo.update_exam_intake_job(session, job)
+    if db.engine is not None:
+        session.commit()
+        session.refresh(job)
     return True
 
 
@@ -515,8 +516,9 @@ def _auto_resume_exam_intake_job_if_needed(job: ExamIntakeJob | None, session: D
             status=ExamStatus.REVIEWING if job.initial_review_ready else ExamStatus.DRAFT,
         )
 
-    session.commit()
-    session.refresh(job)
+    if db.engine is not None:
+        session.commit()
+        session.refresh(job)
     if job.id is not None:
         _spawn_exam_intake_job_thread(job.id)
     return job
