@@ -31,7 +31,7 @@ SuperMarks is already beyond prototype territory.
 - prepare-for-marking diagnostics and one-click recovery exist
 - exam-level marking dashboard exists
 - front-page totals capture exists as a first-class submission workflow
-- CSV export exists
+- table export/share exists
 - safe-retry / stale-asset guardrails exist
 - marking workspace throughput polish exists
 - teacher workflow UI has received a full polish pass
@@ -183,7 +183,7 @@ Objective-based grading is part of the real product promise, whether totals come
 
 **Build:**
 - better objective totals in the dashboard
-- clearer objective representation in CSV export
+- clearer objective representation in exported/downloaded table output
 - per-student objective summaries
 - clearer total vs objective breakdown in UI for both modes
 
@@ -249,7 +249,7 @@ The question-level path is usable but still slow enough to matter.
 **Goal:** make SuperMarks outputs immediately useful outside the app.
 
 **Build:**
-- stronger CSV variants
+- stronger export variants
 - per-student summary export
 - per-objective summary export
 - optional JSON export for future integrations

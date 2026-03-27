@@ -5,8 +5,8 @@ SuperMarks now targets a Cloudflare-plus-Render stack with a local-first develop
 ## Deployment Plan (Current)
 
 - Phase 1 (active): run local backend + local frontend for iteration and verification.
-- Phase 2: expose the local backend publicly from your machine only when you need temporary hosted verification.
-- Phase 3: host the frontend on Cloudflare Pages, run the backend on Render, use a Cloudflare Worker for the D1 bridge, use Cloudflare D1 for metadata, and use Cloudflare R2 for uploaded files.
+- Phase 2: use Render-hosted backend checks for release verification when needed.
+- Phase 3 (current hosted target): host the frontend on Cloudflare Pages, run the backend on Render, use a Cloudflare Worker for the D1 bridge, use Cloudflare D1 for metadata, and use Cloudflare R2 for uploaded files.
 
 Today, normal development still runs locally first. Hosted direction is Cloudflare for frontend/data edge and Render for FastAPI compute.
 
@@ -31,12 +31,12 @@ See `docs/ARCHITECTURE.md` for guardrails and `docs/EXPERIMENTATION.md` for the 
 
 - `VITE_API_BASE_URL=/api` in local development.
 - `VITE_API_BASE_URL=https://<backend-domain>/api` in Cloudflare Pages deployments.
-- `VITE_BACKEND_API_KEY=<backend-api-key>` (optional if backend auth is disabled)
+- `VITE_BACKEND_API_KEY=<backend-api-key>` (optional, only for API-key admin/testing mode)
 - `VITE_APP_VERSION=<git-sha-or-release-tag>` (optional, shown in UI diagnostics)
 
 ### Backend
 
-- `BACKEND_API_KEY=<backend-api-key>`
+- `BACKEND_API_KEY=<backend-api-key>` (used for API-key admin mode and bridge auth)
 - `SUPERMARKS_CORS_ALLOW_ORIGINS=https://<cloudflare-pages-frontend-domain>`
 - `APP_VERSION=<git-sha-or-build-id>` (optional, served by `GET /version`)
 - `SUPERMARKS_REPOSITORY_BACKEND=d1-bridge` (hosted Cloudflare default)
@@ -47,6 +47,12 @@ See `docs/ARCHITECTURE.md` for guardrails and `docs/EXPERIMENTATION.md` for the 
 - `SUPERMARKS_S3_SECRET_ACCESS_KEY=<r2-secret-access-key>`
 - `SUPERMARKS_S3_REGION=auto`
 - `SUPERMARKS_S3_PUBLIC_BASE_URL=https://<public-r2-domain>` (optional)
+- `SUPERMARKS_AUTH_SESSION_SECRET=<strong-random-secret>`
+- `SUPERMARKS_AUTH_ALLOWED_RETURN_ORIGINS=https://<cloudflare-pages-frontend-domain>,http://localhost:5173`
+- `SUPERMARKS_MAGIC_LINK_LOGIN_ENABLED=1`
+- `SUPERMARKS_EMAIL_PROVIDER=log` or `resend`
+- `SUPERMARKS_DEV_LOGIN_ENABLED=1` (optional hidden browser-testing login)
+- `SUPERMARKS_DEV_LOGIN_KEY=<developer-testing-passphrase>` (optional hidden browser-testing login)
 - `SUPERMARKS_ALLOW_PRODUCTION_SQLITE=1` (supported for self-hosted low-cost production on your own machine)
 
 ## Local development
@@ -145,7 +151,7 @@ What this does:
 
 ### 3) Local hosted verification stack: Cloudflare Pages + local backend
 
-Use this only when you intentionally need local public verification. It is not the canonical hosted path.
+Use this only when you intentionally need local public verification. It is not the canonical hosted path or the normal rollback path.
 
 Backend setup:
 
@@ -191,6 +197,13 @@ This is Phase 3 and should only be used once the backend is deployed on Render.
 - Hosted previews are only usable when that backend URL is reachable and allowed by backend CORS.
 - SPA fallback routing is provided by `frontend/public/_redirects`.
 - `frontend/wrangler.toml` is the canonical hosted frontend config.
+
+### Current hosted auth model
+
+- Normal hosted sign-in uses magic link.
+- Current hosted email delivery is `log` mode, so links are emitted to Render logs instead of sent by email.
+- Google/Apple OIDC are not enabled in the current hosted configuration.
+- A hidden developer login exists for browser automation/testing when `SUPERMARKS_DEV_LOGIN_ENABLED=1`.
 
 ## Deployment policy note
 
@@ -304,7 +317,7 @@ The active product wedge now runs:
 3. prepare a submission for marking, with stale-vs-missing asset detection after template changes
 4. mark inside the teacher workspace, with auto-recovery blocked when teacher manual marking has already started on questions that would need rebuilt assets
 5. monitor exam-level marking progress from the exam dashboard
-6. export marks as CSV
+6. download or share the class results table
 
 ### Exam dashboard signals
 
@@ -325,3 +338,10 @@ Current teacher-facing exports include:
 - `GET /api/exams/{exam_id}/export-summary.csv` — one row per student with export posture, next return point, and reporting attention
 - `GET /api/exams/{exam_id}/export-objectives-summary.csv` — one row per objective with class coverage and strongest/weakest complete results
 - `GET /api/exams/{exam_id}/export-student-summaries.zip` — zip package with a top-level `README.txt`, class `manifest.csv`, one teacher-readable `summary.txt`, a printable `summary.html`, and question-level evidence files (`evidence/README.txt`, `evidence/manifest.csv`, answer crops, transcription text/json when available) per student
+
+In the current frontend UI, the export card exposes:
+
+- `Download table`
+- `Share table`
+
+The CSV endpoints still exist on the backend, but the primary teacher-facing UI is now table download/share instead of a visible CSV-vs-Excel picker.

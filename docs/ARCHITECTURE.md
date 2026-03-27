@@ -24,7 +24,7 @@ SuperMarks is locked to **Strategy B**:
 
 - `VITE_API_BASE_URL=/api` for local Vite dev.
 - `VITE_API_BASE_URL=https://<backend-domain>/api` for Cloudflare Pages deployments.
-- `VITE_BACKEND_API_KEY=<backend-api-key>` (optional if backend auth disabled)
+- `VITE_BACKEND_API_KEY=<backend-api-key>` (optional, only for API-key admin/testing mode)
 
 ### Backend
 
@@ -34,8 +34,16 @@ SuperMarks is locked to **Strategy B**:
 ## Smoke Checks
 
 - Frontend API base validation blocks production boot when invalid.
-- Frontend diagnostics card can ping backend health endpoint.
+- Frontend can validate backend health/contract during hosted boot.
 - Backend tests validate preflight behavior and API-key-protected exam creation.
+
+## Current auth model
+
+- Primary hosted auth is backend-managed user auth.
+- Magic-link login is enabled.
+- Current hosted email delivery is `log` mode rather than provider-backed delivery.
+- Hidden developer login can be enabled for browser automation and testing.
+- OIDC providers are optional and are not part of the current hosted default.
 
 
 ## Persistence model

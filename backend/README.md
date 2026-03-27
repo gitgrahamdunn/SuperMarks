@@ -161,6 +161,10 @@ SUPERMARKS_MAGIC_LINK_LOGIN_ENABLED=1
 SUPERMARKS_EMAIL_PROVIDER=log
 SUPERMARKS_EMAIL_API_KEY=<resend-server-key>           # only when using resend
 SUPERMARKS_EMAIL_FROM_ADDRESS=<verified-sender>        # only when using resend
+SUPERMARKS_DEV_LOGIN_ENABLED=1                         # optional hidden browser-testing login
+SUPERMARKS_DEV_LOGIN_KEY=<developer-testing-passphrase>
+SUPERMARKS_DEV_LOGIN_EMAIL=codex-dev@supermarks.local
+SUPERMARKS_DEV_LOGIN_NAME=Codex Dev
 SUPERMARKS_OIDC_PROVIDERS_JSON=
 SUPERMARKS_SERVE_FRONTEND=0
 SUPERMARKS_LLM_PROVIDER=doubleword
@@ -187,6 +191,9 @@ Magic link notes:
 - `SUPERMARKS_AUTH_SESSION_SECRET` is required because magic-link verification issues app bearer tokens.
 - `SUPERMARKS_EMAIL_PROVIDER=log` is acceptable for temporary hosted testing; the login link will be emitted to Render logs instead of being sent.
 - For real delivery, switch to `SUPERMARKS_EMAIL_PROVIDER=resend` and set `SUPERMARKS_EMAIL_API_KEY` plus `SUPERMARKS_EMAIL_FROM_ADDRESS`.
+- `SUPERMARKS_DEV_LOGIN_ENABLED=1` plus `SUPERMARKS_DEV_LOGIN_KEY` enables the hidden developer-only login used for browser automation.
+- The hidden developer login reveals from the frontend login screen after tapping the heading five times.
+- Google/Apple OIDC are optional and are not part of the canonical hosted configuration.
 
 Hosted backend smoke check:
 

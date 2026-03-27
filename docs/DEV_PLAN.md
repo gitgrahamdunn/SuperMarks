@@ -158,8 +158,8 @@ Layer AI onto a working marking workstation.
 ### Slice D — Export/report basics
 - export marks/results
 - simple result summaries by student/question
-- shipped: exam-level summary CSV export that mirrors the class reporting view with one row per student, export-ready posture, return point, next action, and teacher-facing objective summary
-- shipped: per-objective summary CSV export with one row per objective, export-ready coverage, complete-only averages, current whole-class totals, and strongest/weakest complete-result scanability
+- shipped: exam-level summary table export/download that mirrors the class reporting view with one row per student, export-ready posture, return point, next action, and teacher-facing objective summary
+- shipped: per-objective export data with one row per objective, export-ready coverage, complete-only averages, current whole-class totals, and strongest/weakest complete-result scanability
 
 ### Slice E — AI assist
 - transcription assistance

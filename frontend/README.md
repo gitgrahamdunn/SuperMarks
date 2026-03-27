@@ -32,7 +32,7 @@ Set env vars:
 
 ```bash
 VITE_API_BASE_URL=/api
-VITE_BACKEND_API_KEY=<your-backend-api-key>
+VITE_BACKEND_API_KEY=<your-backend-api-key>   # optional, only for API-key admin/testing mode
 VITE_APP_VERSION=<git-sha-or-release-tag>
 ```
 
@@ -67,9 +67,13 @@ The seed generator lives at `../scripts/seed_acceptance.py` and writes `../artif
 - Build output directory: `dist`
 - `frontend/wrangler.toml` tracks the Pages build output for CLI-driven deploys
 - SPA fallback routing is configured by `frontend/public/_redirects`
-- Set `VITE_API_BASE_URL` to the Cloudflare backend URL, ending in `/api`
+- Set `VITE_API_BASE_URL` to the Render backend URL, ending in `/api`
 - Use Cloudflare Pages environment variables for hosted builds; the value must still end with `/api`
 - File access now comes through backend-issued signed URLs backed by the backend storage provider (Cloudflare R2 in the hosted direction).
+- Current hosted auth is account-based:
+  - magic link login is enabled
+  - hidden developer login can be enabled for browser automation
+  - `VITE_BACKEND_API_KEY` is not required for the normal hosted user flow
 
 ## Hosted preview note
 
@@ -77,4 +81,4 @@ Hosted previews are not self-contained.
 
 - This frontend makes direct browser API calls.
 - Preview deployments only work if `VITE_API_BASE_URL` points at a reachable public backend.
-- If no public backend is available, use the local or Funnel-hosted workflow instead of hosted previews.
+- If no public backend is available, use the local workflow instead of hosted previews.
