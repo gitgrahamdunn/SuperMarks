@@ -84,11 +84,11 @@ def _normalize_name_candidate(value: str) -> str | None:
         return None
     cleaned = _clean_cell_text(value)
     if "," in cleaned:
-        parts = [normalize_student_name(part) for part in cleaned.split(",", 1)]
+        parts = [_strip_name_fragment(part) for part in cleaned.split(",", 1)]
         last_name, first_name = (part for part in parts)
         normalized = normalize_student_name(" ".join(part for part in (first_name, last_name) if part))
     else:
-        normalized = normalize_student_name(cleaned)
+        normalized = normalize_student_name(_strip_name_fragment(cleaned))
     return normalized or None
 
 
@@ -100,6 +100,23 @@ def _combine_name_like_values(left: str, right: str, *, order: str | None) -> st
     else:
         combined = f"{first_value} {second_value}"
     return _normalize_name_candidate(combined)
+
+
+def _strip_name_fragment(value: str) -> str:
+    return re.sub(r"^[,\s]+|[,\s]+$", "", value or "").strip()
+
+
+def _normalize_single_name_like_value(value: str, *, order: str | None) -> str | None:
+    normalized = _normalize_name_candidate(value)
+    if not normalized:
+        return None
+    if order != "last_first":
+        return normalized
+    parts = normalized.split()
+    if len(parts) < 2:
+        return normalized
+    reordered = " ".join(parts[1:] + [parts[0]])
+    return normalize_student_name(reordered) or normalized
 
 
 def _dedupe_names(names: list[str]) -> list[str]:
@@ -144,7 +161,7 @@ def extract_names_from_rows(rows: list[list[str]]) -> list[str]:
                 names.append(combined)
                 continue
 
-        single = _normalize_name_candidate(name_like[0])
+        single = _normalize_single_name_like_value(name_like[0], order=inferred_order)
         if single:
             names.append(single)
 

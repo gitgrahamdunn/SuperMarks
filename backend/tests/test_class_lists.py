@@ -60,6 +60,36 @@ def test_extract_names_from_rows_combines_first_and_last_columns() -> None:
     assert names == ["Jordan Lee", "Avery Stone"]
 
 
+def test_extract_names_from_rows_combines_last_and_first_columns() -> None:
+    names = extract_names_from_rows([
+        ["Last Name", "First Name"],
+        ["Lee", "Jordan"],
+        ["Stone", "Avery"],
+    ])
+
+    assert names == ["Jordan Lee", "Avery Stone"]
+
+
+def test_extract_names_from_rows_reorders_single_cell_last_first_names() -> None:
+    names = extract_names_from_rows([
+        ["Last Name", "First Name"],
+        ["Lee Jordan"],
+        ["Stone Avery"],
+    ])
+
+    assert names == ["Jordan Lee", "Avery Stone"]
+
+
+def test_extract_names_from_rows_strips_commas_from_last_first_names() -> None:
+    names = extract_names_from_rows([
+        ["Student Name"],
+        ["Lee, Jordan"],
+        ["Stone, Avery"],
+    ])
+
+    assert names == ["Jordan Lee", "Avery Stone"]
+
+
 def test_parse_class_list_csv_bytes_reads_student_names() -> None:
     payload = b"Student Name,ID\nJordan Lee,1001\nAvery Stone,1002\n"
 
