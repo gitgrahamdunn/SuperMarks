@@ -48,6 +48,19 @@ def _is_header_row(values: list[str]) -> bool:
     return bool(lowered) and lowered.issubset(_HEADER_WORDS)
 
 
+def _row_name_order(values: list[str]) -> str | None:
+    lowered = [" ".join(_clean_cell_text(value).lower().split()) for value in values if _clean_cell_text(value)]
+    if "last name" in lowered and "first name" in lowered:
+        if lowered.index("last name") < lowered.index("first name"):
+            return "last_first"
+        return "first_last"
+    if "last" in lowered and "first" in lowered:
+        if lowered.index("last") < lowered.index("first"):
+            return "last_first"
+        return "first_last"
+    return None
+
+
 def _is_name_like(value: str) -> bool:
     cleaned = _clean_cell_text(value)
     if not cleaned:
@@ -69,8 +82,24 @@ def _is_name_like(value: str) -> bool:
 def _normalize_name_candidate(value: str) -> str | None:
     if not _is_name_like(value):
         return None
-    normalized = normalize_student_name(_clean_cell_text(value))
+    cleaned = _clean_cell_text(value)
+    if "," in cleaned:
+        parts = [normalize_student_name(part) for part in cleaned.split(",", 1)]
+        last_name, first_name = (part for part in parts)
+        normalized = normalize_student_name(" ".join(part for part in (first_name, last_name) if part))
+    else:
+        normalized = normalize_student_name(cleaned)
     return normalized or None
+
+
+def _combine_name_like_values(left: str, right: str, *, order: str | None) -> str | None:
+    first_value = _clean_cell_text(left)
+    second_value = _clean_cell_text(right)
+    if order == "last_first":
+        combined = f"{second_value} {first_value}"
+    else:
+        combined = f"{first_value} {second_value}"
+    return _normalize_name_candidate(combined)
 
 
 def _dedupe_names(names: list[str]) -> list[str]:
@@ -94,9 +123,15 @@ def normalize_class_list_names(names: list[str]) -> list[str]:
 
 def extract_names_from_rows(rows: list[list[str]]) -> list[str]:
     names: list[str] = []
+    inferred_order: str | None = None
     for row in rows:
         cleaned = [_clean_cell_text(value) for value in row if _clean_cell_text(value)]
-        if not cleaned or _is_header_row(cleaned):
+        if not cleaned:
+            continue
+        header_order = _row_name_order(cleaned)
+        if header_order:
+            inferred_order = header_order
+        if _is_header_row(cleaned):
             continue
 
         name_like = [value for value in cleaned if _is_name_like(value)]
@@ -104,7 +139,7 @@ def extract_names_from_rows(rows: list[list[str]]) -> list[str]:
             continue
 
         if len(name_like) >= 2:
-            combined = _normalize_name_candidate(f"{name_like[0]} {name_like[1]}")
+            combined = _combine_name_like_values(name_like[0], name_like[1], order=inferred_order)
             if combined:
                 names.append(combined)
                 continue
