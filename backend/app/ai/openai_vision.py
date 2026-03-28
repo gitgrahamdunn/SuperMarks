@@ -1270,7 +1270,7 @@ def _normalize_class_list_name_output(value: str, *, page_name_order: str = "") 
     normalized = normalize_student_name(cleaned)
     if page_name_order == "last_first":
         parts = normalized.split()
-        if len(parts) >= 2:
+        if len(parts) == 2:
             return normalize_student_name(" ".join(parts[1:] + [parts[0]]))
     return normalized
 

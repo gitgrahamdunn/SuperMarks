@@ -75,7 +75,7 @@ def _is_name_like(value: str) -> bool:
     alpha_chunks = re.findall(r"[A-Za-z][A-Za-z'.-]*", cleaned)
     if not alpha_chunks:
         return False
-    if len(alpha_chunks) > 4:
+    if len(alpha_chunks) > 6:
         return False
     return True
 
@@ -119,7 +119,7 @@ def _normalize_single_name_like_value(value: str, *, order: str | None) -> str |
     if order != "last_first":
         return normalized
     parts = normalized.split()
-    if len(parts) < 2:
+    if len(parts) != 2:
         return normalized
     reordered = " ".join(parts[1:] + [parts[0]])
     return normalize_student_name(reordered) or normalized
@@ -130,7 +130,7 @@ def _apply_name_order(normalized: str, *, order: str | None) -> str:
     if coerced_order != "last_first":
         return normalized
     parts = normalized.split()
-    if len(parts) < 2:
+    if len(parts) != 2:
         return normalized
     return normalize_student_name(" ".join(parts[1:] + [parts[0]])) or normalized
 

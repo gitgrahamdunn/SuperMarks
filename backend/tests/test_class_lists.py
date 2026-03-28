@@ -104,6 +104,14 @@ def test_parse_class_list_csv_bytes_respects_forced_last_first_order() -> None:
     assert names == ["Jordan Lee", "Avery Stone"]
 
 
+def test_parse_class_list_csv_bytes_does_not_reorder_multiword_single_cell_names() -> None:
+    payload = b"Student Name\nDe La Cruz Juan Carlos\nVan Der Meer Anna\n"
+
+    names = parse_class_list_csv_bytes(payload, forced_order="last_first")
+
+    assert names == ["De La Cruz Juan Carlos", "Van Der Meer Anna"]
+
+
 def test_parse_class_list_csv_bytes_reads_student_names() -> None:
     payload = b"Student Name,ID\nJordan Lee,1001\nAvery Stone,1002\n"
 

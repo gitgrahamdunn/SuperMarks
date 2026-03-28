@@ -17,3 +17,7 @@ def test_normalize_class_list_name_output_keeps_first_last_names() -> None:
 
 def test_normalize_class_list_name_output_reorders_single_cell_last_first_when_page_declares_it() -> None:
     assert _normalize_class_list_name_output("Lee Jordan", page_name_order="last_first") == "Jordan Lee"
+
+
+def test_normalize_class_list_name_output_does_not_reorder_multiword_single_cell_names() -> None:
+    assert _normalize_class_list_name_output("De La Cruz Juan Carlos", page_name_order="last_first") == "De La Cruz Juan Carlos"

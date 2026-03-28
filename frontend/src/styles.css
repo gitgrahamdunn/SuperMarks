@@ -97,6 +97,7 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   background: var(--surface);
 }
 .top-nav-left { display: flex; align-items: center; gap: 1rem; }
+.top-nav-right { display: flex; align-items: center; gap: .75rem; margin-left: auto; }
 .brand-lockup { display: flex; flex-direction: column; gap: .18rem; }
 .brand { font-size: 1.3rem; font-weight: 700; text-decoration: none; color: var(--text); letter-spacing: -.03em; }
 .brand-tag { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
@@ -108,6 +109,72 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   border-radius: .45rem;
 }
 .nav-link-active { color: var(--primary); background: color-mix(in srgb, var(--primary), transparent 88%); font-weight: 600; }
+.account-menu { position: relative; }
+.account-menu-trigger {
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.account-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--primary-contrast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: .95rem;
+}
+.account-menu-panel {
+  position: absolute;
+  top: calc(100% + .5rem);
+  right: 0;
+  min-width: 220px;
+  padding: .55rem;
+  border: 1px solid var(--border-soft);
+  border-radius: .85rem;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  z-index: 20;
+}
+.account-menu-summary {
+  padding: .45rem .5rem .55rem;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: .35rem;
+}
+.account-menu-name {
+  font-weight: 700;
+  line-height: 1.3;
+}
+.account-menu-email {
+  margin-top: .15rem;
+  color: var(--muted);
+  font-size: .88rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.account-menu-action {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: .7rem .75rem;
+  border-radius: .7rem;
+  cursor: pointer;
+}
+.account-menu-action:hover:not(:disabled) {
+  background: var(--surface-alt);
+}
 
 .card {
   background: var(--surface);
@@ -194,8 +261,28 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
   padding: 1rem;
   background: var(--surface-alt);
   cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: .7rem;
+  align-items: flex-start;
 }
 .dropzone-active { border-color: var(--primary); background: color-mix(in srgb, var(--primary), transparent 92%); }
+.dropzone-copy {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+}
+.dropzone-title,
+.dropzone-subtitle,
+.dropzone-accepted {
+  margin: 0;
+}
+.dropzone-title {
+  font-size: 1rem;
+}
+.dropzone-cta {
+  min-height: 44px;
+}
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -252,6 +339,140 @@ pre { background: var(--surface-alt); border: 1px solid var(--border-soft); bord
 }
 .file-row-compact .btn {
   align-self: flex-end;
+}
+
+.class-list-editor-wrap {
+  overflow-x: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: .75rem;
+  background: var(--surface);
+}
+
+.class-list-editor-table {
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+
+.class-list-editor-col-first,
+.class-list-editor-col-last {
+  width: 47%;
+}
+
+.class-list-editor-col-action {
+  width: 36px;
+}
+
+.class-list-editor-table th,
+.class-list-editor-table td {
+  padding: 0;
+  border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.class-list-editor-table th {
+  font-size: .8rem;
+  white-space: nowrap;
+  padding: .2rem .32rem;
+  background: var(--surface-alt);
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.class-list-editor-input {
+  width: 100%;
+  min-width: 0;
+  padding: .24rem .28rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  line-height: 1.15;
+}
+
+.class-list-editor-action-cell {
+  width: 36px;
+  white-space: nowrap;
+  text-align: center;
+  border-right: 0;
+}
+
+.class-list-editor-delete {
+  min-width: 100%;
+  min-height: 100%;
+  padding: 0;
+  font-size: .95rem;
+  line-height: 1;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.class-list-editor-table th:last-child,
+.class-list-editor-table td:last-child {
+  border-right: 0;
+}
+
+.class-list-editor-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+@media (pointer: coarse), (max-width: 700px) {
+  .dropzone {
+    min-height: 168px;
+    padding: 1rem;
+    justify-content: center;
+    align-items: stretch;
+    border-radius: .9rem;
+  }
+
+  .dropzone-mobile {
+    gap: .9rem;
+  }
+
+  .dropzone-title {
+    font-size: 1.05rem;
+    line-height: 1.35;
+  }
+
+  .dropzone-subtitle,
+  .dropzone-accepted {
+    font-size: .94rem;
+    line-height: 1.4;
+  }
+
+  .dropzone-cta {
+    width: 100%;
+    min-height: 48px;
+    font-size: 1rem;
+  }
+
+  .file-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .file-row .btn {
+    width: 100%;
+  }
+
+  .class-list-editor-table th,
+  .class-list-editor-table td {
+    padding: 0;
+  }
+
+  .class-list-editor-table th {
+    font-size: .74rem;
+    padding: .16rem .18rem;
+  }
+
+  .class-list-editor-input {
+    padding: .18rem .16rem;
+    font-size: .82rem;
+  }
+
+  .class-list-editor-delete {
+    font-size: .85rem;
+  }
 }
 
 .warning-text, .warning-strong {
@@ -658,10 +879,12 @@ body.theme-dark .modal-actions-sticky {
 
 @media (max-width: 640px) {
   .layout { padding: .75rem; }
-  .top-nav { align-items: flex-start; flex-direction: column; }
-  .top-nav-left { width: 100%; justify-content: space-between; }
-  .main-nav-links { width: 100%; }
+  .top-nav { align-items: center; flex-wrap: wrap; }
+  .top-nav-left { flex: 1 1 auto; min-width: 0; }
+  .top-nav-right { width: auto; flex: 0 0 auto; margin-left: auto; }
+  .main-nav-links { width: 100%; order: 3; }
   .nav-link { display: inline-block; }
+  .account-menu-panel { right: 0; left: auto; width: min(88vw, 280px); }
   .actions-row button { flex: 1 1 auto; }
   .file-row { flex-direction: column; align-items: stretch; }
   .file-list-compact { grid-template-columns: 1fr; max-height: 170px; }
