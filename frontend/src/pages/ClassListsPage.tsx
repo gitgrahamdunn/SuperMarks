@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import { FileUploader } from '../components/FileUploader';
 import { useToast } from '../components/ToastProvider';
+import { compareStudentNamesByLastName, formatStudentName } from '../lib/nameFormat';
 import type { ClassListRead } from '../types/api';
 
 const CLASS_LIST_ACCEPTED_TYPES = [
@@ -29,15 +30,33 @@ export function ClassListsPage() {
   const [classLists, setClassLists] = useState<ClassListRead[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [classListName, setClassListName] = useState('');
+  const [activeClassListId, setActiveClassListId] = useState<number | null>(null);
+  const [editorName, setEditorName] = useState('');
+  const [editorNamesText, setEditorNamesText] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const { showError, showSuccess, showWarning } = useToast();
+
+  const normalizeNamesForUi = (names: string[]) => names
+    .map((name) => formatStudentName(name))
+    .filter(Boolean)
+    .sort(compareStudentNamesByLastName);
+
+  const normalizeClassListForUi = (classList: ClassListRead): ClassListRead => {
+    const names = normalizeNamesForUi(classList.names);
+    return {
+      ...classList,
+      names,
+      entry_count: names.length,
+    };
+  };
 
   const loadClassLists = async () => {
     try {
       setIsLoading(true);
-      setClassLists(await api.getClassLists());
+      setClassLists((await api.getClassLists()).map(normalizeClassListForUi));
     } catch (error) {
       showError(error instanceof Error ? error.message : 'We couldn’t load your class lists.');
     } finally {
@@ -62,7 +81,7 @@ export function ClassListsPage() {
     }
     try {
       setIsSaving(true);
-      const created = await api.createClassListFromUploads(files, classListName);
+      const created = normalizeClassListForUi(await api.createClassListFromUploads(files, classListName));
       setClassLists((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
       setFiles([]);
       setClassListName('');
@@ -82,11 +101,58 @@ export function ClassListsPage() {
       setDeletingId(classList.id);
       await api.deleteClassList(classList.id);
       setClassLists((prev) => prev.filter((item) => item.id !== classList.id));
+      setActiveClassListId((current) => (current === classList.id ? null : current));
       showSuccess(`${classList.name || 'Class list'} was deleted.`);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'We couldn’t delete this class list.');
     } finally {
       setDeletingId((current) => (current === classList.id ? null : current));
+    }
+  };
+
+  const activeClassList = useMemo(
+    () => sortedClassLists.find((classList) => classList.id === activeClassListId) ?? null,
+    [activeClassListId, sortedClassLists],
+  );
+
+  const openClassList = (classList: ClassListRead) => {
+    setActiveClassListId(classList.id ?? null);
+    setEditorName(classList.name || '');
+    setEditorNamesText(classList.names.join('\n'));
+  };
+
+  const closeEditor = () => {
+    setActiveClassListId(null);
+    setEditorName('');
+    setEditorNamesText('');
+  };
+
+  const onSaveClassList = async () => {
+    if (!activeClassList?.id) return;
+    const normalizedNames = normalizeNamesForUi(
+      editorNamesText
+        .split('\n')
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+    if (normalizedNames.length === 0) {
+      showWarning('Add at least one student name before saving.');
+      return;
+    }
+    try {
+      setIsUpdating(true);
+      const updated = normalizeClassListForUi(await api.updateClassList(activeClassList.id, {
+        name: editorName.trim(),
+        names: normalizedNames,
+      }));
+      setClassLists((prev) => prev.map((classList) => (classList.id === updated.id ? updated : classList)));
+      setEditorName(updated.name || '');
+      setEditorNamesText(updated.names.join('\n'));
+      showSuccess(`${updated.name || 'Class list'} was updated.`);
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'We couldn’t save this class list.');
+    } finally {
+      setIsUpdating(false);
     }
   };
 
@@ -182,6 +248,13 @@ export function ClassListsPage() {
                 <div className="actions-row" style={{ marginTop: 0 }}>
                   <button
                     type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => openClassList(classList)}
+                  >
+                    {activeClassListId === classList.id ? 'Editing' : 'Open'}
+                  </button>
+                  <button
+                    type="button"
                     className="btn btn-danger btn-sm"
                     onClick={() => void onDelete(classList)}
                     disabled={deletingId === classList.id}
@@ -194,6 +267,48 @@ export function ClassListsPage() {
           </div>
         )}
       </section>
+
+      {activeClassList && (
+        <section className="card stack">
+          <div className="panel-title-row">
+            <div>
+              <h2 className="section-title">Edit class list</h2>
+              <p className="subtle-text">Names are shown alphabetically and saved in that order.</p>
+            </div>
+            <span className="status-pill status-neutral">
+              {activeClassList.entry_count} name{activeClassList.entry_count === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div className="stack" style={{ gap: '.6rem' }}>
+            <label htmlFor="edit-class-list-name">Class list name</label>
+            <input
+              id="edit-class-list-name"
+              value={editorName}
+              onChange={(event) => setEditorName(event.target.value)}
+              placeholder="Optional"
+              disabled={isUpdating}
+            />
+          </div>
+          <div className="stack" style={{ gap: '.6rem' }}>
+            <label htmlFor="edit-class-list-names">Student names</label>
+            <textarea
+              id="edit-class-list-names"
+              value={editorNamesText}
+              onChange={(event) => setEditorNamesText(event.target.value)}
+              rows={Math.min(Math.max(activeClassList.entry_count, 8), 20)}
+              disabled={isUpdating}
+            />
+          </div>
+          <div className="actions-row" style={{ marginTop: 0 }}>
+            <button type="button" className="btn btn-primary" onClick={() => void onSaveClassList()} disabled={isUpdating}>
+              {isUpdating ? 'Saving…' : 'Save changes'}
+            </button>
+            <button type="button" className="btn btn-secondary" onClick={closeEditor} disabled={isUpdating}>
+              Close
+            </button>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

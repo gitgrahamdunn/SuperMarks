@@ -57,7 +57,7 @@ from app.class_lists import build_class_list_payload, nearest_known_student_name
 from app.reporting import front_page_totals_read
 from app.reporting_service import CsvExportSpec, CsvExportRow, build_exam_gradebook_xlsx_artifact, build_exam_marking_dashboard_response, build_exam_marks_export_artifact, build_exam_objectives_summary_export_artifact, build_exam_student_summaries_zip_export_artifact, build_exam_summary_export_artifact, build_zip_export_content, invalidate_exam_reporting_cache, write_csv_export
 from app.name_utils import compose_student_name, normalize_student_name, split_student_name, submission_display_name, submission_name_parts
-from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ClassListRead, ExamCreate, ExamDetail, ExamIntakeJobRead, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, FrontPageCandidateValue, FrontPageExtractionEvidence, FrontPageObjectiveScoreCandidate, FrontPageTotalsCandidateRead, FrontPageUsageEntryRead, FrontPageUsageReportRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
+from app.schemas import BlobRegisterRequest, BlobRegisterResponse, BulkUploadCandidate, BulkUploadFinalizeRequest, BulkUploadFinalizeResponse, BulkUploadPreviewResponse, ClassListRead, ClassListUpdate, ExamCreate, ExamDetail, ExamIntakeJobRead, ExamKeyPageRead, ExamKeyUploadResponse, ExamMarkingDashboardResponse, ExamParseJobRead, ExamRead, ExamWorkspaceBootstrapResponse, FrontPageCandidateValue, FrontPageExtractionEvidence, FrontPageObjectiveScoreCandidate, FrontPageTotalsCandidateRead, FrontPageUsageEntryRead, FrontPageUsageReportRead, NameEvidence, QuestionCreate, QuestionRead, QuestionUpdate, RegionRead, StoredFileRead, SubmissionFileRead, SubmissionPageRead, SubmissionRead
 from app.settings import settings
 from app.pipeline.pages import build_page_preview_image
 from app.storage import ensure_dir, reset_dir, relative_to_data
@@ -2565,6 +2565,44 @@ def append_names_to_class_list(
 
     commit_repository_session(session)
     updated_payload = _class_list_resource_read(class_list)
+    if not updated_payload:
+        raise HTTPException(status_code=500, detail="Class list could not be read after update")
+    return updated_payload
+
+
+@class_lists_router.put("/{class_list_id}", response_model=ClassListRead)
+def update_class_list(
+    class_list_id: int,
+    payload: ClassListUpdate,
+    session: DbSession = Depends(get_repository_session),
+) -> ClassListRead:
+    class_list = _get_class_list_or_404(class_list_id, session)
+    if not class_list:
+        raise HTTPException(status_code=404, detail="Class list not found")
+
+    normalized_names = normalize_class_list_names([str(item).strip() for item in payload.names if str(item).strip()])
+    if not normalized_names:
+        raise HTTPException(status_code=400, detail="At least one student name is required")
+
+    existing_payload = _class_list_resource_read(class_list)
+    next_name = str(payload.name or class_list.name or "").strip() or class_list.name
+    names_json, source_json = build_class_list_payload(
+        normalized_names,
+        source="manual_update",
+        filenames=existing_payload.filenames if existing_payload else [],
+        class_list_id=class_list.id,
+        class_list_name=next_name,
+        created_at=class_list.created_at,
+    )
+    updated_class_list = exam_repo.update_class_list_payload(
+        session,
+        class_list=class_list,
+        name=next_name,
+        names_json=names_json,
+        source_json=source_json,
+    )
+    commit_repository_session(session)
+    updated_payload = _class_list_resource_read(updated_class_list)
     if not updated_payload:
         raise HTTPException(status_code=500, detail="Class list could not be read after update")
     return updated_payload

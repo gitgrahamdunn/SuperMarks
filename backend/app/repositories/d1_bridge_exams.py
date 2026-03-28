@@ -223,12 +223,12 @@ def create_class_list(session: DbSession, *, name: str, owner_user_id: int | Non
     return created
 
 
-def update_class_list_payload(session: DbSession, *, class_list: ClassList, names_json: str, source_json: str) -> ClassList:
+def update_class_list_payload(session: DbSession, *, class_list: ClassList, names_json: str, source_json: str, name: str | None = None) -> ClassList:
     _ = session
     row = _update_row(
         "classlist",
         int(class_list.id or 0),
-        {"names_json": names_json, "source_json": source_json},
+        {"name": name if name is not None else class_list.name, "names_json": names_json, "source_json": source_json},
         "id, owner_user_id, name, names_json, source_json, created_at",
     )
     updated = _class_list_from_row(row)

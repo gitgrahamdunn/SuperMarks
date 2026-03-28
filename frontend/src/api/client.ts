@@ -572,6 +572,12 @@ export const api = {
       ...options,
     }, EXAM_CREATE_TIMEOUT_MS);
   },
+  updateClassList: (classListId: number, payload: { name: string; names: string[] }, options?: RequestInit) => request<ClassListRead>(`class-lists/${classListId}`, {
+    method: 'PUT',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+    ...options,
+  }, EXAM_CREATE_TIMEOUT_MS),
   deleteClassList: (classListId: number, options?: RequestInit) => request(`class-lists/${classListId}`, {
     method: 'DELETE',
     ...options,

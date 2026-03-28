@@ -24,6 +24,11 @@ class ClassListRead(BaseModel):
     filenames: list[str] = Field(default_factory=list)
 
 
+class ClassListUpdate(BaseModel):
+    name: str = ""
+    names: list[str] = Field(default_factory=list)
+
+
 class ExamRead(BaseModel):
     id: int
     name: str

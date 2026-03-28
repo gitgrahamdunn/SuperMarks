@@ -73,7 +73,9 @@ def create_class_list(session: DbSession, *, name: str, owner_user_id: int | Non
     return class_list
 
 
-def update_class_list_payload(session: DbSession, *, class_list: ClassList, names_json: str, source_json: str) -> ClassList:
+def update_class_list_payload(session: DbSession, *, class_list: ClassList, names_json: str, source_json: str, name: str | None = None) -> ClassList:
+    if name is not None:
+        class_list.name = name
     class_list.names_json = names_json
     class_list.source_json = source_json
     session.add(class_list)
