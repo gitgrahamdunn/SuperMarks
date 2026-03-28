@@ -3,7 +3,7 @@ from __future__ import annotations
 import zipfile
 from io import BytesIO
 
-from app.class_lists import extract_names_from_rows, parse_class_list_csv_bytes, parse_class_list_xlsx_bytes
+from app.class_lists import extract_names_from_rows, normalize_class_list_names, parse_class_list_csv_bytes, parse_class_list_xlsx_bytes
 
 
 def _tiny_xlsx_bytes() -> bytes:
@@ -86,6 +86,20 @@ def test_extract_names_from_rows_strips_commas_from_last_first_names() -> None:
         ["Lee, Jordan"],
         ["Stone, Avery"],
     ])
+
+    assert names == ["Jordan Lee", "Avery Stone"]
+
+
+def test_normalize_class_list_names_forced_last_first_reorders_single_cell_names() -> None:
+    names = normalize_class_list_names(["Lee Jordan", "Stone Avery"], forced_order="last_first")
+
+    assert names == ["Jordan Lee", "Avery Stone"]
+
+
+def test_parse_class_list_csv_bytes_respects_forced_last_first_order() -> None:
+    payload = b"Student Name\nLee Jordan\nStone Avery\n"
+
+    names = parse_class_list_csv_bytes(payload, forced_order="last_first")
 
     assert names == ["Jordan Lee", "Avery Stone"]
 

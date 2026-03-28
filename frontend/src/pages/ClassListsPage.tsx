@@ -5,6 +5,13 @@ import { useToast } from '../components/ToastProvider';
 import { compareStudentNamesByLastName, formatStudentName } from '../lib/nameFormat';
 import type { ClassListRead } from '../types/api';
 
+type ClassListEditorRow = {
+  id: string;
+  firstName: string;
+  middleName: string;
+  lastName: string;
+};
+
 const CLASS_LIST_ACCEPTED_TYPES = [
   'application/pdf',
   'image/png',
@@ -30,14 +37,38 @@ export function ClassListsPage() {
   const [classLists, setClassLists] = useState<ClassListRead[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [classListName, setClassListName] = useState('');
+  const [rosterNameOrder, setRosterNameOrder] = useState<'last_first' | 'first_last'>('first_last');
   const [activeClassListId, setActiveClassListId] = useState<number | null>(null);
   const [editorName, setEditorName] = useState('');
-  const [editorNamesText, setEditorNamesText] = useState('');
+  const [editorRows, setEditorRows] = useState<ClassListEditorRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const { showError, showSuccess, showWarning } = useToast();
+
+  const splitNameToEditorRow = (name: string, index: number): ClassListEditorRow => {
+    const parts = formatStudentName(name).split(' ').filter(Boolean);
+    if (parts.length === 0) {
+      return { id: `row-${index}`, firstName: '', middleName: '', lastName: '' };
+    }
+    if (parts.length === 1) {
+      return { id: `row-${index}`, firstName: parts[0], middleName: '', lastName: '' };
+    }
+    return {
+      id: `row-${index}`,
+      firstName: parts[0] || '',
+      middleName: parts.slice(1, -1).join(' '),
+      lastName: parts[parts.length - 1] || '',
+    };
+  };
+
+  const composeNameFromEditorRow = (row: ClassListEditorRow) => formatStudentName(
+    [row.firstName, row.middleName, row.lastName]
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join(' '),
+  );
 
   const normalizeNamesForUi = (names: string[]) => names
     .map((name) => formatStudentName(name))
@@ -81,10 +112,11 @@ export function ClassListsPage() {
     }
     try {
       setIsSaving(true);
-      const created = normalizeClassListForUi(await api.createClassListFromUploads(files, classListName));
+      const created = normalizeClassListForUi(await api.createClassListFromUploads(files, classListName, rosterNameOrder));
       setClassLists((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
       setFiles([]);
       setClassListName('');
+      setRosterNameOrder('first_last');
       showSuccess(`${created.name || 'Class list'} is ready to use.`);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'We couldn’t save this class list.');
@@ -118,21 +150,20 @@ export function ClassListsPage() {
   const openClassList = (classList: ClassListRead) => {
     setActiveClassListId(classList.id ?? null);
     setEditorName(classList.name || '');
-    setEditorNamesText(classList.names.join('\n'));
+    setEditorRows(classList.names.map((name, index) => splitNameToEditorRow(name, index)));
   };
 
   const closeEditor = () => {
     setActiveClassListId(null);
     setEditorName('');
-    setEditorNamesText('');
+    setEditorRows([]);
   };
 
   const onSaveClassList = async () => {
     if (!activeClassList?.id) return;
     const normalizedNames = normalizeNamesForUi(
-      editorNamesText
-        .split('\n')
-        .map((name) => name.trim())
+      editorRows
+        .map((row) => composeNameFromEditorRow(row))
         .filter(Boolean),
     );
     if (normalizedNames.length === 0) {
@@ -147,13 +178,25 @@ export function ClassListsPage() {
       }));
       setClassLists((prev) => prev.map((classList) => (classList.id === updated.id ? updated : classList)));
       setEditorName(updated.name || '');
-      setEditorNamesText(updated.names.join('\n'));
+      setEditorRows(updated.names.map((name, index) => splitNameToEditorRow(name, index)));
       showSuccess(`${updated.name || 'Class list'} was updated.`);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'We couldn’t save this class list.');
     } finally {
       setIsUpdating(false);
     }
+  };
+
+  const updateEditorRow = (rowId: string, field: keyof Omit<ClassListEditorRow, 'id'>, value: string) => {
+    setEditorRows((current) => current.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)));
+  };
+
+  const addEditorRow = () => {
+    setEditorRows((current) => [...current, { id: `row-${Date.now()}-${current.length}`, firstName: '', middleName: '', lastName: '' }]);
+  };
+
+  const removeEditorRow = (rowId: string) => {
+    setEditorRows((current) => current.filter((row) => row.id !== rowId));
   };
 
   return (
@@ -185,6 +228,27 @@ export function ClassListsPage() {
               disabled={isSaving}
             />
           </div>
+          <div className="stack" style={{ gap: '.5rem' }}>
+            <span>Roster is</span>
+            <div className="actions-row" style={{ marginTop: 0 }}>
+              <button
+                type="button"
+                className={`btn ${rosterNameOrder === 'last_first' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setRosterNameOrder('last_first')}
+                disabled={isSaving}
+              >
+                Last, First
+              </button>
+              <button
+                type="button"
+                className={`btn ${rosterNameOrder === 'first_last' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setRosterNameOrder('first_last')}
+                disabled={isSaving}
+              >
+                First, Last
+              </button>
+            </div>
+          </div>
           <FileUploader
             files={files}
             disabled={isSaving}
@@ -208,7 +272,6 @@ export function ClassListsPage() {
         <div className="panel-title-row">
           <div>
             <h2 className="section-title">Saved class lists</h2>
-            <p className="subtle-text">Choose one from Home when you start a new exam.</p>
           </div>
           <span className="status-pill status-neutral">{sortedClassLists.length} list{sortedClassLists.length === 1 ? '' : 's'}</span>
         </div>
@@ -273,10 +336,10 @@ export function ClassListsPage() {
           <div className="panel-title-row">
             <div>
               <h2 className="section-title">Edit class list</h2>
-              <p className="subtle-text">Names are shown alphabetically and saved in that order.</p>
+              <p className="subtle-text">Add/Delete Names as needed, Supermarks will put them in alphabetical order for you!</p>
             </div>
             <span className="status-pill status-neutral">
-              {activeClassList.entry_count} name{activeClassList.entry_count === 1 ? '' : 's'}
+              {editorRows.length} name{editorRows.length === 1 ? '' : 's'}
             </span>
           </div>
           <div className="stack" style={{ gap: '.6rem' }}>
@@ -290,16 +353,75 @@ export function ClassListsPage() {
             />
           </div>
           <div className="stack" style={{ gap: '.6rem' }}>
-            <label htmlFor="edit-class-list-names">Student names</label>
-            <textarea
-              id="edit-class-list-names"
-              value={editorNamesText}
-              onChange={(event) => setEditorNamesText(event.target.value)}
-              rows={Math.min(Math.max(activeClassList.entry_count, 8), 20)}
-              disabled={isUpdating}
-            />
+            <label>Student names</label>
+            <div className="dashboard-table-wrap class-list-editor-wrap">
+              <table className="dashboard-table class-list-editor-table">
+                <colgroup>
+                  <col className="class-list-editor-col-first" />
+                  <col className="class-list-editor-col-middle" />
+                  <col className="class-list-editor-col-last" />
+                  <col className="class-list-editor-col-action" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>First</th>
+                    <th>Middle</th>
+                    <th>Last</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {editorRows.map((row) => (
+                    <tr key={row.id}>
+                      <td>
+                        <input
+                          className="class-list-editor-input"
+                          value={row.firstName}
+                          onChange={(event) => updateEditorRow(row.id, 'firstName', event.target.value)}
+                          placeholder="First"
+                          disabled={isUpdating}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          className="class-list-editor-input"
+                          value={row.middleName}
+                          onChange={(event) => updateEditorRow(row.id, 'middleName', event.target.value)}
+                          placeholder="Middle"
+                          disabled={isUpdating}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          className="class-list-editor-input"
+                          value={row.lastName}
+                          onChange={(event) => updateEditorRow(row.id, 'lastName', event.target.value)}
+                          placeholder="Last"
+                          disabled={isUpdating}
+                        />
+                      </td>
+                      <td className="class-list-editor-action-cell">
+                        <button
+                          type="button"
+                          className="btn btn-danger btn-sm class-list-editor-delete"
+                          onClick={() => removeEditorRow(row.id)}
+                          disabled={isUpdating || editorRows.length <= 1}
+                          aria-label="Delete name"
+                          title="Delete name"
+                        >
+                          ×
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
           <div className="actions-row" style={{ marginTop: 0 }}>
+            <button type="button" className="btn btn-secondary" onClick={addEditorRow} disabled={isUpdating}>
+              Add name
+            </button>
             <button type="button" className="btn btn-primary" onClick={() => void onSaveClassList()} disabled={isUpdating}>
               {isUpdating ? 'Saving…' : 'Save changes'}
             </button>

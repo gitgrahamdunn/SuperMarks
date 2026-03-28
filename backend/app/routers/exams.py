@@ -253,6 +253,7 @@ def _extract_class_list_names_from_uploads(
     *,
     storage_dir: Path,
     upload_files: list[UploadFile],
+    roster_name_order: str | None = None,
 ) -> tuple[list[str], list[str]]:
     if not upload_files:
         return [], []
@@ -267,7 +268,7 @@ def _extract_class_list_names_from_uploads(
         payload = upload.file.read()
         suffix = Path(filename).suffix.lower()
         if suffix in {".csv", ".xlsx", ".xlsm"}:
-            source_names.extend(parse_class_list_tabular_bytes(filename, payload))
+            source_names.extend(parse_class_list_tabular_bytes(filename, payload, forced_order=roster_name_order))
             continue
 
         source_path = class_list_dir / filename
@@ -278,7 +279,7 @@ def _extract_class_list_names_from_uploads(
             source_names.extend(extract_class_list_names_from_image(rendered_path))
 
     deduped_names = [nearest_known_student_name(name, source_names, minimum_ratio=1.0) for name in source_names]
-    return normalize_class_list_names(deduped_names), filenames
+    return normalize_class_list_names(deduped_names, forced_order=roster_name_order), filenames
 
 
 def _persist_exam_class_list(
@@ -2388,6 +2389,7 @@ def get_latest_exam_intake_job(exam_id: int, session: DbSession = Depends(get_re
 @router.post("/{exam_id}/class-list/upload", response_model=ExamRead)
 def upload_exam_class_list(
     exam_id: int,
+    roster_name_order: str | None = Form(default="first_last"),
     files: list[UploadFile] | None = File(default=None),
     file: UploadFile | None = File(default=None),
     session: DbSession = Depends(get_repository_session),
@@ -2404,6 +2406,7 @@ def upload_exam_class_list(
     names, filenames = _extract_class_list_names_from_uploads(
         storage_dir=settings.data_path / "exams" / str(exam_id) / "class-lists" / uuid.uuid4().hex,
         upload_files=upload_files,
+        roster_name_order=roster_name_order,
     )
     if not names:
         raise HTTPException(status_code=400, detail="No student names could be extracted from the class list files")
@@ -2444,6 +2447,7 @@ def list_class_lists(session: DbSession = Depends(get_repository_session)) -> li
 @class_lists_router.post("/upload", response_model=ClassListRead, status_code=status.HTTP_201_CREATED)
 def create_class_list_from_uploads(
     name: str | None = Form(default=""),
+    roster_name_order: str | None = Form(default="first_last"),
     files: list[UploadFile] | None = File(default=None),
     file: UploadFile | None = File(default=None),
     session: DbSession = Depends(get_repository_session),
@@ -2457,6 +2461,7 @@ def create_class_list_from_uploads(
     names, filenames = _extract_class_list_names_from_uploads(
         storage_dir=settings.data_path / "class-lists" / uuid.uuid4().hex,
         upload_files=upload_files,
+        roster_name_order=roster_name_order,
     )
     if not names:
         raise HTTPException(status_code=400, detail="No student names could be extracted from the class list files")

@@ -538,9 +538,10 @@ export const api = {
     ...options,
   }, EXAM_CREATE_TIMEOUT_MS),
   getClassLists: (options?: RequestInit) => request<ClassListRead[]>('class-lists', options, EXAM_READ_TIMEOUT_MS),
-  createClassListFromUploads: async (files: File[], name = '', options?: RequestInit) => {
+  createClassListFromUploads: async (files: File[], name = '', rosterNameOrder = 'first_last', options?: RequestInit) => {
     const formData = new FormData();
     formData.append('name', name);
+    formData.append('roster_name_order', rosterNameOrder);
     files.forEach((file) => formData.append('files', file));
     return request<ClassListRead>('class-lists/upload', {
       method: 'POST',

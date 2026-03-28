@@ -36,6 +36,7 @@ _HEADER_WORDS = {
 }
 
 _NAME_LABEL_PATTERN = re.compile(r"^(name|student|student name)\s*[:\-]\s*", re.IGNORECASE)
+_VALID_NAME_ORDERS = {"first_last", "last_first"}
 
 
 def _clean_cell_text(value: str) -> str:
@@ -92,6 +93,11 @@ def _normalize_name_candidate(value: str) -> str | None:
     return normalized or None
 
 
+def _coerce_name_order(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    return normalized if normalized in _VALID_NAME_ORDERS else None
+
+
 def _combine_name_like_values(left: str, right: str, *, order: str | None) -> str | None:
     first_value = _clean_cell_text(left)
     second_value = _clean_cell_text(right)
@@ -119,6 +125,16 @@ def _normalize_single_name_like_value(value: str, *, order: str | None) -> str |
     return normalize_student_name(reordered) or normalized
 
 
+def _apply_name_order(normalized: str, *, order: str | None) -> str:
+    coerced_order = _coerce_name_order(order)
+    if coerced_order != "last_first":
+        return normalized
+    parts = normalized.split()
+    if len(parts) < 2:
+        return normalized
+    return normalize_student_name(" ".join(parts[1:] + [parts[0]])) or normalized
+
+
 def _dedupe_names(names: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -134,19 +150,25 @@ def _dedupe_names(names: list[str]) -> list[str]:
     return ordered
 
 
-def normalize_class_list_names(names: list[str]) -> list[str]:
-    return _dedupe_names(names)
+def normalize_class_list_names(names: list[str], *, forced_order: str | None = None) -> list[str]:
+    normalized_names: list[str] = []
+    coerced_order = _coerce_name_order(forced_order)
+    for name in names:
+        normalized = _normalize_single_name_like_value(name, order=coerced_order)
+        if normalized:
+            normalized_names.append(normalized)
+    return _dedupe_names(normalized_names)
 
 
-def extract_names_from_rows(rows: list[list[str]]) -> list[str]:
+def extract_names_from_rows(rows: list[list[str]], *, forced_order: str | None = None) -> list[str]:
     names: list[str] = []
-    inferred_order: str | None = None
+    inferred_order: str | None = _coerce_name_order(forced_order)
     for row in rows:
         cleaned = [_clean_cell_text(value) for value in row if _clean_cell_text(value)]
         if not cleaned:
             continue
         header_order = _row_name_order(cleaned)
-        if header_order:
+        if header_order and inferred_order is None:
             inferred_order = header_order
         if _is_header_row(cleaned):
             continue
@@ -168,11 +190,11 @@ def extract_names_from_rows(rows: list[list[str]]) -> list[str]:
     return _dedupe_names(names)
 
 
-def parse_class_list_csv_bytes(data: bytes) -> list[str]:
+def parse_class_list_csv_bytes(data: bytes, *, forced_order: str | None = None) -> list[str]:
     text = data.decode("utf-8-sig", errors="replace")
     reader = csv.reader(io.StringIO(text))
     rows = [[cell for cell in row] for row in reader]
-    return extract_names_from_rows(rows)
+    return extract_names_from_rows(rows, forced_order=forced_order)
 
 
 def _xlsx_shared_strings(zf: zipfile.ZipFile) -> list[str]:
@@ -189,7 +211,7 @@ def _xlsx_shared_strings(zf: zipfile.ZipFile) -> list[str]:
     return strings
 
 
-def parse_class_list_xlsx_bytes(data: bytes) -> list[str]:
+def parse_class_list_xlsx_bytes(data: bytes, *, forced_order: str | None = None) -> list[str]:
     rows: list[list[str]] = []
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         shared_strings = _xlsx_shared_strings(zf)
@@ -220,15 +242,15 @@ def parse_class_list_xlsx_bytes(data: bytes) -> list[str]:
                         current_row.append(value)
                 if current_row:
                     rows.append(current_row)
-    return extract_names_from_rows(rows)
+    return extract_names_from_rows(rows, forced_order=forced_order)
 
 
-def parse_class_list_tabular_bytes(filename: str, data: bytes) -> list[str]:
+def parse_class_list_tabular_bytes(filename: str, data: bytes, *, forced_order: str | None = None) -> list[str]:
     suffix = Path(filename).suffix.lower()
     if suffix == ".csv":
-        return parse_class_list_csv_bytes(data)
+        return parse_class_list_csv_bytes(data, forced_order=forced_order)
     if suffix in {".xlsx", ".xlsm"}:
-        return parse_class_list_xlsx_bytes(data)
+        return parse_class_list_xlsx_bytes(data, forced_order=forced_order)
     return []
 
 
