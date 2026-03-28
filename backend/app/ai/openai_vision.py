@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from app.name_utils import normalize_student_name
 from app.pipeline.key_pages import NormalizedImage, normalize_key_page_header_image, normalize_key_page_image
 
 logger = logging.getLogger(__name__)
@@ -1248,7 +1249,18 @@ def extract_class_list_names_from_image(
     names = payload.get("student_names")
     if not isinstance(names, list):
         return []
-    return [str(item).strip() for item in names if str(item).strip()]
+    return [_normalize_class_list_name_output(str(item)) for item in names if _normalize_class_list_name_output(str(item))]
+
+
+def _normalize_class_list_name_output(value: str) -> str:
+    cleaned = " ".join(str(value or "").strip().split())
+    cleaned = re.sub(r"^[,\s]+|[,\s]+$", "", cleaned)
+    if not cleaned:
+        return ""
+    if "," in cleaned:
+        last_name, first_name = [re.sub(r"^[,\s]+|[,\s]+$", "", part) for part in cleaned.split(",", 1)]
+        return normalize_student_name(" ".join(part for part in (first_name, last_name) if part))
+    return normalize_student_name(cleaned)
 
 
 class OpenAIBulkNameDetector:
@@ -1695,6 +1707,9 @@ def _build_class_list_names_prompt() -> str:
         "Return all visible student names in page order. "
         "Ignore headings, totals, percentages, marks, ids, email addresses, and teacher notes. "
         "If first and last names appear in separate columns on the same row, combine them into one full student name. "
+        "Always return names in First Middle Last order. "
+        "If the source page shows Last Name, First Name, reorder it to First Middle Last. "
+        "Do not include commas in returned names. "
         "Return strict JSON only."
     )
 
