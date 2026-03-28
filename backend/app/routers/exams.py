@@ -1516,7 +1516,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
                 from app.routers.submissions import get_or_create_front_page_totals_candidates
 
                 with open_repository_session() as submission_session:
-                    get_or_create_front_page_totals_candidates(submission_id, submission_session)
+                    get_or_create_front_page_totals_candidates(submission_id, submission_session, check_access=False)
 
             failed_ids: list[int] = []
             worker_count = _front_page_candidate_worker_count(len(submission_ids))

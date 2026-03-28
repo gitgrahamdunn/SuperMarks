@@ -139,6 +139,32 @@ def test_get_exam_or_404_can_bypass_owned_resource_check_for_internal_jobs(tmp_p
         assert internal_exam.id == exam.id
 
 
+def test_get_submission_or_404_can_bypass_owned_resource_check_for_internal_jobs(tmp_path, monkeypatch) -> None:
+    from app.routers import submissions as submissions_router
+
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+    monkeypatch.setenv("BACKEND_API_KEY", "test-api-key")
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Owned Exam", owner_user_id=123)
+        session.add(exam)
+        session.flush()
+        submission = Submission(exam_id=exam.id, student_name="Test Student", status=SubmissionStatus.UPLOADED)
+        session.add(submission)
+        session.commit()
+        session.refresh(submission)
+
+        with pytest.raises(HTTPException):
+            submissions_router._get_submission_or_404(submission.id, session)
+
+        internal_submission = submissions_router._get_submission_or_404(submission.id, session, check_access=False)
+        assert internal_submission.id == submission.id
+
+
 def test_list_exams_auto_resumes_stalled_intake_job(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")

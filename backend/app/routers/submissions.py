@@ -83,12 +83,12 @@ submission_repo = repository_provider().submissions
 question_repo = repository_provider().questions
 
 
-def _get_submission_or_404(submission_id: int, session: DbSession) -> Submission:
+def _get_submission_or_404(submission_id: int, session: DbSession, *, check_access: bool = True) -> Submission:
     submission = submission_repo.get_submission(session, submission_id)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
     exam = exam_repo.get_exam(session, submission.exam_id)
-    if not exam or not can_access_owned_resource(exam.owner_user_id):
+    if not exam or (check_access and not can_access_owned_resource(exam.owner_user_id)):
         raise HTTPException(status_code=404, detail="Submission not found")
     return submission
 
@@ -1278,8 +1278,13 @@ def _ensure_exam_front_page_template(exam_id: int, session: DbSession) -> tuple[
     return template_payload, seed_ids
 
 
-def get_or_create_front_page_totals_candidates(submission_id: int, session: DbSession) -> FrontPageTotalsCandidateRead:
-    submission = _get_submission_or_404(submission_id, session)
+def get_or_create_front_page_totals_candidates(
+    submission_id: int,
+    session: DbSession,
+    *,
+    check_access: bool = True,
+) -> FrontPageTotalsCandidateRead:
+    submission = _get_submission_or_404(submission_id, session, check_access=check_access)
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -1288,7 +1293,7 @@ def get_or_create_front_page_totals_candidates(submission_id: int, session: DbSe
         return cached_payload
 
     template_payload, seed_ids = _ensure_exam_front_page_template(submission.exam_id, session)
-    submission = _get_submission_or_404(submission_id, session)
+    submission = _get_submission_or_404(submission_id, session, check_access=check_access)
     submission = refresh_repository_instance(session, submission)
     cached_payload = _front_page_candidate_cache_read(submission)
     if cached_payload is not None and not _front_page_candidate_is_retryable_failure(cached_payload):
