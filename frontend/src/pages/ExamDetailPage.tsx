@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '../api/client';
+import { readExamWorkspaceCache, writeExamWorkspaceCache } from '../lib/appDataCache';
 import { compareStudentNamesByLastName, formatStudentName } from '../lib/nameFormat';
 import { useToast } from '../components/ToastProvider';
-import type { BulkUploadPreview, ExamDetail, ExamIntakeJobRead, ExamMarkingDashboardResponse, ExamObjectiveRead, FrontPageUsageReport, ParseLatestResponse, QuestionRead, StoredFileRead, SubmissionDashboardRow, SubmissionRead } from '../types/api';
+import type { BulkUploadPreview, ClassListRead, ExamDetail, ExamIntakeJobRead, ExamMarkingDashboardResponse, ExamObjectiveRead, FrontPageUsageReport, ParseLatestResponse, QuestionRead, StoredFileRead, SubmissionDashboardRow, SubmissionRead } from '../types/api';
 
 const PARSE_BATCH_SIZE = 3;
 const formatUsd = (value: number) => {
@@ -23,17 +24,27 @@ export function ExamDetailPage() {
   const params = useParams();
   const examId = Number(params.examId);
   const navigate = useNavigate();
-  const [detail, setDetail] = useState<ExamDetail | null>(null);
-  const [latestIntakeJob, setLatestIntakeJob] = useState<ExamIntakeJobRead | null>(null);
-  const [questions, setQuestions] = useState<QuestionRead[]>([]);
-  const [submissions, setSubmissions] = useState<SubmissionRead[]>([]);
-  const [markingDashboard, setMarkingDashboard] = useState<ExamMarkingDashboardResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const initialWorkspaceCache = readExamWorkspaceCache(examId);
+  const [detail, setDetail] = useState<ExamDetail | null>(
+    initialWorkspaceCache
+      ? {
+        exam: initialWorkspaceCache.bootstrap.exam,
+        key_files: initialWorkspaceCache.bootstrap.key_files,
+        submissions: initialWorkspaceCache.bootstrap.submissions,
+        parse_jobs: [],
+      }
+      : null,
+  );
+  const [latestIntakeJob, setLatestIntakeJob] = useState<ExamIntakeJobRead | null>(initialWorkspaceCache?.intakeJob ?? null);
+  const [questions, setQuestions] = useState<QuestionRead[]>(initialWorkspaceCache?.bootstrap.questions ?? []);
+  const [submissions, setSubmissions] = useState<SubmissionRead[]>(initialWorkspaceCache?.bootstrap.submissions ?? []);
+  const [markingDashboard, setMarkingDashboard] = useState<ExamMarkingDashboardResponse | null>(initialWorkspaceCache?.bootstrap.marking_dashboard ?? null);
+  const [isLoading, setIsLoading] = useState(!initialWorkspaceCache);
   const [notFound, setNotFound] = useState(false);
-  const [keyFiles, setKeyFiles] = useState<StoredFileRead[]>([]);
-  const [latestParse, setLatestParse] = useState<ParseLatestResponse['job'] | null>(null);
-  const [latestParseStatus, setLatestParseStatus] = useState<Awaited<ReturnType<typeof api.getExamKeyParseStatus>> | null>(null);
-  const [frontPageUsageReport, setFrontPageUsageReport] = useState<FrontPageUsageReport | null>(null);
+  const [keyFiles, setKeyFiles] = useState<StoredFileRead[]>(initialWorkspaceCache?.bootstrap.key_files ?? []);
+  const [latestParse, setLatestParse] = useState<ParseLatestResponse['job'] | null>(initialWorkspaceCache?.bootstrap.latest_parse.job ?? null);
+  const [latestParseStatus, setLatestParseStatus] = useState<Awaited<ReturnType<typeof api.getExamKeyParseStatus>> | null>(initialWorkspaceCache?.bootstrap.latest_parse_status ?? null);
+  const [frontPageUsageReport, setFrontPageUsageReport] = useState<FrontPageUsageReport | null>(initialWorkspaceCache?.usageReport ?? null);
   const [isProcessingParse, setIsProcessingParse] = useState(false);
   const [bulkFile, setBulkFile] = useState<File | null>(null);
   const [rosterText, setRosterText] = useState('');
@@ -54,14 +65,73 @@ export function ExamDetailPage() {
   const [progressMessage, setProgressMessage] = useState('');
   const { showError, showSuccess, showWarning } = useToast();
 
+  const syncWorkspaceSnapshot = (nextDetail: ExamDetail) => {
+    setDetail(nextDetail);
+    if (!markingDashboard) return;
+    writeExamWorkspaceCache(
+      examId,
+      {
+        exam: nextDetail.exam,
+        questions,
+        key_files: keyFiles,
+        submissions,
+        marking_dashboard: markingDashboard,
+        latest_parse: {
+          exam_exists: true,
+          job: latestParse,
+        },
+        latest_parse_status: latestParseStatus,
+      },
+      latestIntakeJob,
+      frontPageUsageReport,
+    );
+  };
+
+  const replaceAttachedClassList = (nextClassList: ClassListRead | null) => {
+    if (!detail) return;
+    syncWorkspaceSnapshot({
+      ...detail,
+      exam: {
+        ...detail.exam,
+        class_list: nextClassList,
+      },
+    });
+  };
+
+  const syncParseSnapshot = (
+    nextQuestions: QuestionRead[],
+    nextLatestParse: ParseLatestResponse['job'] | null,
+    nextLatestParseStatus: Awaited<ReturnType<typeof api.getExamKeyParseStatus>> | null,
+  ) => {
+    if (!detail || !markingDashboard) return;
+    writeExamWorkspaceCache(
+      examId,
+      {
+        exam: detail.exam,
+        questions: nextQuestions,
+        key_files: keyFiles,
+        submissions,
+        marking_dashboard: markingDashboard,
+        latest_parse: {
+          exam_exists: true,
+          job: nextLatestParse,
+        },
+        latest_parse_status: nextLatestParseStatus,
+      },
+      latestIntakeJob,
+      frontPageUsageReport,
+    );
+  };
+
   const loadDetail = async () => {
-    setIsLoading(true);
+    setIsLoading((current) => (detail ? current : true));
     try {
       const [bootstrap, intakeJob, usageReport] = await Promise.all([
         api.getExamWorkspaceBootstrap(examId),
         api.getLatestExamIntakeJob(examId).catch(() => null),
         api.getExamFrontPageUsage(examId).catch(() => null),
       ]);
+      writeExamWorkspaceCache(examId, bootstrap, intakeJob, usageReport);
       setDetail({ exam: bootstrap.exam, key_files: bootstrap.key_files, submissions: bootstrap.submissions, parse_jobs: [] });
       setLatestIntakeJob(intakeJob);
       setFrontPageUsageReport(usageReport);
@@ -84,14 +154,19 @@ export function ExamDetailPage() {
     }
   };
 
-  const refreshParseStatus = async () => {
+  const refreshParseStatus = async (nextQuestions?: QuestionRead[]) => {
     const latest = await api.getExamKeyParseLatest(examId);
+    const effectiveQuestions = nextQuestions ?? questions;
     setLatestParse(latest.job);
     if (latest.job) {
       const status = await api.getExamKeyParseStatus(examId, latest.job.job_id);
       setLatestParseStatus(status);
+      if (nextQuestions) setQuestions(nextQuestions);
+      syncParseSnapshot(effectiveQuestions, latest.job, status);
     } else {
       setLatestParseStatus(null);
+      if (nextQuestions) setQuestions(nextQuestions);
+      syncParseSnapshot(effectiveQuestions, null, null);
     }
     return latest.job;
   };
@@ -416,8 +491,9 @@ export function ExamDetailPage() {
         }
         status = await api.getExamKeyParseStatus(examId, latest.job.job_id);
       }
-      await api.finishExamKeyParse(examId, latest.job.job_id);
-      await loadDetail();
+      const finished = await api.finishExamKeyParse(examId, latest.job.job_id);
+      const nextQuestions = Array.isArray(finished.questions) ? (finished.questions as QuestionRead[]) : questions;
+      await refreshParseStatus(nextQuestions);
       showSuccess('Parsing resumed from the exam page.');
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Failed to resume parsing');
@@ -633,7 +709,7 @@ export function ExamDetailPage() {
     try {
       setIsCreatingClassList(true);
       const classList = await api.createClassListFromExam(examId, newClassListName, editedNames);
-      await loadDetail();
+      replaceAttachedClassList(classList);
       setNewClassListName('');
       setNewClassListNamesText('');
       showSuccess(`Saved ${classList.name || 'class list'}.`);
@@ -659,8 +735,9 @@ export function ExamDetailPage() {
     }
     try {
       setIsUpdatingClassList(true);
-      await api.appendNamesToClassList(classList.id, editedNames, examId);
-      await loadDetail();
+      const updatedClassList = await api.appendNamesToClassList(classList.id, editedNames, examId);
+      replaceAttachedClassList(updatedClassList);
+      setMissingClassListNamesText('');
       showSuccess(`Added ${editedNames.length} student${editedNames.length === 1 ? '' : 's'} to ${classList.name || 'the class list'}.`);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'Failed to update class list');
@@ -795,7 +872,7 @@ export function ExamDetailPage() {
           <section className="card stack">
             <div className="panel-title-row">
               <div>
-                <h2 className="section-title">2. Export class table</h2>
+                <h2 className="section-title">2. Export test table</h2>
                 <p className="subtle-text">Export when ready.</p>
               </div>
             </div>

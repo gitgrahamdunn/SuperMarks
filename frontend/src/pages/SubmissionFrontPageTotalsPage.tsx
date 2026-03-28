@@ -14,10 +14,10 @@ const frontPageCandidateValueCache = new Map<number, FrontPageTotalsCandidate>()
 const frontPageCandidatePromiseCache = new Map<number, Promise<FrontPageTotalsCandidate>>();
 const frontPageSubmissionValueCache = new Map<number, SubmissionRead>();
 const frontPageSubmissionPromiseCache = new Map<number, Promise<SubmissionRead>>();
+const frontPagePreviewObjectUrlCache = new Map<string, string>();
 const frontPagePreviewWarmCache = new Set<string>();
 const FRONT_PAGE_CACHE_MAX = 24;
 const FRONT_PAGE_PREFETCH_WINDOW = 3;
-
 type FrontPageRouteState = {
   submission?: SubmissionRead | null;
   examSubmissions?: SubmissionRead[] | null;
@@ -46,6 +46,46 @@ function warmPreviewUrl(url: string): void {
   image.decoding = 'async';
   image.src = url;
   frontPagePreviewWarmCache.add(url);
+}
+
+function rememberPreviewObjectUrl(sourceUrl: string, objectUrl: string): void {
+  if (frontPagePreviewObjectUrlCache.has(sourceUrl)) {
+    frontPagePreviewObjectUrlCache.delete(sourceUrl);
+  }
+  frontPagePreviewObjectUrlCache.set(sourceUrl, objectUrl);
+  while (frontPagePreviewObjectUrlCache.size > FRONT_PAGE_CACHE_MAX) {
+    const oldestKey = frontPagePreviewObjectUrlCache.keys().next().value;
+    if (oldestKey == null) break;
+    const oldestObjectUrl = frontPagePreviewObjectUrlCache.get(oldestKey);
+    if (oldestObjectUrl) URL.revokeObjectURL(oldestObjectUrl);
+    frontPagePreviewObjectUrlCache.delete(oldestKey);
+  }
+}
+
+async function loadResolvedPreviewObjectUrl(primaryUrl: string, fallbackUrl = ''): Promise<{ objectUrl: string; usedFallback: boolean }> {
+  const cachedPrimary = primaryUrl ? frontPagePreviewObjectUrlCache.get(primaryUrl) : null;
+  if (cachedPrimary) return { objectUrl: cachedPrimary, usedFallback: false };
+
+  const cachedFallback = fallbackUrl ? frontPagePreviewObjectUrlCache.get(fallbackUrl) : null;
+  if (cachedFallback) return { objectUrl: cachedFallback, usedFallback: true };
+
+  if (primaryUrl) {
+    try {
+      const objectUrl = await api.fetchAssetObjectUrl(primaryUrl);
+      rememberPreviewObjectUrl(primaryUrl, objectUrl);
+      return { objectUrl, usedFallback: false };
+    } catch {
+      // fall through to fallback
+    }
+  }
+
+  if (fallbackUrl) {
+    const objectUrl = await api.fetchAssetObjectUrl(fallbackUrl);
+    rememberPreviewObjectUrl(fallbackUrl, objectUrl);
+    return { objectUrl, usedFallback: true };
+  }
+
+  throw new Error('No preview image available');
 }
 
 async function loadFrontPageCandidatesCached(submissionId: number): Promise<FrontPageTotalsCandidate> {
@@ -514,37 +554,23 @@ export function SubmissionFrontPageTotalsPage() {
     if (!selectedPage) return undefined;
 
     let cancelled = false;
-    let objectUrlToRevoke: string | null = null;
 
     const loadPageImage = async () => {
-      const candidates = [pagePreviewUrl, fullPageImageUrl].filter(Boolean);
-      for (const candidateUrl of candidates) {
-        try {
-          const objectUrl = await api.fetchAssetObjectUrl(candidateUrl);
-          if (cancelled) {
-            URL.revokeObjectURL(objectUrl);
-            return;
-          }
-          objectUrlToRevoke = objectUrl;
-          setResolvedPageImageUrl(objectUrl);
-          setPreviewImageFailed(candidateUrl === fullPageImageUrl);
-          return;
-        } catch {
-          continue;
+      try {
+        const resolved = await loadResolvedPreviewObjectUrl(pagePreviewUrl, fullPageImageUrl);
+        if (cancelled) return;
+        setResolvedPageImageUrl(resolved.objectUrl);
+        setPreviewImageFailed(resolved.usedFallback);
+      } catch {
+        if (!cancelled) {
+          setPreviewImageFailed(true);
         }
-      }
-
-      if (!cancelled) {
-        setPreviewImageFailed(true);
       }
     };
 
     void loadPageImage();
     return () => {
       cancelled = true;
-      if (objectUrlToRevoke) {
-        URL.revokeObjectURL(objectUrlToRevoke);
-      }
     };
   }, [fullPageImageUrl, pagePreviewUrl, selectedPage]);
 
@@ -585,6 +611,36 @@ export function SubmissionFrontPageTotalsPage() {
     () => (submission ? findNextFrontPageSubmission(frontPageSubmissions, submission.id) : null),
     [frontPageSubmissions, submission],
   );
+
+  useEffect(() => {
+    const nextTargets = [nextFrontPageSubmission, sequentialNextFrontPageSubmission]
+      .filter((candidate): candidate is SubmissionRead => Boolean(candidate))
+      .slice(0, 2);
+    if (nextTargets.length === 0) return undefined;
+
+    let cancelled = false;
+
+    const prefetchNextTargets = async () => {
+      await Promise.allSettled(nextTargets.map(async (targetSubmission) => {
+        const hydratedSubmission = await loadFrontPageSubmissionCached(targetSubmission.id);
+        if (cancelled) return;
+        await Promise.allSettled([
+          loadFrontPageCandidatesCached(targetSubmission.id),
+          hydratedSubmission.pages[0]
+            ? loadResolvedPreviewObjectUrl(
+              api.getPagePreviewUrl(hydratedSubmission.id, hydratedSubmission.pages[0].page_number),
+              api.getPageImageUrl(hydratedSubmission.id, hydratedSubmission.pages[0].page_number),
+            )
+            : Promise.resolve(null),
+        ]);
+      }));
+    };
+
+    void prefetchNextTargets();
+    return () => {
+      cancelled = true;
+    };
+  }, [nextFrontPageSubmission, sequentialNextFrontPageSubmission]);
 
   const queueRemainingCount = useMemo(
     () => frontPageSubmissions.filter((candidate) => !candidate.front_page_totals?.confirmed).length,
@@ -689,6 +745,21 @@ export function SubmissionFrontPageTotalsPage() {
       }))
       .filter((row) => row.objective_code);
 
+    const undoPayload = {
+      student_name: normalizedStudentName,
+      first_name: normalizedFirstName,
+      last_name: normalizedLastName,
+      overall_marks_awarded: savedTotals?.overall_marks_awarded ?? overallAwarded,
+      overall_max_marks: savedTotals?.overall_max_marks ?? overallMax,
+      objective_scores: (savedTotals?.objective_scores ?? cleanedScores).map((row) => ({
+        objective_code: row.objective_code,
+        marks_awarded: Number(row.marks_awarded),
+        max_marks: row.max_marks == null ? null : Number(row.max_marks),
+      })),
+      teacher_note: savedTotals?.teacher_note ?? teacherNote,
+      confirmed: savedTotals?.confirmed ?? false,
+    };
+
     if (cleanedScores.some((row) => !Number.isFinite(row.marks_awarded) || row.marks_awarded < 0)) {
       showError('Each outcome score needs a valid awarded mark.');
       return;
@@ -725,6 +796,14 @@ export function SubmissionFrontPageTotalsPage() {
       setIsEditing(false);
 
       const refreshedNextFrontPageSubmission = findNextFrontPageSubmission(refreshedExamSubmissions, submissionId);
+      const undoConfirmation = async () => {
+        await api.saveFrontPageTotals(submissionId, undoPayload);
+        frontPageSubmissionValueCache.delete(submissionId);
+        frontPageSubmissionPromiseCache.delete(submissionId);
+        frontPageCandidateValueCache.delete(submissionId);
+        frontPageCandidatePromiseCache.delete(submissionId);
+        showSuccess(`Reopened ${formatStudentName(refreshedSubmission.student_name)} for review.`);
+      };
 
       if (goNext && refreshedNextFrontPageSubmission) {
         const [nextSubmissionResult, nextCandidateResult] = await Promise.allSettled([
@@ -733,7 +812,10 @@ export function SubmissionFrontPageTotalsPage() {
         ]);
         const nextSubmissionState = nextSubmissionResult.status === 'fulfilled' ? nextSubmissionResult.value : refreshedNextFrontPageSubmission;
         const nextCandidateState = nextCandidateResult.status === 'fulfilled' ? nextCandidateResult.value : getCachedFrontPageCandidates(refreshedNextFrontPageSubmission.id);
-        showSuccess(`Confirmed ${formatStudentName(refreshedSubmission.student_name)}. Next up: ${formatStudentName(refreshedNextFrontPageSubmission.student_name)}.`);
+        showSuccess(
+          `Confirmed ${formatStudentName(refreshedSubmission.student_name)}. Next up: ${formatStudentName(refreshedNextFrontPageSubmission.student_name)}.`,
+          { actionLabel: 'Undo', onAction: undoConfirmation },
+        );
         navigate(
           `/submissions/${refreshedNextFrontPageSubmission.id}/front-page-totals?examId=${examId}&returnTo=${encodeURIComponent(returnTo)}&returnLabel=${encodeURIComponent(returnLabel)}`,
           {
@@ -747,7 +829,10 @@ export function SubmissionFrontPageTotalsPage() {
         return;
       }
 
-      showSuccess(goNext ? 'Validation complete. Queue finished.' : 'Front-page totals saved.');
+      showSuccess(
+        goNext ? 'Validation complete. Queue finished.' : 'Front-page totals saved.',
+        { actionLabel: 'Undo', onAction: undoConfirmation },
+      );
       if (goNext && !refreshedNextFrontPageSubmission) {
         navigate(returnTo);
       }

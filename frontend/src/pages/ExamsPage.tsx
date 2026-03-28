@@ -4,6 +4,7 @@ import { ApiError, api, buildApiUrl } from '../api/client';
 import { FileUploader } from '../components/FileUploader';
 import { Modal } from '../components/Modal';
 import { useToast } from '../components/ToastProvider';
+import { prefetchExamWorkspace, readHomeDataCache, writeHomeDataCache } from '../lib/appDataCache';
 import type { ClassListRead, ExamIntakeJobRead, ExamRead } from '../types/api';
 
 type WizardStep = 'creating' | 'uploading' | 'building_pages' | 'parsing' | 'done';
@@ -241,9 +242,10 @@ const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve
 
 
 export function ExamsPage() {
-  const [exams, setExams] = useState<ExamRead[]>([]);
-  const [classLists, setClassLists] = useState<ClassListRead[]>([]);
-  const [loading, setLoading] = useState(true);
+  const initialHomeCache = readHomeDataCache();
+  const [exams, setExams] = useState<ExamRead[]>(initialHomeCache?.exams ?? []);
+  const [classLists, setClassLists] = useState<ClassListRead[]>(initialHomeCache?.classLists ?? []);
+  const [loading, setLoading] = useState(!initialHomeCache);
   const [deletingExamId, setDeletingExamId] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -298,15 +300,16 @@ export function ExamsPage() {
 
   const loadHomeData = async () => {
     try {
-      setLoading(true);
+      setLoading((current) => (exams.length === 0 && classLists.length === 0 ? true : current));
       const [examRows, classListRows] = await Promise.all([
         api.getExams(),
         api.getClassLists(),
       ]);
       setExams(examRows);
       setClassLists(classListRows);
+      writeHomeDataCache(examRows, classListRows);
     } catch (loadError) {
-      showError(loadError instanceof Error ? loadError.message : 'Failed to load Home');
+      showError(loadError instanceof Error ? loadError.message : 'We couldn’t load your exam library.');
     } finally {
       setLoading(false);
     }
@@ -315,6 +318,11 @@ export function ExamsPage() {
   useEffect(() => {
     void loadHomeData();
   }, []);
+
+  useEffect(() => {
+    if (exams.length === 0 && classLists.length === 0) return;
+    writeHomeDataCache(exams, classLists);
+  }, [classLists, exams]);
 
   useEffect(() => {
     if (activeIntakeExamIds.length === 0) return;
@@ -368,17 +376,34 @@ export function ExamsPage() {
     };
   }, [activeIntakeExamIds.join(','), showError]);
 
+  useEffect(() => {
+    const likelyNextExamIds = filteredExams
+      .filter((exam) => {
+        const jobStatus = exam.intake_job?.status?.trim().toLowerCase();
+        return jobStatus !== 'failed';
+      })
+      .slice(0, 3)
+      .map((exam) => exam.id);
+    if (likelyNextExamIds.length === 0) return;
+    const timer = window.setTimeout(() => {
+      likelyNextExamIds.forEach((examId) => {
+        void prefetchExamWorkspace(examId);
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [filteredExams]);
+
   const handleDeleteExam = async (exam: ExamRead) => {
-    const confirmed = window.confirm(`Delete "${exam.name}" and all of its submissions, parsing jobs, and results? This cannot be undone.`);
+    const confirmed = window.confirm(`Delete "${exam.name}" and all associated submissions and results? This action cannot be undone.`);
     if (!confirmed) return;
 
     try {
       setDeletingExamId(exam.id);
       await api.deleteExam(exam.id);
       setExams((prev) => prev.filter((item) => item.id !== exam.id));
-      showSuccess(`Deleted "${exam.name}"`);
+      showSuccess(`"${exam.name}" was deleted.`);
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to delete exam');
+      showError(error instanceof Error ? error.message : 'We couldn’t delete this exam.');
     } finally {
       setDeletingExamId((current) => (current === exam.id ? null : current));
     }
@@ -527,12 +552,12 @@ export function ExamsPage() {
 
   const runCreateAndUpload = async () => {
     if (modalFiles.length === 0) {
-      showError('Add at least one paper file.');
+      showError('Add at least one file to create this exam.');
       return;
     }
 
     if (totalTooLarge && !allowLargeUpload) {
-      showWarning('Total files exceed 12 MB. Confirm to continue with upload.');
+      showWarning('This upload is larger than 12 MB. Confirm to continue.');
       return;
     }
 
@@ -569,7 +594,7 @@ export function ExamsPage() {
       await animateProgressTo(100, 720);
       updateCurrentStep('done');
       await delay(260);
-      showSuccess('Workspace created. Papers are preparing in Home.');
+      showSuccess('Your exam workspace is ready. Papers are now being prepared.');
       requestControllerRef.current = null;
       dismissModal();
       void loadHomeData();
@@ -590,7 +615,7 @@ export function ExamsPage() {
           bodySnippet: err instanceof Error ? err.message : String(err),
           isAbort: isAbortError(err),
         });
-        showError(`Network request failed. Step: ${stepName}. URL: ${stepEndpoint}`);
+        showError(`We couldn’t finish "${stepName}". Please check your connection and try again.`);
       } else if (err instanceof ApiError) {
         const details = JSON.stringify({
           method: err.method,
@@ -619,7 +644,7 @@ export function ExamsPage() {
           contentType: undefined,
           bodySnippet: err.responseBodySnippet,
         });
-        showError(`${stepName} failed (status ${err.status}) via ${err.method}`);
+        showError(`${stepName} failed. Please try again.`);
       } else {
         setWizardError({
           step: stepName,
@@ -630,7 +655,7 @@ export function ExamsPage() {
           status: 'unknown',
           bodySnippet: err instanceof Error ? err.message : String(err),
         });
-        showError(`${stepName} failed (status unknown)`);
+        showError(`${stepName} failed. Please try again.`);
       }
     } finally {
       stopProgressAnimation();
@@ -678,7 +703,7 @@ export function ExamsPage() {
         <div className="panel-title-row">
           <div>
             <h2 className="section-title">Test library</h2>
-            <p className="subtle-text">Search saved workspaces.</p>
+            <p className="subtle-text">Search saved tests.</p>
           </div>
           <span className="status-pill status-neutral">{filteredExams.length} match{filteredExams.length === 1 ? '' : 'es'}</span>
         </div>
@@ -783,7 +808,14 @@ export function ExamsPage() {
                   )}
                   <div className="actions-row workspace-card-actions" style={{ marginTop: 0 }}>
                     {canOpenWorkspace ? (
-                      <Link className="btn btn-secondary btn-sm" to={`/exams/${exam.id}`}>Open workspace</Link>
+                      <Link
+                        className="btn btn-secondary btn-sm"
+                        to={`/exams/${exam.id}`}
+                        onMouseEnter={() => { void prefetchExamWorkspace(exam.id); }}
+                        onFocus={() => { void prefetchExamWorkspace(exam.id); }}
+                      >
+                        Open workspace
+                      </Link>
                     ) : (
                       <button type="button" className="btn btn-secondary btn-sm" disabled>
                         {isPreparing ? 'Preparing workspace…' : 'Unavailable'}
@@ -797,9 +829,9 @@ export function ExamsPage() {
                           try {
                             const job = await api.retryExamIntakeJob(exam.id);
                             setExams((prev) => prev.map((item) => (item.id === exam.id ? { ...item, intake_job: job, status: 'DRAFT' } : item)));
-                            showSuccess(`Retry started for "${exam.name}"`);
+                            showSuccess(`We’ve restarted setup for "${exam.name}".`);
                           } catch (error) {
-                            showError(error instanceof Error ? error.message : 'Failed to retry intake');
+                            showError(error instanceof Error ? error.message : 'We couldn’t restart setup for this exam.');
                           }
                         }}
                         disabled={isDeleting}
@@ -825,7 +857,7 @@ export function ExamsPage() {
 
       {isModalOpen && (
         <Modal title="Create exam" onClose={closeModal}>
-          <p className="subtle-text">Upload papers to start a workspace.</p>
+          <p className="subtle-text">Upload student papers to create a new exam workspace.</p>
           <form onSubmit={onCreateAndUpload} className="stack">
             <div className="stack" style={{ gap: '.6rem' }}>
               <label>Paper files</label>
