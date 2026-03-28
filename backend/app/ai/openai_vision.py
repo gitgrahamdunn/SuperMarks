@@ -1246,13 +1246,18 @@ def extract_class_list_names_from_image(
             text = _normalize_model_response_text(response.output_text)
         payload = _load_json_with_fallbacks(text)
 
+    page_name_order = str(payload.get("page_name_order") or "").strip().lower()
     names = payload.get("student_names")
     if not isinstance(names, list):
         return []
-    return [_normalize_class_list_name_output(str(item)) for item in names if _normalize_class_list_name_output(str(item))]
+    return [
+        _normalize_class_list_name_output(str(item), page_name_order=page_name_order)
+        for item in names
+        if _normalize_class_list_name_output(str(item), page_name_order=page_name_order)
+    ]
 
 
-def _normalize_class_list_name_output(value: str) -> str:
+def _normalize_class_list_name_output(value: str, *, page_name_order: str = "") -> str:
     cleaned = " ".join(str(value or "").strip().split())
     cleaned = re.sub(r"^[,\s]+|[,\s]+$", "", cleaned)
     if not cleaned:
@@ -1260,7 +1265,12 @@ def _normalize_class_list_name_output(value: str) -> str:
     if "," in cleaned:
         last_name, first_name = [re.sub(r"^[,\s]+|[,\s]+$", "", part) for part in cleaned.split(",", 1)]
         return normalize_student_name(" ".join(part for part in (first_name, last_name) if part))
-    return normalize_student_name(cleaned)
+    normalized = normalize_student_name(cleaned)
+    if page_name_order == "last_first":
+        parts = normalized.split()
+        if len(parts) >= 2:
+            return normalize_student_name(" ".join(parts[1:] + [parts[0]]))
+    return normalized
 
 
 class OpenAIBulkNameDetector:
@@ -1594,8 +1604,13 @@ def build_class_list_names_response_json_schema() -> dict[str, Any]:
     schema = {
         "type": "object",
         "description": "Student names extracted from one class-list page.",
-        "propertyOrdering": ["student_names", "warnings"],
+        "propertyOrdering": ["page_name_order", "student_names", "warnings"],
         "properties": {
+            "page_name_order": {
+                "type": "string",
+                "description": "The page-wide roster format inferred from headers and repeated rows.",
+                "enum": ["first_last", "last_first", "mixed", "unknown"],
+            },
             "student_names": {
                 "type": "array",
                 "description": "All visible student names from the class list page in page order.",
@@ -1704,6 +1719,8 @@ def _build_front_page_name_retry_prompt(known_student_names: list[str] | None = 
 def _build_class_list_names_prompt() -> str:
     return (
         "Extract only the student names from this class-list page. "
+        "First determine the page-wide name order using headers and repeated row patterns. "
+        "Set page_name_order to first_last, last_first, mixed, or unknown. "
         "Return all visible student names in page order. "
         "Ignore headings, totals, percentages, marks, ids, email addresses, and teacher notes. "
         "If first and last names appear in separate columns on the same row, combine them into one full student name. "
