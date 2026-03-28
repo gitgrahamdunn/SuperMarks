@@ -118,6 +118,27 @@ def test_list_exams_includes_latest_intake_job_state(tmp_path) -> None:
     assert exam_row["intake_job"]["metrics"]["render_upload_ms"] == 11.2
 
 
+def test_get_exam_or_404_can_bypass_owned_resource_check_for_internal_jobs(tmp_path, monkeypatch) -> None:
+    settings.data_dir = str(tmp_path / "data")
+    settings.sqlite_path = str(tmp_path / "test.db")
+
+    db.engine = create_engine(settings.sqlite_url, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(db.engine)
+    monkeypatch.setenv("BACKEND_API_KEY", "test-api-key")
+
+    with Session(db.engine) as session:
+        exam = Exam(name="Owned Exam", owner_user_id=123)
+        session.add(exam)
+        session.commit()
+        session.refresh(exam)
+
+        with pytest.raises(HTTPException):
+            exams_router._get_exam_or_404(exam.id, session)
+
+        internal_exam = exams_router._get_exam_or_404(exam.id, session, check_access=False)
+        assert internal_exam.id == exam.id
+
+
 def test_list_exams_auto_resumes_stalled_intake_job(tmp_path, monkeypatch) -> None:
     settings.data_dir = str(tmp_path / "data")
     settings.sqlite_path = str(tmp_path / "test.db")

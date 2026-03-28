@@ -525,7 +525,7 @@ def _auto_resume_exam_intake_job_if_needed(job: ExamIntakeJob | None, session: D
         last_progress_at=now,
     )
 
-    exam = _get_exam_or_404(job.exam_id, session)
+    exam = _get_exam_or_404(job.exam_id, session, check_access=False)
     if exam and exam.status != ExamStatus.READY:
         exam_repo.update_exam(
             session,
@@ -649,7 +649,7 @@ def _set_exam_initial_review_ready(
 ) -> None:
     with open_repository_session() as session:
         job = exam_repo.get_exam_intake_job(session, job_id)
-        exam = _get_exam_or_404(exam_id, session)
+        exam = _get_exam_or_404(exam_id, session, check_access=False)
         if not job:
             return
         now = utcnow()
@@ -674,7 +674,7 @@ def _set_exam_initial_review_ready(
 def _mark_exam_review_ready_if_possible(exam_id: int, submission_ids: list[int], *, failed_submission_ids: list[int] | None = None) -> None:
     failed_submission_ids = failed_submission_ids or []
     with open_repository_session() as session:
-        exam = _get_exam_or_404(exam_id, session)
+        exam = _get_exam_or_404(exam_id, session, check_access=False)
         if not exam:
             return
         initial_ids, _remaining_ids, _threshold = _split_initial_and_remaining_review_ids(submission_ids)
@@ -1319,7 +1319,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
             if not _claim_exam_intake_job(job_id, runner_id, session):
                 return
             job = exam_repo.get_exam_intake_job(session, job_id)
-            exam = _get_exam_or_404(exam_id, session)
+            exam = _get_exam_or_404(exam_id, session, check_access=False)
             if not job or not exam:
                 return
             bulk = exam_repo.get_exam_bulk_upload(session, job.bulk_upload_id) if job.bulk_upload_id else None
@@ -1565,7 +1565,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
 
         with open_repository_session() as session:
             job = exam_repo.get_exam_intake_job(session, job_id)
-            exam = _get_exam_or_404(exam_id, session)
+            exam = _get_exam_or_404(exam_id, session, check_access=False)
             readiness_failures = list(initial_readiness_failures)
             ready_submission_count = len(ready_submission_ids)
             if not readiness_failures and remaining_submission_ids:
@@ -1615,7 +1615,7 @@ def _run_exam_intake_job_background(exam_id: int, job_id: int) -> None:
         intake_metrics["total_ms"] = round((time.perf_counter() - overall_started) * 1000, 1)
         with open_repository_session() as session:
             job = exam_repo.get_exam_intake_job(session, job_id)
-            exam = _get_exam_or_404(exam_id, session)
+            exam = _get_exam_or_404(exam_id, session, check_access=False)
             if job:
                 partial_ready = bool(job.initial_review_ready or job.review_ready)
                 failed_at = utcnow()
@@ -3879,9 +3879,9 @@ def _raise_parse_validation_error(*, status_code: int, detail: str, exam_exists:
     raise HTTPException(status_code=status_code, detail=payload)
 
 
-def _get_exam_or_404(exam_id: int, session: DbSession) -> Exam:
+def _get_exam_or_404(exam_id: int, session: DbSession, *, check_access: bool = True) -> Exam:
     exam = exam_repo.get_exam(session, exam_id)
-    if not exam or not can_access_owned_resource(exam.owner_user_id):
+    if not exam or (check_access and not can_access_owned_resource(exam.owner_user_id)):
         _raise_parse_validation_error(status_code=404, detail="Exam not found", exam_exists=False, job_exists=False)
     return exam
 
