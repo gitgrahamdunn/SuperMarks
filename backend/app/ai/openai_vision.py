@@ -1204,10 +1204,11 @@ def extract_class_list_names_from_image(
     *,
     model_override: str | None = None,
     thinking_level_override: str | None = None,
+    source_name_order: str | None = None,
 ) -> list[str]:
     normalized = normalize_key_page_image(image_path)
     model = model_override or _class_list_model()
-    prompt = _build_class_list_names_prompt()
+    prompt = _build_class_list_names_prompt(source_name_order=source_name_order)
     schema = build_class_list_names_response_json_schema()
 
     if _class_list_provider_name() == "gemini":
@@ -1250,10 +1251,11 @@ def extract_class_list_names_from_image(
     names = payload.get("student_names")
     if not isinstance(names, list):
         return []
+    effective_order = "" if str(source_name_order or "").strip() else page_name_order
     return [
-        _normalize_class_list_name_output(str(item), page_name_order=page_name_order)
+        _normalize_class_list_name_output(str(item), page_name_order=effective_order)
         for item in names
-        if _normalize_class_list_name_output(str(item), page_name_order=page_name_order)
+        if _normalize_class_list_name_output(str(item), page_name_order=effective_order)
     ]
 
 
@@ -1716,7 +1718,13 @@ def _build_front_page_name_retry_prompt(known_student_names: list[str] | None = 
     )
 
 
-def _build_class_list_names_prompt() -> str:
+def _build_class_list_names_prompt(*, source_name_order: str | None = None) -> str:
+    source_order = str(source_name_order or "").strip().lower().replace("-", "_")
+    source_hint = ""
+    if source_order == "last_first":
+        source_hint = " The roster format is Last Name, First Name. Reorder every returned name to First Middle Last."
+    elif source_order == "first_last":
+        source_hint = " The roster format is First Name, Last Name. Keep every returned name in First Middle Last order."
     return (
         "Extract only the student names from this class-list page. "
         "First determine the page-wide name order using headers and repeated row patterns. "
@@ -1727,6 +1735,7 @@ def _build_class_list_names_prompt() -> str:
         "Always return names in First Middle Last order. "
         "If the source page shows Last Name, First Name, reorder it to First Middle Last. "
         "Do not include commas in returned names. "
+        f"{source_hint}"
         "Return strict JSON only."
     )
 

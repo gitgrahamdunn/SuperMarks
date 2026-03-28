@@ -276,10 +276,10 @@ def _extract_class_list_names_from_uploads(
         source_path.write_bytes(payload)
         rendered_paths = _render_bulk_pages(source_path, class_list_dir / f"rendered_{index:04d}")
         for rendered_path in rendered_paths:
-            source_names.extend(extract_class_list_names_from_image(rendered_path))
+            source_names.extend(extract_class_list_names_from_image(rendered_path, source_name_order=roster_name_order))
 
     deduped_names = [nearest_known_student_name(name, source_names, minimum_ratio=1.0) for name in source_names]
-    return normalize_class_list_names(deduped_names, forced_order=roster_name_order), filenames
+    return normalize_class_list_names(deduped_names), filenames
 
 
 def _persist_exam_class_list(
