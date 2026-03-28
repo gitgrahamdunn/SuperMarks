@@ -1,15 +1,17 @@
-import { createContext, useContext, useMemo, useState } from 'react';
+import { createContext, useCallback, useContext, useMemo, useState } from 'react';
 
 interface Toast {
   id: number;
   message: string;
   type: 'success' | 'error' | 'warning';
+  actionLabel?: string;
+  onAction?: (() => void | Promise<void>) | undefined;
 }
 
 interface ToastContextValue {
-  showSuccess: (message: string) => void;
-  showError: (message: string) => void;
-  showWarning: (message: string) => void;
+  showSuccess: (message: string, action?: Pick<Toast, 'actionLabel' | 'onAction'>) => void;
+  showError: (message: string, action?: Pick<Toast, 'actionLabel' | 'onAction'>) => void;
+  showWarning: (message: string, action?: Pick<Toast, 'actionLabel' | 'onAction'>) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -17,21 +19,25 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const addToast = (message: string, type: Toast['type']) => {
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((toast) => toast.id !== id));
+  }, []);
+
+  const addToast = useCallback((message: string, type: Toast['type'], action?: Pick<Toast, 'actionLabel' | 'onAction'>) => {
     const id = Date.now() + Math.random();
-    setToasts((prev) => [...prev, { id, message, type }]);
+    setToasts((prev) => [...prev, { id, message, type, ...action }]);
     setTimeout(() => {
-      setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, 3000);
-  };
+      dismissToast(id);
+    }, 4200);
+  }, [dismissToast]);
 
   const value = useMemo(
     () => ({
-      showSuccess: (message: string) => addToast(message, 'success'),
-      showError: (message: string) => addToast(message, 'error'),
-      showWarning: (message: string) => addToast(message, 'warning'),
+      showSuccess: (message: string, action?: Pick<Toast, 'actionLabel' | 'onAction'>) => addToast(message, 'success', action),
+      showError: (message: string, action?: Pick<Toast, 'actionLabel' | 'onAction'>) => addToast(message, 'error', action),
+      showWarning: (message: string, action?: Pick<Toast, 'actionLabel' | 'onAction'>) => addToast(message, 'warning', action),
     }),
-    [],
+    [addToast],
   );
 
   return (
@@ -40,7 +46,19 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
       <div className="toast-stack" aria-live="polite" aria-atomic="true">
         {toasts.map((toast) => (
           <div key={toast.id} className={`toast toast-${toast.type}`}>
-            {toast.message}
+            <span>{toast.message}</span>
+            {toast.actionLabel && toast.onAction && (
+              <button
+                type="button"
+                className="toast-action"
+                onClick={() => {
+                  dismissToast(toast.id);
+                  void toast.onAction?.();
+                }}
+              >
+                {toast.actionLabel}
+              </button>
+            )}
           </div>
         ))}
       </div>

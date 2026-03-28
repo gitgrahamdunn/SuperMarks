@@ -24,7 +24,7 @@ function renderHostedApiConfigMessage(errorMessage: string): React.JSX.Element {
         {isHosted ? (
           <>
             <p>Hosted SuperMarks frontends are not self-contained. They need a public backend URL ending in <code>/api</code>.</p>
-            <p>For the current local-backend deployment model, point <code>VITE_API_BASE_URL</code> at the machine&apos;s public Funnel URL instead of expecting a hosted preview backend.</p>
+            <p>For the current hosted deployment model, point <code>VITE_API_BASE_URL</code> at the public Render backend URL ending in <code>/api</code>.</p>
           </>
         ) : null}
       </div>
@@ -62,7 +62,7 @@ function renderHostedBackendUnavailableMessage(
         {details.healthBody ? (
           <p><strong>Health response:</strong> <code>{details.healthBody}</code></p>
         ) : null}
-        <p>For the current deployment model, point the hosted frontend at a reachable public backend URL ending in <code>/api</code>.</p>
+        <p>For the current deployment model, point the hosted frontend at the public Render backend URL ending in <code>/api</code>.</p>
       </div>
     </div>
   );

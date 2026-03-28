@@ -1,5 +1,4 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import { FileUploader } from '../components/FileUploader';
 import { useToast } from '../components/ToastProvider';
@@ -40,7 +39,7 @@ export function ClassListsPage() {
       setIsLoading(true);
       setClassLists(await api.getClassLists());
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to load class lists');
+      showError(error instanceof Error ? error.message : 'We couldn’t load your class lists.');
     } finally {
       setIsLoading(false);
     }
@@ -58,7 +57,7 @@ export function ClassListsPage() {
   const onCreate = async (event: FormEvent) => {
     event.preventDefault();
     if (files.length === 0) {
-      showWarning('Add at least one class list file.');
+      showWarning('Add at least one file to create a class list.');
       return;
     }
     try {
@@ -67,9 +66,9 @@ export function ClassListsPage() {
       setClassLists((prev) => [created, ...prev.filter((item) => item.id !== created.id)]);
       setFiles([]);
       setClassListName('');
-      showSuccess(`Saved ${created.name || 'class list'}.`);
+      showSuccess(`${created.name || 'Class list'} is ready to use.`);
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to save class list');
+      showError(error instanceof Error ? error.message : 'We couldn’t save this class list.');
     } finally {
       setIsSaving(false);
     }
@@ -77,15 +76,15 @@ export function ClassListsPage() {
 
   const onDelete = async (classList: ClassListRead) => {
     if (!classList.id) return;
-    const confirmed = window.confirm(`Delete "${classList.name || 'this class list'}"?`);
+    const confirmed = window.confirm(`Delete "${classList.name || 'this class list'}"? This action cannot be undone.`);
     if (!confirmed) return;
     try {
       setDeletingId(classList.id);
       await api.deleteClassList(classList.id);
       setClassLists((prev) => prev.filter((item) => item.id !== classList.id));
-      showSuccess(`Deleted ${classList.name || 'class list'}.`);
+      showSuccess(`${classList.name || 'Class list'} was deleted.`);
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to delete class list');
+      showError(error instanceof Error ? error.message : 'We couldn’t delete this class list.');
     } finally {
       setDeletingId((current) => (current === classList.id ? null : current));
     }
@@ -106,7 +105,7 @@ export function ClassListsPage() {
         <div className="panel-title-row">
           <div>
             <h2 className="section-title">New class list</h2>
-            <p className="subtle-text">Drop in a roster photo, PDF, CSV, or Excel file.</p>
+            <p className="subtle-text">Drop in a photo (even a photo of a screen), PDF, or Excel file.</p>
           </div>
         </div>
         <form className="stack" onSubmit={onCreate}>
@@ -135,7 +134,6 @@ export function ClassListsPage() {
             <button type="submit" className="btn btn-primary" disabled={isSaving || files.length === 0}>
               {isSaving ? 'Saving…' : 'Create class list'}
             </button>
-            <Link className="btn btn-secondary" to="/">Back to Home</Link>
           </div>
         </form>
       </section>
@@ -154,7 +152,7 @@ export function ClassListsPage() {
         {!isLoading && sortedClassLists.length === 0 && (
           <div className="review-readonly-block">
             <strong>No class lists yet</strong>
-            <p className="subtle-text" style={{ marginTop: '.35rem' }}>Create one here, or build one from a checked test later.</p>
+            <p className="subtle-text" style={{ marginTop: '.35rem' }}>Create one here, or generate one later from confirmed student names.</p>
           </div>
         )}
 

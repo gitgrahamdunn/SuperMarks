@@ -12,7 +12,7 @@ export function SubmissionDetailPage() {
   const [searchParams] = useSearchParams();
   const [submission, setSubmission] = useState<SubmissionRead | null>(null);
   const returnTo = searchParams.get('returnTo')?.trim();
-  const returnLabel = searchParams.get('returnLabel')?.trim() || 'Back to Exam queue';
+  const returnLabel = searchParams.get('returnLabel')?.trim() || 'Back to exam workspace';
   const { showError, showSuccess } = useToast();
 
   const loadSubmission = async () => {
@@ -20,7 +20,7 @@ export function SubmissionDetailPage() {
       const submissionDetail = await api.getSubmission(submissionId);
       setSubmission(submissionDetail);
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to load submission');
+      showError(error instanceof Error ? error.message : 'We couldn’t load this submission.');
     }
   };
 
@@ -38,10 +38,10 @@ export function SubmissionDetailPage() {
       if (action === 'build-crops') await api.buildCrops(submissionId);
       if (action === 'transcribe') await api.transcribe(submissionId);
       if (action === 'grade') await api.grade(submissionId);
-      showSuccess(`Action ${action} completed`);
+      showSuccess('The requested step is complete.');
       await loadSubmission();
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Action failed');
+      showError(error instanceof Error ? error.message : 'We couldn’t complete that step.');
     }
   };
 
@@ -51,11 +51,11 @@ export function SubmissionDetailPage() {
       const result = await api.getSignedBlobUrl(pathname);
       window.open(result.url, '_blank', 'noopener,noreferrer');
     } catch (error) {
-      showError(error instanceof Error ? error.message : 'Failed to open file');
+      showError(error instanceof Error ? error.message : 'We couldn’t open that file.');
     }
   };
 
-  if (!submission) return <p>Loading...</p>;
+  if (!submission) return <p>Loading submission…</p>;
 
   return (
     <div className="workflow-shell">

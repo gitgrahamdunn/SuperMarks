@@ -31,11 +31,11 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
       return (
         <div className="contract-error-page">
           <div className="contract-error-card">
-            <h1>Something went wrong</h1>
-            <p>SuperMarks hit an unexpected error. Try reloading the page.</p>
+            <h1>We couldn’t load this page</h1>
+            <p>SuperMarks ran into an unexpected problem. Refresh the page and try again.</p>
             <pre>{this.state.errorMessage}</pre>
             <button type="button" className="btn btn-primary" onClick={() => window.location.reload()}>
-              Reload
+              Refresh page
             </button>
           </div>
         </div>
