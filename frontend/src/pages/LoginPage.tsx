@@ -7,10 +7,17 @@ type LoginPageProps = {
   providers: AuthProviderRead[];
   magicLinkEnabled?: boolean;
   devLoginEnabled?: boolean;
+  forceDevMode?: boolean;
   onAuthenticated?: () => Promise<void> | void;
 };
 
-export function LoginPage({ providers, magicLinkEnabled = false, devLoginEnabled = false, onAuthenticated }: LoginPageProps) {
+export function LoginPage({
+  providers,
+  magicLinkEnabled = false,
+  devLoginEnabled = false,
+  forceDevMode = false,
+  onAuthenticated,
+}: LoginPageProps) {
   const [email, setEmail] = useState('');
   const [emailPending, setEmailPending] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
@@ -68,64 +75,101 @@ export function LoginPage({ providers, magicLinkEnabled = false, devLoginEnabled
   };
 
   return (
-    <main className="contract-error-page">
-      <section className="contract-error-card" style={{ maxWidth: 460 }}>
-        <h1 onClick={maybeRevealDevMode} style={{ cursor: devLoginEnabled ? 'pointer' : 'default' }}>Sign in to SuperMarks</h1>
-        <p>Sign in to access your marking workspace, class results, and saved review queues.</p>
-        {magicLinkEnabled ? (
-          <form onSubmit={requestMagicLink} style={{ display: 'grid', gap: '.75rem', marginTop: '1rem' }}>
-            <label style={{ display: 'grid', gap: '.35rem', textAlign: 'left' }}>
-              <span>Email address</span>
-              <input
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@example.com"
-                autoComplete="email"
-                required
-              />
-            </label>
-            <button type="submit" className="btn btn-primary" disabled={emailPending}>
-              {emailPending ? 'Sending sign-in link…' : 'Send sign-in link'}
-            </button>
-            {emailSent ? <p className="subtle-text">Check your inbox for a secure sign-in link.</p> : null}
-            {errorMessage ? <p className="subtle-text" style={{ color: 'var(--danger-600, #b42318)' }}>{errorMessage}</p> : null}
-          </form>
-        ) : null}
-        {devModeRevealed && devLoginEnabled ? (
-          <form onSubmit={requestDevLogin} style={{ display: 'grid', gap: '.75rem', marginTop: '1rem' }}>
-            <label style={{ display: 'grid', gap: '.35rem', textAlign: 'left' }}>
-              <span>Developer access key</span>
-              <input
-                type="password"
-                value={devKey}
-                onChange={(event) => setDevKey(event.target.value)}
-                autoComplete="off"
-                required
-              />
-            </label>
-            <button type="submit" className="btn btn-secondary" disabled={devPending}>
-              {devPending ? 'Signing in…' : 'Continue'}
-            </button>
-          </form>
-        ) : null}
-        <div style={{ display: 'grid', gap: '.75rem', marginTop: '1rem' }}>
-          {providers.map((provider) => (
-            <button
-              key={provider.slug}
-              type="button"
-              className="btn btn-primary"
-              onClick={() => startLogin(provider.slug)}
-            >
-              Continue with {provider.name}
-            </button>
-          ))}
-        </div>
-        {providers.length === 0 && !magicLinkEnabled ? (
-          <p className="subtle-text" style={{ marginTop: '1rem' }}>
-            No sign-in methods are available right now.
+    <main className="login-landing-page">
+      <section className="login-landing-shell">
+        <div className="login-landing-hero">
+          <p className="page-eyebrow">SuperMarks</p>
+          <h1 className="page-title">Turn graded papers into organized results in minutes.</h1>
+          <p className="page-subtitle">
+            Upload graded tests, confirm names and totals, and export a clean table your class can use right away.
           </p>
-        ) : null}
+          <div className="login-landing-feature-grid">
+            <article className="metric-card">
+              <p className="metric-label">Upload</p>
+              <p className="login-landing-feature-title">Bring in photos, PDFs, or scans</p>
+              <p className="metric-meta">SuperMarks builds a workspace around the papers you already have.</p>
+            </article>
+            <article className="metric-card">
+              <p className="metric-label">Review</p>
+              <p className="login-landing-feature-title">Check names and totals quickly</p>
+              <p className="metric-meta">Work through flagged papers and confirm what should count.</p>
+            </article>
+            <article className="metric-card">
+              <p className="metric-label">Export</p>
+              <p className="login-landing-feature-title">Share a clean test table</p>
+              <p className="metric-meta">Download or share results without rebuilding the table by hand.</p>
+            </article>
+          </div>
+        </div>
+
+        <section className="login-landing-card">
+          <h2
+            className="section-title"
+            onClick={maybeRevealDevMode}
+            style={{ cursor: devLoginEnabled ? 'pointer' : 'default' }}
+          >
+            Sign in
+          </h2>
+          <p className="subtle-text">Access your saved tests, class lists, review queue, and exports.</p>
+
+          {magicLinkEnabled ? (
+            <form onSubmit={requestMagicLink} className="login-form-stack">
+              <label className="login-form-label">
+                <span>Email address</span>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                  required
+                />
+              </label>
+              <button type="submit" className="btn btn-primary" disabled={emailPending}>
+                {emailPending ? 'Sending sign-in link…' : 'Send sign-in link'}
+              </button>
+              {emailSent ? <p className="subtle-text">Check your inbox for a secure sign-in link.</p> : null}
+              {errorMessage ? <p className="login-error-text">{errorMessage}</p> : null}
+            </form>
+          ) : null}
+
+          {(forceDevMode || devModeRevealed) && devLoginEnabled ? (
+            <form onSubmit={requestDevLogin} className="login-form-stack">
+              <label className="login-form-label">
+                <span>Developer access key</span>
+                <input
+                  type="password"
+                  value={devKey}
+                  onChange={(event) => setDevKey(event.target.value)}
+                  autoComplete="off"
+                  required
+                />
+              </label>
+              <button type="submit" className="btn btn-secondary" disabled={devPending}>
+                {devPending ? 'Signing in…' : 'Continue'}
+              </button>
+            </form>
+          ) : null}
+
+          <div className="login-provider-stack">
+            {providers.map((provider) => (
+              <button
+                key={provider.slug}
+                type="button"
+                className="btn btn-primary"
+                onClick={() => startLogin(provider.slug)}
+              >
+                Continue with {provider.name}
+              </button>
+            ))}
+          </div>
+
+          {providers.length === 0 && !magicLinkEnabled ? (
+            <p className="subtle-text" style={{ marginTop: '1rem' }}>
+              No sign-in methods are available right now.
+            </p>
+          ) : null}
+        </section>
       </section>
     </main>
   );

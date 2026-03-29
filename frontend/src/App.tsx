@@ -1,5 +1,5 @@
-import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
-import { NavLink, Route, Routes, useLocation } from 'react-router-dom';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { NavLink, Route, Routes, useLocation, Navigate } from 'react-router-dom';
 import { api } from './api/client';
 import type { AuthStatusRead } from './types/api';
 
@@ -52,9 +52,12 @@ export default function App() {
   const [authState, setAuthState] = useState<AuthStatusRead | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const location = useLocation();
   const isFocusedWorkflowRoute = location.pathname.startsWith('/submissions/');
   const isAuthCallbackRoute = location.pathname.startsWith('/auth/callback');
+  const isDevLoginRoute = location.pathname === '/dev-login';
 
   const refreshAuthState = useCallback(async () => {
     setAuthLoading(true);
@@ -85,8 +88,33 @@ export default function App() {
     void refreshAuthState();
   }, [refreshAuthState]);
 
+  useEffect(() => {
+    setAccountMenuOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!accountMenuRef.current?.contains(event.target as Node)) {
+        setAccountMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+    };
+  }, [accountMenuOpen]);
+
   const authEnabled = Boolean(authState?.auth_enabled);
-  const shouldRenderLogin = !isAuthCallbackRoute && authEnabled && !authLoading && !authState?.authenticated;
+  const shouldRenderLogin = !isAuthCallbackRoute && !isDevLoginRoute && authEnabled && !authLoading && !authState?.authenticated;
+  const accountDisplayName = authState?.user?.given_name
+    || authState?.user?.full_name
+    || authState?.user?.email
+    || 'Signed in';
+  const accountInitial = useMemo(
+    () => (accountDisplayName.trim().charAt(0) || 'S').toUpperCase(),
+    [accountDisplayName],
+  );
 
   const handleLogout = useCallback(async () => {
     setLoggingOut(true);
@@ -120,6 +148,20 @@ export default function App() {
     );
   }
 
+  if (isDevLoginRoute && authEnabled && !authLoading && !authState?.authenticated) {
+    return (
+      <Suspense fallback={<LoadingShell />}>
+        <LoginPage
+          providers={authState?.providers ?? []}
+          magicLinkEnabled={authState?.magic_link_enabled ?? false}
+          devLoginEnabled={authState?.dev_login_enabled ?? false}
+          forceDevMode
+          onAuthenticated={refreshAuthState}
+        />
+      </Suspense>
+    );
+  }
+
   return (
     <div className="layout app-shell">
       <a href="#main-content" className="skip-link">Skip to content</a>
@@ -147,14 +189,30 @@ export default function App() {
           )}
         </div>
         {!isFocusedWorkflowRoute && authEnabled && authState?.user ? (
-          <div className="top-nav-right" style={{ display: 'flex', alignItems: 'center', gap: '.75rem' }}>
-            <div style={{ textAlign: 'right' }}>
-              <div style={{ fontWeight: 600, fontSize: '.92rem' }}>{authState.user.full_name || authState.user.email || 'Signed in'}</div>
-              {authState.user.email ? <div className="subtle-text" style={{ fontSize: '.8rem' }}>{authState.user.email}</div> : null}
+          <div className="top-nav-right">
+            <div className="account-menu" ref={accountMenuRef}>
+              <button
+                type="button"
+                className="account-menu-trigger"
+                aria-haspopup="menu"
+                aria-expanded={accountMenuOpen}
+                aria-label="Open account menu"
+                onClick={() => setAccountMenuOpen((current) => !current)}
+              >
+                <span className="account-avatar" aria-hidden="true">{accountInitial}</span>
+              </button>
+              {accountMenuOpen ? (
+                <div className="account-menu-panel" role="menu">
+                  <div className="account-menu-summary">
+                    <div className="account-menu-name">{accountDisplayName}</div>
+                    {authState.user.email ? <div className="account-menu-email">{authState.user.email}</div> : null}
+                  </div>
+                  <button type="button" className="account-menu-action" role="menuitem" onClick={() => void handleLogout()} disabled={loggingOut}>
+                    {loggingOut ? 'Signing out…' : 'Sign out'}
+                  </button>
+                </div>
+              ) : null}
             </div>
-            <button type="button" className="btn btn-secondary" onClick={() => void handleLogout()} disabled={loggingOut}>
-              {loggingOut ? 'Signing out…' : 'Sign out'}
-            </button>
           </div>
         ) : null}
       </header>
@@ -163,6 +221,7 @@ export default function App() {
         <Suspense fallback={<LoadingShell />}>
           <Routes>
             <Route path="/auth/callback" element={<AuthCallbackPage onAuthenticated={refreshAuthState} />} />
+            <Route path="/dev-login" element={authEnabled && authState?.authenticated ? <Navigate to="/" replace /> : <LoadingShell />} />
             <Route path="/" element={<ExamsPage />} />
             <Route path="/class-lists" element={<ClassListsPage />} />
             <Route path="/exams/:examId" element={<ExamDetailPage />} />

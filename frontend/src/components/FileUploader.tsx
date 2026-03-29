@@ -33,6 +33,17 @@ export function FileUploader({
 }: FileUploaderProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isCoarsePointer, setIsCoarsePointer] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(pointer: coarse)');
+    const sync = () => setIsCoarsePointer(mediaQuery.matches);
+    sync();
+    mediaQuery.addEventListener?.('change', sync);
+    return () => {
+      mediaQuery.removeEventListener?.('change', sync);
+    };
+  }, []);
 
   const imagePreviews = useMemo(
     () =>
@@ -87,7 +98,7 @@ export function FileUploader({
   return (
     <div className="stack">
       <div
-        className={`dropzone ${isDragging ? 'dropzone-active' : ''}`}
+        className={`dropzone ${isDragging ? 'dropzone-active' : ''}${isCoarsePointer ? ' dropzone-mobile' : ''}`}
         onDragOver={(event) => {
           event.preventDefault();
           if (!disabled) {
@@ -106,8 +117,26 @@ export function FileUploader({
         }}
         onClick={() => !disabled && inputRef.current?.click()}
       >
-        <p><strong>{multiple ? 'Drag & drop files' : `Drag & drop one ${singularLabel}`}</strong> or click to browse.</p>
-        <p className="subtle-text">Accepted: {acceptedLabel}</p>
+        <div className="dropzone-copy">
+          <p className="dropzone-title">
+            <strong>{isCoarsePointer ? `Tap to add ${multiple ? 'files' : singularLabel}` : `${multiple ? 'Drag & drop files' : `Drag & drop one ${singularLabel}`}`}</strong>
+          </p>
+          <p className="subtle-text dropzone-subtitle">
+            {isCoarsePointer ? 'You can also take a photo or choose from your files.' : 'Or click to browse.'}
+          </p>
+          <p className="subtle-text dropzone-accepted">Accepted: {acceptedLabel}</p>
+        </div>
+        <button
+          type="button"
+          className="btn btn-primary dropzone-cta"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (!disabled) inputRef.current?.click();
+          }}
+          disabled={disabled}
+        >
+          {isCoarsePointer ? 'Add files' : 'Browse files'}
+        </button>
         <input
           ref={inputRef}
           id="exam-key-files"

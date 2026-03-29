@@ -141,10 +141,10 @@ const normalizeExamStatus = (exam: ExamRead) => {
     return { label: 'Working', tone: 'status-in-progress' };
   }
   if (normalized === 'ready' || normalized.includes('confirm')) {
-    return { label: 'Ready to review', tone: 'status-complete' };
+    return { label: 'Ready', tone: 'status-ready' };
   }
-  if (normalized.includes('complete') || normalized.includes('done')) {
-    return { label: 'Ready to review', tone: 'status-complete' };
+  if (normalized.includes('complete') || normalized.includes('done') || normalized.includes('reviewed')) {
+    return { label: 'Reviewed', tone: 'status-complete' };
   }
   if (normalized.includes('progress') || normalized.includes('review')) {
     return { label: 'Ready', tone: 'status-ready' };
@@ -158,7 +158,7 @@ const normalizeExamStatus = (exam: ExamRead) => {
 const libraryStatusClassName = (label: string) => {
   if (label === 'Working') return 'status-library-working';
   if (label === 'Ready') return 'status-library-ready';
-  if (label === 'Ready to review') return 'status-library-checked';
+  if (label === 'Reviewed') return 'status-library-checked';
   return '';
 };
 
@@ -677,38 +677,16 @@ export function ExamsPage() {
   return (
     <div className="page-stack">
       <section className="card card--hero stack">
-        <div className="page-header">
-          <div>
-            <h1 className="page-title">Home</h1>
-            <p className="page-subtitle">Upload papers, confirm totals, and export the class table.</p>
-          </div>
+        <div className="actions-row" style={{ marginTop: 0 }}>
+          <button type="button" className="btn btn-primary" onClick={() => setIsModalOpen(true)}>
+            Create exam
+          </button>
         </div>
-
-        <section className="card stack">
-          <div className="panel-title-row">
-            <div>
-              <h2 className="section-title">Start a new exam</h2>
-              <p className="subtle-text">Upload graded papers to create a workspace.</p>
-            </div>
-          </div>
-          <div className="actions-row" style={{ marginTop: 0 }}>
-            <button type="button" className="btn btn-primary" onClick={() => setIsModalOpen(true)}>
-              Create exam
-            </button>
-          </div>
-        </section>
+        <p className="subtle-text">Upload graded papers to get started</p>
       </section>
 
       <section className="card stack">
-        <div className="panel-title-row">
-          <div>
-            <h2 className="section-title">Test library</h2>
-            <p className="subtle-text">Search saved tests.</p>
-          </div>
-          <span className="status-pill status-neutral">{filteredExams.length} match{filteredExams.length === 1 ? '' : 'es'}</span>
-        </div>
-
-        <label htmlFor="exam-search">Search tests</label>
+        <h2 className="section-title">Test library</h2>
         <input
           id="exam-search"
           value={searchTerm}

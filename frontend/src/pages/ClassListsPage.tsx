@@ -2,7 +2,7 @@ import { FormEvent, Fragment, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import { FileUploader } from '../components/FileUploader';
 import { useToast } from '../components/ToastProvider';
-import { compareStudentNamesByLastName, formatStudentName } from '../lib/nameFormat';
+import { formatStudentName } from '../lib/nameFormat';
 import type { ClassListRead } from '../types/api';
 
 type ClassListEditorRow = {
@@ -34,6 +34,14 @@ const formatDate = (value?: string | null) => {
   });
 };
 
+const compareEditorRowsByLastName = (left: ClassListEditorRow, right: ClassListEditorRow) => {
+  const leftLast = sanitizeNamePart(left.lastName).toLocaleLowerCase();
+  const rightLast = sanitizeNamePart(right.lastName).toLocaleLowerCase();
+  const leftFirst = sanitizeNamePart(left.firstName).toLocaleLowerCase();
+  const rightFirst = sanitizeNamePart(right.firstName).toLocaleLowerCase();
+  return leftLast.localeCompare(rightLast) || leftFirst.localeCompare(rightFirst);
+};
+
 export function ClassListsPage() {
   const [classLists, setClassLists] = useState<ClassListRead[]>([]);
   const [files, setFiles] = useState<File[]>([]);
@@ -41,6 +49,7 @@ export function ClassListsPage() {
   const [activeClassListId, setActiveClassListId] = useState<number | null>(null);
   const [editorName, setEditorName] = useState('');
   const [editorRows, setEditorRows] = useState<ClassListEditorRow[]>([]);
+  const [draftRow, setDraftRow] = useState<ClassListEditorRow | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
@@ -76,8 +85,8 @@ export function ClassListsPage() {
     }
     return {
       id: `row-${index}`,
-      firstName: parts.join(' ') || '',
-      lastName: '',
+      firstName: parts[0] || '',
+      lastName: parts.slice(1).join(' ') || '',
     };
   };
 
@@ -89,9 +98,14 @@ export function ClassListsPage() {
   );
 
   const normalizeNamesForUi = (names: string[]) => names
-    .map((name) => formatStudentName(name))
-    .filter(Boolean)
-    .sort(compareStudentNamesByLastName);
+    .map((name, index) => splitNameToEditorRow(name, index))
+    .sort(compareEditorRowsByLastName)
+    .map((row) => composeNameFromEditorRow(row))
+    .filter(Boolean);
+
+  const sortEditorRowsByLastName = (rows: ClassListEditorRow[]) => [...rows].sort((left, right) => (
+    compareEditorRowsByLastName(left, right)
+  ));
 
   const normalizeClassListForUi = (classList: ClassListRead): ClassListRead => {
     const names = normalizeNamesForUi(classList.names);
@@ -167,19 +181,22 @@ export function ClassListsPage() {
   const openClassList = (classList: ClassListRead) => {
     setActiveClassListId(classList.id ?? null);
     setEditorName(classList.name || '');
-    setEditorRows(classList.names.map((name, index) => splitNameToEditorRow(name, index)));
+    setEditorRows(sortEditorRowsByLastName(classList.names.map((name, index) => splitNameToEditorRow(name, index))));
+    setDraftRow(null);
   };
 
   const closeEditor = () => {
     setActiveClassListId(null);
     setEditorName('');
     setEditorRows([]);
+    setDraftRow(null);
   };
 
   const onSaveClassList = async () => {
     if (!activeClassList?.id) return;
     const normalizedNames = normalizeNamesForUi(
-      editorRows
+      [draftRow, ...editorRows]
+        .filter((row): row is ClassListEditorRow => Boolean(row))
         .map((row) => composeNameFromEditorRow(row))
         .filter(Boolean),
     );
@@ -195,7 +212,8 @@ export function ClassListsPage() {
       }));
       setClassLists((prev) => prev.map((classList) => (classList.id === updated.id ? updated : classList)));
       setEditorName(updated.name || '');
-      setEditorRows(updated.names.map((name, index) => splitNameToEditorRow(name, index)));
+      setEditorRows(sortEditorRowsByLastName(updated.names.map((name, index) => splitNameToEditorRow(name, index))));
+      setDraftRow(null);
       showSuccess(`${updated.name || 'Class list'} was updated.`);
     } catch (error) {
       showError(error instanceof Error ? error.message : 'We couldn’t save this class list.');
@@ -205,23 +223,34 @@ export function ClassListsPage() {
   };
 
   const updateEditorRow = (rowId: string, field: keyof Omit<ClassListEditorRow, 'id'>, value: string) => {
-    setEditorRows((current) => current.map((row) => (row.id === rowId ? { ...row, [field]: sanitizeNamePart(value) } : row)));
+    setEditorRows((current) => sortEditorRowsByLastName(
+      current.map((row) => (row.id === rowId ? { ...row, [field]: sanitizeNamePart(value) } : row)),
+    ));
+  };
+
+  const updateDraftRow = (field: keyof Omit<ClassListEditorRow, 'id'>, value: string) => {
+    setDraftRow((current) => (current ? { ...current, [field]: sanitizeNamePart(value) } : current));
   };
 
   const addEditorRow = () => {
-    setEditorRows((current) => [...current, { id: `row-${Date.now()}-${current.length}`, firstName: '', lastName: '' }]);
+    setDraftRow({ id: `row-${Date.now()}-${editorRows.length}`, firstName: '', lastName: '' });
   };
 
   const removeEditorRow = (rowId: string) => {
-    setEditorRows((current) => current.filter((row) => row.id !== rowId));
+    setEditorRows((current) => sortEditorRowsByLastName(current.filter((row) => row.id !== rowId)));
   };
 
   const swapFirstLastForAllRows = () => {
-    setEditorRows((current) => current.map((row) => ({
+    setEditorRows((current) => sortEditorRowsByLastName(current.map((row) => ({
       ...row,
       firstName: sanitizeNamePart(row.lastName),
       lastName: sanitizeNamePart(row.firstName),
-    })));
+    }))));
+    setDraftRow((current) => (current ? {
+      ...current,
+      firstName: sanitizeNamePart(current.lastName),
+      lastName: sanitizeNamePart(current.firstName),
+    } : current));
     showSuccess('Swapped first and last names for this class list.');
   };
 
@@ -267,7 +296,16 @@ export function ClassListsPage() {
           />
           <div className="actions-row" style={{ marginTop: 0 }}>
             <button type="submit" className="btn btn-primary" disabled={isSaving || files.length === 0}>
-              {isSaving ? 'Saving…' : 'Create class list'}
+              {isSaving ? (
+                <>
+                  <span>Thinking...</span>
+                  <span className="thinking-indicator" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </span>
+                </>
+              ) : 'Create class list'}
             </button>
           </div>
         </form>
@@ -382,6 +420,40 @@ export function ClassListsPage() {
                             </tr>
                           </thead>
                           <tbody>
+                            {draftRow && (
+                              <tr key={draftRow.id}>
+                                <td>
+                                  <input
+                                    className="class-list-editor-input"
+                                    value={draftRow.firstName}
+                                    onChange={(event) => updateDraftRow('firstName', event.target.value)}
+                                    placeholder="First"
+                                    disabled={isUpdating}
+                                  />
+                                </td>
+                                <td>
+                                  <input
+                                    className="class-list-editor-input"
+                                    value={draftRow.lastName}
+                                    onChange={(event) => updateDraftRow('lastName', event.target.value)}
+                                    placeholder="Last"
+                                    disabled={isUpdating}
+                                  />
+                                </td>
+                                <td className="class-list-editor-action-cell">
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm class-list-editor-delete"
+                                    onClick={() => setDraftRow(null)}
+                                    disabled={isUpdating}
+                                    aria-label="Cancel new name"
+                                    title="Cancel new name"
+                                  >
+                                    ×
+                                  </button>
+                                </td>
+                              </tr>
+                            )}
                             {editorRows.map((row) => (
                               <tr key={row.id}>
                                 <td>
